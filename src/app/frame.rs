@@ -42,8 +42,9 @@ pub fn tick(
     {
         use crate::views::home::playlist as pl;
         // Scroller name is content-scoped (`MainNav::detail_scroll_node`)
-        // so rebuilds preserve the offset while navigation resets it.
-        let scroll_node = state.router.nav.borrow().detail_scroll_node();
+        // so rebuilds preserve the offset while navigation resets it. Read
+        // the cached name (no per-frame `format!`).
+        let scroll_node = state.router.detail_scroll_node();
         if let Some(id) = scroll_node.as_deref().and_then(|n| ctx.node(n)) {
             // scroll offset is physical px; collapse range is logical.
             let off = ctx.tree.scroll_offset(id)[1] / ctx.scale.max(1.0);
@@ -60,6 +61,12 @@ pub fn tick(
         } else if state.router.detail_collapse.get() != 0.0 {
             state.router.detail_collapse.set(0.0);
         }
+    }
+    // Publish a background cache-usage scan (settings open / clear /
+    // relocate dispatched it off-thread) and repaint the storage bar.
+    if let Some(usage) = state.settings.take_pending_usage() {
+        state.settings.cache_usage.set(usage);
+        cx.rebuild();
     }
     // Apply a cache relocation picked by the folder dialog: point the disk
     // cache at the new dir, persist it, rebuild so the storage bar refreshes.
@@ -108,11 +115,13 @@ pub fn tick(
     // A streamed page appended rows → re-materialize the open detail
     // page's lazy rows, turning any already-on-screen skeletons (fast
     // scroll outran the stream) into real tracks.
-    if state.library.rows_appended.take()
-        && let Some(name) = state.router.nav.borrow().detail_scroll_node()
-        && let Some(id) = ctx.node(&name)
-    {
-        ctx.tree.invalidate_lazy_list(id);
+    if state.library.rows_appended.take() {
+        let scroll_node = state.router.detail_scroll_node();
+        if let Some(name) = scroll_node.as_deref()
+            && let Some(id) = ctx.node(name)
+        {
+            ctx.tree.invalidate_lazy_list(id);
+        }
     }
     // Pulse the skeleton rows while the open detail page is still
     // streaming. Started/stopped on the state edge (not re-armed every
@@ -128,7 +137,7 @@ pub fn tick(
         let queue_loading = matches!(*state.router.nav.borrow(), crate::views::MainNav::Queue)
             && state.library.queue.borrow().is_none();
         let want = queue_loading
-            || (streaming && state.router.nav.borrow().detail_scroll_node().is_some());
+            || (streaming && state.router.detail_scroll_node().is_some());
         if want != state.library.pulse_on.get() {
             let pulse = &state.library.skeleton_pulse;
             if want {

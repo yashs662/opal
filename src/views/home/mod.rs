@@ -397,16 +397,18 @@ impl HomeView {
             Rc::new(move || {
                 // Point the picker at the current track (uri + bare id for the
                 // Liked-Songs row + header), then rebuild so the popup mounts.
-                if let Some(p) = state.player_ui.snapshot.borrow().as_ref() {
+                if let Some(target) = state.player_ui.with_snapshot(|p| {
                     let id = crate::api::track_id_from_uri(&p.track_id)
                         .unwrap_or_default()
                         .to_string();
-                    state.membership.set_target(crate::model::MembershipTarget {
+                    crate::model::MembershipTarget {
                         uri: p.track_id.clone(),
                         id,
                         name: p.name.clone(),
                         artist: p.artist.clone(),
-                    });
+                    }
+                }) {
+                    state.membership.set_target(target);
                 }
                 rebuild.set(true);
             })
@@ -557,8 +559,9 @@ impl HomeView {
             let state = state.clone();
             let rebuild = rebuild.clone();
             Rc::new(move || {
-                let freed = state.settings.clear_cache();
-                log::info!("cleared disk cache (freed {freed} bytes)");
+                // Off-thread clear + re-scan; the storage bar repaints when
+                // the fresh usage lands (frame tick → `take_pending_usage`).
+                state.settings.clear_cache();
                 rebuild.set(true);
             })
         };

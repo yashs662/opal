@@ -7,6 +7,7 @@ mod album_art;
 mod api;
 mod app;
 mod auth;
+mod bounded;
 mod canvas;
 mod cluster_listener;
 mod constants;
@@ -207,6 +208,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (`state.router.view`) selects which one builds each scene rebuild —
     // `main` no longer composes any UI itself.
     let wake = app.wake_handle();
+    // Hand the loop wake to settings so its off-thread cache scans can
+    // nudge the frame loop when their result is ready.
+    state.settings.set_wake(wake.clone());
     let home_view = views::home::HomeView::new(
         state.clone(),
         worker.clone(),

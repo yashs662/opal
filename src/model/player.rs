@@ -23,6 +23,10 @@ pub struct PlayerModel {
     pub is_playing: Signal<bool>,
     pub shuffle: Signal<bool>,
     pub repeat_on: Signal<bool>,
+    /// True only in the Track (repeat-one) mode — drives the player-bar
+    /// glyph swap between the repeat-all and repeat-1 icons. `repeat_on`
+    /// still gates the accent tint (on for both Context and Track).
+    pub repeat_track: Signal<bool>,
     /// Playback progress as a fraction of the track (0.0..=1.0).
     pub progress: Signal<f32>,
     /// Current track duration (ms), as a signal so the seek tooltip's
@@ -102,6 +106,7 @@ impl PlayerModel {
         progress_ms: u64,
         duration_ms: u64,
         volume: f32,
+        restored: Option<CurrentlyPlaying>,
     ) -> Self {
         Self {
             title: TextSignal::new(title),
@@ -109,6 +114,7 @@ impl PlayerModel {
             is_playing: Signal::new(false),
             shuffle: Signal::new(false),
             repeat_on: Signal::new(false),
+            repeat_track: Signal::new(false),
             progress: Signal::new(progress),
             duration_ms: Signal::new(duration_ms as f32),
             seek_preview: Signal::new(0.0),
@@ -129,9 +135,54 @@ impl PlayerModel {
                 "{}%",
                 (volume.clamp(0.0, 1.0) * 100.0).round() as u32
             )),
-            snapshot: RefCell::new(None),
+            // The cold-start seed counts as the *current* track (paused) so
+            // the heart/membership/canvas checks fire on launch — see
+            // `AppState::from_prefs`. The first live cluster push overwrites it.
+            snapshot: RefCell::new(restored),
             live: Cell::new(false),
         }
+    }
+
+    // --- snapshot access ----------------------------------------------
+    // The authoritative `snapshot` cell is read/written from many handlers.
+    // These accessors keep every borrow scoped to a single call so a
+    // double-borrow can't be introduced by accident, and give the call
+    // sites intent-named methods instead of `snapshot.borrow().as_ref()…`.
+
+    /// Read the live snapshot under a short borrow, mapping it to `T`.
+    /// `None` when nothing is loaded.
+    pub fn with_snapshot<T>(&self, f: impl FnOnce(&CurrentlyPlaying) -> T) -> Option<T> {
+        self.snapshot.borrow().as_ref().map(f)
+    }
+
+    /// The current track's `spotify:track:…` uri, if a snapshot is loaded.
+    pub fn current_track_uri(&self) -> Option<String> {
+        self.snapshot.borrow().as_ref().map(|p| p.track_id.clone())
+    }
+
+    /// Whether a snapshot is loaded at all (something is playing or was
+    /// restored from the cold-start seed).
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot.borrow().is_some()
+    }
+
+    /// Clone the whole live snapshot — for rollback paths that need the
+    /// full struct back.
+    pub fn snapshot_clone(&self) -> Option<CurrentlyPlaying> {
+        self.snapshot.borrow().clone()
+    }
+
+    /// Replace the live snapshot (an authoritative cluster push landed).
+    pub fn set_snapshot(&self, snapshot: Option<CurrentlyPlaying>) {
+        *self.snapshot.borrow_mut() = snapshot;
+    }
+
+    /// Mutate the live snapshot in place under a short borrow, if one is
+    /// loaded. The borrow is released before this returns, so the caller
+    /// can safely touch other player signals afterwards (the pattern the
+    /// `TrackDetails` patch relies on).
+    pub fn patch_snapshot<T>(&self, f: impl FnOnce(&mut CurrentlyPlaying) -> T) -> Option<T> {
+        self.snapshot.borrow_mut().as_mut().map(f)
     }
 
     /// Set the volume fraction + its "NN%" tooltip label together — the
@@ -166,6 +217,7 @@ impl PlayerModel {
         self.is_playing.set(p.is_playing);
         self.shuffle.set(p.shuffle);
         self.repeat_on.set(!matches!(p.repeat, RepeatMode::Off));
+        self.repeat_track.set(matches!(p.repeat, RepeatMode::Track));
         self.duration_ms.set(p.duration_ms as f32);
         self.total_label.set(fmt_ms(p.duration_ms as u32).as_str());
 
@@ -230,6 +282,7 @@ impl PlayerModel {
             RepeatMode::Track => RepeatMode::Off,
         };
         self.repeat_on.set(!matches!(next, RepeatMode::Off));
+        self.repeat_track.set(matches!(next, RepeatMode::Track));
         next
     }
 

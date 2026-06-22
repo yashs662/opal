@@ -41,7 +41,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // pretend it did. With no snapshot at all, nothing is playing
             // anywhere: park the transport stopped.
             log::warn!("rolling back optimistic UI for failed {cmd:?}");
-            let snap = state.player_ui.snapshot.borrow().clone();
+            let snap = state.player_ui.snapshot_clone();
             match snap.as_ref() {
                 Some(p) => state.player_ui.sync(p, cx.tl, cx.now),
                 None => state.player_ui.stopped(cx.tl),
@@ -84,13 +84,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // liked + membership need the API/index. Resolve them now for the
             // restored track (membership also re-resolves when the index
             // lands; this covers the fresh-cache fast path).
-            if let Some(uri) = state
-                .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .map(|p| p.track_id.clone())
-            {
+            if let Some(uri) = state.player_ui.current_track_uri() {
                 if let Some(id) = track_id_from_uri(&uri) {
                     worker.check_saved(auth.access_token.clone(), id.to_string());
                 }
@@ -169,11 +163,12 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // freezes the bar as stopped.)
             let claim = state
                 .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .filter(|p| p.is_playing)
-                .map(|p| (p.track_id.clone(), p.live_progress_ms() as u32, p.context_uri.clone()));
+                .with_snapshot(|p| {
+                    p.is_playing.then(|| {
+                        (p.track_id.clone(), p.live_progress_ms() as u32, p.context_uri.clone())
+                    })
+                })
+                .flatten();
             if let Some((track_uri, position_ms, context_uri)) = claim {
                 log::info!("active device vanished while playing — taking over on Opal (paused)");
                 worker.claim_playback_paused(context_uri, track_uri, position_ms);
@@ -184,10 +179,8 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // we've skipped past must not flip the new track's state.
             let current = state
                 .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .and_then(|p| track_id_from_uri(&p.track_id).map(|s| s.to_string()));
+                .with_snapshot(|p| track_id_from_uri(&p.track_id).map(|s| s.to_string()))
+                .flatten();
             if current.as_deref() == Some(track_id.as_str()) {
                 state.player_ui.liked.set(saved);
                 // Liked is one of the heart's "in library" inputs — refresh
@@ -216,13 +209,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             log::info!("playlist-membership ready: {} playlists", playlists.len());
             state.membership.set_playlists(playlists);
             // Resolve the current track's membership now that the index is up.
-            if let Some(uri) = state
-                .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .map(|p| p.track_id.clone())
-            {
+            if let Some(uri) = state.player_ui.current_track_uri() {
                 worker.query_membership(uri);
             }
             // The picker may already be open waiting on its rows.
@@ -235,12 +222,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             playlist_ids,
         } => {
             // Ignore a late answer for a track we've skipped past.
-            let current = state
-                .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .map(|p| p.track_id.clone());
+            let current = state.player_ui.current_track_uri();
             if current.as_deref() == Some(track_uri.as_str()) {
                 state
                     .membership
@@ -257,12 +239,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         } => {
             // Undo the optimistic checkbox flip (re-toggle the opposite way),
             // but only if we're still on that track.
-            let current = state
-                .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .map(|p| p.track_id.clone());
+            let current = state.player_ui.current_track_uri();
             if current.as_deref() == Some(track_uri.as_str()) {
                 state
                     .membership
@@ -309,15 +286,21 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 // inherit the display fields from the live snapshot
                 // instead of blanking the chrome.
                 if p.name.is_empty()
-                    && let Some(prev) = state.player_ui.snapshot.borrow().as_ref()
-                    && prev.track_id == p.track_id
+                    && let Some((name, artist, image)) = state
+                        .player_ui
+                        .with_snapshot(|prev| {
+                            (prev.track_id == p.track_id).then(|| {
+                                (prev.name.clone(), prev.artist.clone(), prev.album_image_url.clone())
+                            })
+                        })
+                        .flatten()
                 {
-                    p.name = prev.name.clone();
+                    p.name = name;
                     if p.artist.is_empty() {
-                        p.artist = prev.artist.clone();
+                        p.artist = artist;
                     }
                     if p.album_image_url.is_none() {
-                        p.album_image_url = prev.album_image_url.clone();
+                        p.album_image_url = image;
                     }
                 }
                 if let Some(id) = track_id_from_uri(&p.track_id) {
@@ -369,10 +352,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 // until the check returns; the worker echo flips it).
                 let track_changed = state
                     .player_ui
-                    .snapshot
-                    .borrow()
-                    .as_ref()
-                    .map(|prev| prev.track_id != p.track_id)
+                    .with_snapshot(|prev| prev.track_id != p.track_id)
                     .unwrap_or(true);
                 if track_changed {
                     state.player_ui.liked.set(false);
@@ -432,7 +412,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 Some(p) => state.player_ui.sync(p, cx.tl, cx.now),
                 None => state.player_ui.stopped(cx.tl),
             }
-            *state.player_ui.snapshot.borrow_mut() = player;
+            state.player_ui.set_snapshot(player);
         }
         WorkerResponse::AlbumArtReady {
             key,
@@ -459,14 +439,13 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // orphan handle for the atlas to evict.
             let live_match = state
                 .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .and_then(|p| p.album_image_url.as_ref().map(|u| album_art::cache_key(u)))
-                .map(|k| k == key)
+                .with_snapshot(|p| {
+                    p.album_image_url.as_ref().map(|u| album_art::cache_key(u)).as_deref()
+                        == Some(key.as_str())
+                })
                 .unwrap_or(false);
             let cold_start_match = !live_match
-                && state.player_ui.snapshot.borrow().is_none()
+                && !state.player_ui.has_snapshot()
                 && state
                     .prefs
                     .data
@@ -502,11 +481,10 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             let is_current = state.art.is_shown(&key)
                 || state
                     .player_ui
-                    .snapshot
-                    .borrow()
-                    .as_ref()
-                    .and_then(|p| p.album_image_url.as_ref().map(|u| album_art::cache_key(u)))
-                    .map(|k| k == key)
+                    .with_snapshot(|p| {
+                        p.album_image_url.as_ref().map(|u| album_art::cache_key(u)).as_deref()
+                            == Some(key.as_str())
+                    })
                     .unwrap_or(false);
             if is_current {
                 state.backdrop.set_accent(accent, cx.tl, cx.now);
@@ -520,11 +498,8 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // contradict, so accept it — that's the case this restores.
             let matches_current = state
                 .player_ui
-                .snapshot
-                .borrow()
-                .as_ref()
-                .and_then(|p| track_id_from_uri(&p.track_id))
-                .map(|cur| cur == track_id)
+                .with_snapshot(|p| track_id_from_uri(&p.track_id).map(|cur| cur == track_id))
+                .flatten()
                 .unwrap_or(true);
             if !matches_current {
                 log::debug!("stale canvas for {track_id} — ignoring");
@@ -665,24 +640,33 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // mid-crossfade). Fills the name too: sparse cluster pushes
             // (no title metadata) arrive with an empty one.
             let mut fetch_cover: Option<String> = None;
-            {
-                let mut player = state.player_ui.snapshot.borrow_mut();
-                if let Some(p) = player.as_mut()
-                    && track_id_from_uri(&p.track_id) == Some(track_id.as_str())
-                {
-                    if p.name.is_empty() && !details.name.is_empty() {
-                        p.name = details.name.clone();
-                        state.player_ui.title.set(details.name.as_str());
-                    }
-                    if !details.artist.is_empty() {
-                        p.artist = details.artist.clone();
-                        state.player_ui.artist.set(details.artist.as_str());
-                    }
-                    if p.album_image_url.is_none() && details.album_image_url.is_some() {
-                        p.album_image_url = details.album_image_url.clone();
-                        fetch_cover = details.album_image_url.clone();
-                    }
+            let mut set_title = false;
+            let mut set_artist = false;
+            // Patch the snapshot under a short borrow; the signal sets and the
+            // cover fetch happen *after* it's released (see `patch_snapshot`)
+            // so no model borrow is ever held across a call.
+            state.player_ui.patch_snapshot(|p| {
+                if track_id_from_uri(&p.track_id) != Some(track_id.as_str()) {
+                    return;
                 }
+                if p.name.is_empty() && !details.name.is_empty() {
+                    p.name = details.name.clone();
+                    set_title = true;
+                }
+                if !details.artist.is_empty() {
+                    p.artist = details.artist.clone();
+                    set_artist = true;
+                }
+                if p.album_image_url.is_none() && details.album_image_url.is_some() {
+                    p.album_image_url = details.album_image_url.clone();
+                    fetch_cover = details.album_image_url.clone();
+                }
+            });
+            if set_title {
+                state.player_ui.title.set(details.name.as_str());
+            }
+            if set_artist {
+                state.player_ui.artist.set(details.artist.as_str());
             }
             // The cluster push had no cover either — backfill the backdrop
             // from the resolved one (outside the snapshot borrow).

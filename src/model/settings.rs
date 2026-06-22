@@ -4,21 +4,22 @@
 //! the last-measured on-disk cache usage shown in the storage bar, and
 //! the cross-thread handoff slot for the (blocking) folder-picker dialog.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use opal_gfx::{Overlay, Signal, WakeHandle};
 
-use crate::disk_cache;
+use crate::disk_cache::{self, CacheUsage};
 
 pub struct SettingsModel {
     /// The settings modal. Owns its fade opacity + timeline key, blocks
     /// input beneath it, costs nothing when closed.
     pub overlay: Overlay,
     /// Last-measured on-disk cache usage (art vs JSON), shown in the
-    /// storage bar. Recomputed on open / clear / relocate.
-    pub cache_usage: Cell<disk_cache::CacheUsage>,
+    /// storage bar. Recomputed off-thread on open / clear / relocate and
+    /// published here by the frame tick (see [`Self::take_pending_usage`]).
+    pub cache_usage: Cell<CacheUsage>,
     /// "Normalize volume" toggle state — seeded from prefs, drives the
     /// switch reactively. The pref is read at session start (applies on
     /// next launch), so this only mirrors + persists the choice.
@@ -26,30 +27,74 @@ pub struct SettingsModel {
     /// Folder picked by the off-thread (blocking) cache-relocation dialog,
     /// awaiting pickup on the UI thread in the frame loop.
     pub pending_cache_dir: Arc<Mutex<Option<PathBuf>>>,
+    /// Freshly-scanned cache usage from a background scan thread, awaiting
+    /// pickup on the UI thread (the scan walks every cached file — far too
+    /// much to do on the frame). `None` until a scan lands.
+    pending_usage: Arc<Mutex<Option<CacheUsage>>>,
+    /// Loop wake handle, stored once after app construction so the cache
+    /// scan/clear threads can nudge the frame loop to pick up their result.
+    wake: RefCell<Option<Arc<WakeHandle>>>,
 }
 
 impl SettingsModel {
     pub fn new(normalize: bool) -> Self {
         Self {
             overlay: Overlay::new(),
-            cache_usage: Cell::new(disk_cache::CacheUsage::default()),
+            cache_usage: Cell::new(CacheUsage::default()),
             normalize: Signal::new(normalize),
             pending_cache_dir: Arc::new(Mutex::new(None)),
+            pending_usage: Arc::new(Mutex::new(None)),
+            wake: RefCell::new(None),
         }
     }
 
-    /// Re-measure on-disk cache usage into the slice (settings open /
-    /// cache cleared / cache relocated).
-    pub fn refresh_usage(&self) {
-        self.cache_usage.set(disk_cache::usage());
+    /// Stash the loop wake handle (available only after the window/app is
+    /// built). Lets the off-thread cache scans re-run the frame loop when
+    /// their result is ready.
+    pub fn set_wake(&self, wake: Arc<WakeHandle>) {
+        *self.wake.borrow_mut() = Some(wake);
     }
 
-    /// Wipe every cached file (art, Canvas videos, API JSON) and refresh
-    /// the usage bar. Returns bytes freed. Fast — the cache is capped.
-    pub fn clear_cache(&self) -> u64 {
-        let freed = disk_cache::clear();
-        self.refresh_usage();
-        freed
+    /// Re-measure on-disk cache usage **off the UI thread** (settings open /
+    /// cache cleared / cache relocated) — [`disk_cache::usage`] walks every
+    /// cached file and must never run on the frame. The result lands in
+    /// `pending_usage`; the frame tick publishes it via
+    /// [`Self::take_pending_usage`].
+    pub fn refresh_usage(&self) {
+        let pending = self.pending_usage.clone();
+        let wake = self.wake.borrow().clone();
+        std::thread::spawn(move || {
+            let usage = disk_cache::usage();
+            *pending.lock().unwrap() = Some(usage);
+            if let Some(w) = wake {
+                w.wake();
+            }
+        });
+    }
+
+    /// Wipe every cached file (art, Canvas videos, API JSON) and re-scan,
+    /// both **off the UI thread** — the delete walk and the re-measure are
+    /// each O(files) and would hitch the frame. The refreshed usage lands
+    /// in `pending_usage`.
+    pub fn clear_cache(&self) {
+        let pending = self.pending_usage.clone();
+        let wake = self.wake.borrow().clone();
+        std::thread::spawn(move || {
+            let freed = disk_cache::clear();
+            log::info!("cleared disk cache (freed {freed} bytes)");
+            let usage = disk_cache::usage();
+            *pending.lock().unwrap() = Some(usage);
+            if let Some(w) = wake {
+                w.wake();
+            }
+        });
+    }
+
+    /// Take a cache-usage scan stashed by a background thread, if one has
+    /// landed since the last poll. Called by the frame tick, which sets it
+    /// into [`Self::cache_usage`] and rebuilds the (open) settings bar.
+    pub fn take_pending_usage(&self) -> Option<CacheUsage> {
+        self.pending_usage.lock().unwrap().take()
     }
 
     /// Open the native folder picker on a worker thread (the dialog

@@ -8,7 +8,7 @@
 //! `lazy_list` reads on scroll — no blocking "loading all 989 songs".
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use opal_gfx::Signal;
 
 use crate::album_art;
 use crate::api::{AlbumRef, HomeData, PlaylistDetail, PlaylistTrack};
+use crate::bounded::BoundedMap;
 use crate::model::ArtModel;
 use crate::views::home::playlist::{self, PlaylistRow, RowBuf};
 use crate::worker::Worker;
@@ -24,6 +25,12 @@ use crate::worker::Worker;
 /// Long enough to make back-and-forth navigation free, short enough that
 /// edits made elsewhere show up within a few minutes.
 const PLAYLIST_TTL: Duration = Duration::from_secs(300);
+
+/// FIFO cap on the in-memory playlist-detail cache — a backstop against
+/// unbounded growth over a long session, set well above any realistic
+/// distinct-playlist count so it never evicts what the user actually
+/// revisits. A re-open of an evicted (or TTL-stale) playlist re-fetches.
+const PLAYLIST_CACHE_CAP: usize = 256;
 
 /// A loaded playlist plus the wall-clock at which it was fetched — drives
 /// the in-memory TTL cache so re-opening within [`PLAYLIST_TTL`] reuses
@@ -71,8 +78,11 @@ pub struct LibraryModel {
     /// The artist page open in the centre pane.
     pub open_artist: RefCell<Option<OpenArtist>>,
     /// Playlist detail TTL cache (id → detail + fetch time). Liked Songs
-    /// lives here under `api::LIKED_SONGS_ID`.
-    playlist_cache: RefCell<HashMap<String, CachedPlaylist>>,
+    /// lives here under `api::LIKED_SONGS_ID`. FIFO-capped (see
+    /// [`PLAYLIST_CACHE_CAP`]) so a long browsing session can't grow it
+    /// without bound; the cap is far above any session's distinct-playlist
+    /// count, so it never evicts in normal use.
+    playlist_cache: RefCell<BoundedMap<String, CachedPlaylist>>,
     /// Playlist ids with a fetch in flight — gate so navigating back and
     /// forth doesn't dispatch duplicate loads.
     playlist_inflight: RefCell<HashSet<String>>,
@@ -100,7 +110,7 @@ impl LibraryModel {
             home: RefCell::default(),
             open_playlist: RefCell::default(),
             open_artist: RefCell::default(),
-            playlist_cache: RefCell::default(),
+            playlist_cache: RefCell::new(BoundedMap::new(PLAYLIST_CACHE_CAP)),
             playlist_inflight: RefCell::default(),
             rows_appended: Cell::new(false),
             queue: RefCell::default(),

@@ -189,10 +189,28 @@ impl Component for PlayerBar<'_> {
                                     (self.player.repeat_on.clone(), self.backdrop.accent.clone()),
                                     |(on, acc)| if on { acc } else { t::TEXT_DIM },
                                 );
-                                transport_btn(tr, icons, Icon::Repeat, t::ICON_MD, repeat_tint, {
-                                    let act = self.on_action.clone();
-                                    move || act(PlayerAction::CycleRepeat)
-                                });
+                                // Glyph swaps to the repeat-1 icon in Track
+                                // mode; tint (above) lights for both Context
+                                // and Track.
+                                let repeat_h = icons.get(Icon::Repeat);
+                                let repeat_one_h = icons.get(Icon::RepeatOne);
+                                let repeat_glyph = Computed::new(
+                                    (self.player.repeat_track.clone(),),
+                                    move |(track,)| Some(if track { repeat_one_h } else { repeat_h }),
+                                );
+                                let repeat_act = self.on_action.clone();
+                                tr.row(())
+                                    .w_px(t::SP_8)
+                                    .h_px(t::SP_8)
+                                    .center()
+                                    .hover_opacity(0.7)
+                                    .on_click(move |_| repeat_act(PlayerAction::CycleRepeat))
+                                    .child(|c| {
+                                        c.image_bound((), repeat_glyph)
+                                            .w_px(t::ICON_MD)
+                                            .h_px(t::ICON_MD)
+                                            .color(repeat_tint);
+                                    });
                             });
                         // Scrubbable progress bar. The lane is taller than
                         // the visible track so it's easy to grab; the

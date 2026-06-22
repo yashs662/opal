@@ -13,7 +13,15 @@ use opal_gfx::{ImageHandle, Signal};
 
 use crate::album_art;
 use crate::api::{HomeData, TrackDetails};
+use crate::bounded::BoundedMap;
 use crate::worker::Worker;
+
+/// FIFO cap for the per-cover accent + `/tracks/{id}` detail caches. Sized
+/// far above any realistic session's unique-track count (≈ a 200-hour
+/// listen), so it never evicts in normal use — it's only a backstop against
+/// unbounded growth. Eviction (oldest cover/track first) never touches what's
+/// on screen, and re-resolves hit the on-disk cache, so UX is unaffected.
+const ART_CACHE_CAP: usize = 4096;
 
 pub struct ArtModel {
     /// Per-URL (cache_key) reactive cover handle for every cover shown
@@ -32,11 +40,11 @@ pub struct ArtModel {
     /// Spotify's own extracted accent per cover (authoritative over the
     /// pixel-average), kept so a late art/accent arrival promotes the
     /// right colour regardless of which request resolves first.
-    accents: RefCell<HashMap<String, [f32; 4]>>,
+    accents: RefCell<BoundedMap<String, [f32; 4]>>,
     /// `/v1/tracks/{id}` results keyed by bare track ID — the cluster
     /// carries only `artist_uri`, so the resolved artist name comes from
     /// here.
-    track_details: RefCell<HashMap<String, TrackDetails>>,
+    track_details: RefCell<BoundedMap<String, TrackDetails>>,
 }
 
 impl ArtModel {
@@ -45,8 +53,8 @@ impl ArtModel {
             home_art: RefCell::default(),
             inflight: RefCell::default(),
             shown_key: RefCell::default(),
-            accents: RefCell::default(),
-            track_details: RefCell::default(),
+            accents: RefCell::new(BoundedMap::new(ART_CACHE_CAP)),
+            track_details: RefCell::new(BoundedMap::new(ART_CACHE_CAP)),
         }
     }
 

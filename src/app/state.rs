@@ -65,9 +65,23 @@ impl AppState {
         // canvas, and resume, not just the chrome labels. Without this the
         // membership/liked checks (which key off the snapshot) never fire on
         // cold start, leaving the heart blank until the track actually
-        // changes. The first live cluster push overwrites it.
-        let restored = prefs.last_player.clone();
-        let state = Self {
+        // changes. The first live cluster push overwrites it. Built here and
+        // handed to `PlayerModel::seed` so the field is set at construction
+        // (no post-init `borrow_mut` on the live cell).
+        let restored = prefs.last_player.as_ref().map(|p| crate::api::CurrentlyPlaying {
+            track_id: p.track_id.clone(),
+            name: p.name.clone(),
+            artist: p.artist.clone(),
+            album_image_url: p.album_image_url.clone(),
+            is_playing: false,
+            progress_ms: p.progress_ms,
+            progress_anchor: std::time::Instant::now(),
+            duration_ms: p.duration_ms,
+            shuffle: false,
+            repeat: crate::api::RepeatMode::Off,
+            context_uri: p.context_uri.clone(),
+        });
+        Self {
             router: RouterModel::new(),
             auth: AuthModel::new(),
             library: LibraryModel::new(),
@@ -81,28 +95,13 @@ impl AppState {
                 progress_ms,
                 duration_ms,
                 prefs.audio.volume,
+                restored,
             ),
             settings: SettingsModel::new(prefs.audio.normalize),
             devices: DevicesModel::new(),
             menu: MenuModel::new(),
             membership: MembershipModel::new(),
             prefs: PrefsModel::new(prefs),
-        };
-        if let Some(p) = restored {
-            *state.player_ui.snapshot.borrow_mut() = Some(crate::api::CurrentlyPlaying {
-                track_id: p.track_id,
-                name: p.name,
-                artist: p.artist,
-                album_image_url: p.album_image_url,
-                is_playing: false,
-                progress_ms: p.progress_ms,
-                progress_anchor: std::time::Instant::now(),
-                duration_ms: p.duration_ms,
-                shuffle: false,
-                repeat: crate::api::RepeatMode::Off,
-                context_uri: p.context_uri,
-            });
         }
-        state
     }
 }

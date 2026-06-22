@@ -1204,11 +1204,18 @@ fn spawn_playback(
                     PlaybackCmd::Next => spirc.next(),
                     PlaybackCmd::Prev => spirc.prev(),
                     PlaybackCmd::Shuffle(on) => spirc.shuffle(on),
-                    PlaybackCmd::Repeat(mode) => match mode {
-                        RepeatMode::Track => spirc.repeat_track(true),
-                        RepeatMode::Context => spirc.repeat(true),
-                        RepeatMode::Off => spirc.repeat(false),
-                    },
+                    // context + track are independent flags; set both for
+                    // every mode so leaving Track actually clears the track
+                    // flag (otherwise repeat(false) only drops context and the
+                    // device stays stuck repeating one).
+                    PlaybackCmd::Repeat(mode) => {
+                        let (ctx, track) = match mode {
+                            RepeatMode::Track => (false, true),
+                            RepeatMode::Context => (true, false),
+                            RepeatMode::Off => (false, false),
+                        };
+                        spirc.repeat(ctx).and_then(|()| spirc.repeat_track(track))
+                    }
                     PlaybackCmd::Seek(ms) => spirc.set_position_ms(ms),
                     PlaybackCmd::Volume(pct) => {
                         spirc.set_volume((pct.min(100) as u32 * u16::MAX as u32 / 100) as u16)

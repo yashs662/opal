@@ -35,6 +35,12 @@ pub struct RouterModel {
     pub came_from_setup: Cell<bool>,
     /// What the Home centre pane is showing (feed vs a playlist page).
     pub nav: RefCell<MainNav>,
+    /// Cached scroller-node name for the current `nav` (`detail_scroll:{id}`
+    /// for a detail page, else `None`). Recomputed once per nav change in
+    /// [`Self::go`] so the frame tick — which needs it every active frame to
+    /// drive the collapsing header — reads it without re-`format!`-ing a
+    /// fresh `String` each frame.
+    nav_scroll_node: RefCell<Option<String>>,
     /// 0 → 1 slide/fade progress for the centre-pane content, retween'd on
     /// every nav change. Parks at 1.0 (settled).
     pub main_t: Signal<f32>,
@@ -52,6 +58,8 @@ impl RouterModel {
             view_t: Signal::new(1.0),
             came_from_setup: Cell::new(false),
             nav: RefCell::default(),
+            // Default nav is the Home feed → no detail scroller.
+            nav_scroll_node: RefCell::new(None),
             main_t: Signal::new(1.0),
             detail_collapse: Signal::new(0.0),
         }
@@ -82,6 +90,13 @@ impl RouterModel {
         }
     }
 
+    /// The current detail page's scroller-node name (`detail_scroll:{id}`),
+    /// or `None` on the feed/artist/queue. Cached — reading it allocates
+    /// nothing, so the per-frame collapsing-header drive is alloc-free.
+    pub fn detail_scroll_node(&self) -> std::cell::Ref<'_, Option<String>> {
+        self.nav_scroll_node.borrow()
+    }
+
     /// Whether the centre pane is showing the artist page for `id`.
     pub fn nav_is_artist(&self, id: &str) -> bool {
         matches!(&*self.nav.borrow(), MainNav::Artist { id: nid } if nid == id)
@@ -91,6 +106,9 @@ impl RouterModel {
     /// scene rebuild mounts the new content; the tween fades + slides it in
     /// over ~260 ms (timeline-pumped, no manual rebuild cadence).
     pub fn go(&self, nav: MainNav, tl: &mut Timeline, now: Instant) {
+        // Recompute the cached scroller name once, here — the frame tick then
+        // reads it every active frame without allocating.
+        *self.nav_scroll_node.borrow_mut() = nav.detail_scroll_node();
         *self.nav.borrow_mut() = nav;
         // New page starts scrolled to top → header fully expanded.
         self.detail_collapse.set(0.0);
