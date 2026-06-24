@@ -416,7 +416,7 @@ impl HomeView {
         // The art model is passed by reference and looked up narrowly per
         // tile (`art.signal`) — deliberately NOT a held `home_art` borrow,
         // so a `borrow_mut` reached during the build can't double-borrow.
-        let home_ref = state.library.home.borrow();
+        let home_ref = &state.library.home;
         // Both playlist + album pages render through the playlist view (an
         // album is a track list with a context_uri); the hero label differs.
         let kind_label = match nav {
@@ -425,7 +425,7 @@ impl HomeView {
         };
         let playlist: Option<playlist::PlaylistViewData> = match nav {
             MainNav::Playlist { .. } | MainNav::Album { .. } => {
-                state.library.open_playlist.borrow().as_ref().map(|o| {
+                state.library.open_playlist.as_ref().map(|o| {
                     let cover = o
                         .image_url
                         .as_ref()
@@ -453,7 +453,7 @@ impl HomeView {
         // Artist page view data: bake album cover signals + lazily dispatch
         // their fetches (idempotent), mirroring how playlist rows resolve.
         let artist_data: Option<artist::ArtistViewData> = match nav {
-            MainNav::Artist { .. } => state.library.open_artist.borrow().as_ref().map(|a| {
+            MainNav::Artist { .. } => state.library.open_artist.as_ref().map(|a| {
                 let image = a
                     .image_url
                     .as_ref()
@@ -505,7 +505,7 @@ impl HomeView {
             _ => None,
         };
         let show_all_data: Option<show_all::ShowAllViewData> = match nav {
-            MainNav::ShowAll { section } => Some(build_show_all(&state.art, &home_ref, *section)),
+            MainNav::ShowAll { section } => Some(build_show_all(&state.art, home_ref, *section)),
             _ => None,
         };
         let now_playing = now_playing::NowPlaying {
@@ -514,7 +514,7 @@ impl HomeView {
             canvas: &state.canvas,
             width: &state.prefs.now_playing_w,
         };
-        let queue_ref = state.library.queue.borrow();
+        let queue_ref = &state.library.queue;
         let player_bar = player_bar::PlayerBar {
             backdrop: &state.backdrop,
             player: &state.player_ui,
@@ -531,7 +531,7 @@ impl HomeView {
             accent: &state.backdrop.accent,
             nav,
             on_navigate: self.on_navigate.clone(),
-            home: &home_ref,
+            home: home_ref,
             art: &state.art,
             icons,
         };
@@ -542,7 +542,7 @@ impl HomeView {
         };
         let main_pane = main_pane::MainPane {
             icons,
-            home: &home_ref,
+            home: home_ref,
             art: &state.art,
             accent: &state.backdrop.accent,
             nav,
@@ -771,29 +771,28 @@ fn build_show_all(
 pub(crate) fn navigate(state: &mut AppState, cx: &mut Cx, worker: &Worker, nav: MainNav) {
     match &nav {
         MainNav::Playlist { id, liked } => {
-            *state.library.open_artist.borrow_mut() = None;
-            state
-                .library
-                .open_for(&state.art, worker, state.auth.token(), id, *liked)
+            state.library.open_artist = None;
+            let token = state.auth.token();
+            state.library.open_for(&mut state.art, worker, token, id, *liked)
         }
         MainNav::Album { id } => {
-            *state.library.open_artist.borrow_mut() = None;
-            state
-                .library
-                .open_album(&state.art, worker, state.auth.token(), id)
+            state.library.open_artist = None;
+            let token = state.auth.token();
+            state.library.open_album(&mut state.art, worker, token, id)
         }
         MainNav::Artist { id } => {
-            *state.library.open_playlist.borrow_mut() = None;
-            state.library.open_artist(worker, state.auth.token(), id)
+            state.library.open_playlist = None;
+            let token = state.auth.token();
+            state.library.open_artist(worker, token, id)
         }
         MainNav::ShowAll { .. } | MainNav::Home => {
             // Show-all renders from the already-loaded HomeData — no fetch.
-            *state.library.open_playlist.borrow_mut() = None;
-            *state.library.open_artist.borrow_mut() = None;
+            state.library.open_playlist = None;
+            state.library.open_artist = None;
         }
         MainNav::Queue => {
-            *state.library.open_playlist.borrow_mut() = None;
-            *state.library.open_artist.borrow_mut() = None;
+            state.library.open_playlist = None;
+            state.library.open_artist = None;
             // A remote device's queue arrives live off the cluster (full,
             // uncapped, auto-updating) — keep it. But when *Opal itself*
             // is the active player the cluster never echoes our queue, so a
@@ -802,7 +801,7 @@ pub(crate) fn navigate(state: &mut AppState, cx: &mut Cx, worker: &Worker, nav: 
             // fetch when nothing is loaded yet so the page resolves instead of
             // hanging on a skeleton.
             let self_play = state.devices.playing_on_self.get();
-            if (self_play || state.library.queue.borrow().is_none())
+            if (self_play || state.library.queue.is_none())
                 && let Some(token) = state.auth.token()
             {
                 worker.fetch_queue(token);

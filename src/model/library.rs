@@ -7,7 +7,7 @@
 //! virtualised list, and later pages stream into the shared buffer the
 //! `lazy_list` reads on scroll — no blocking "loading all 989 songs".
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -72,66 +72,69 @@ pub struct OpenArtist {
 
 pub struct LibraryModel {
     /// The Home feed (greeting, recents, top artists, playlists, …).
-    pub home: RefCell<HomeData>,
+    pub home: HomeData,
     /// The playlist (or album) open in the centre pane (live streaming buffer).
-    pub open_playlist: RefCell<Option<OpenPlaylist>>,
+    /// The inner `rows` (`RowBuf`) is intentionally still `Rc<RefCell<…>>`:
+    /// it's shared with the tree's `'static` lazy-list closure, which appends
+    /// pages and reads on scroll independently of the model borrow.
+    pub open_playlist: Option<OpenPlaylist>,
     /// The artist page open in the centre pane.
-    pub open_artist: RefCell<Option<OpenArtist>>,
+    pub open_artist: Option<OpenArtist>,
     /// Playlist detail TTL cache (id → detail + fetch time). Liked Songs
     /// lives here under `api::LIKED_SONGS_ID`. FIFO-capped (see
     /// [`PLAYLIST_CACHE_CAP`]) so a long browsing session can't grow it
     /// without bound; the cap is far above any session's distinct-playlist
     /// count, so it never evicts in normal use.
-    playlist_cache: RefCell<BoundedMap<String, CachedPlaylist>>,
+    playlist_cache: BoundedMap<String, CachedPlaylist>,
     /// Playlist ids with a fetch in flight — gate so navigating back and
     /// forth doesn't dispatch duplicate loads.
-    playlist_inflight: RefCell<HashSet<String>>,
+    playlist_inflight: HashSet<String>,
     /// Set by the reducer when a streamed page appended rows to the live
     /// buffer; consumed by `app::frame::tick`, which re-materializes the
     /// open detail page's lazy rows — otherwise rows the user already
     /// scrolled past (materialized as skeletons because the scroll outran
     /// the stream) would stay skeletons forever.
-    pub rows_appended: Cell<bool>,
+    pub rows_appended: bool,
     /// The active device's play queue (currently playing first), for the
     /// queue page. `None` = not loaded / loading; refetched on every
     /// open (live state, no cache).
-    pub queue: RefCell<Option<Vec<PlaylistTrack>>>,
+    pub queue: Option<Vec<PlaylistTrack>>,
     /// Skeleton-row pulse opacity, ping-pong tweened while the open
     /// detail page is still streaming (driven by `app::frame::tick`).
     pub skeleton_pulse: Signal<f32>,
     /// Whether the pulse tween is currently running (mirror, so the frame
     /// tick can start/stop it on state edges instead of every frame).
-    pub pulse_on: Cell<bool>,
+    pub pulse_on: bool,
 }
 
 impl LibraryModel {
     pub fn new() -> Self {
         Self {
-            home: RefCell::default(),
-            open_playlist: RefCell::default(),
-            open_artist: RefCell::default(),
-            playlist_cache: RefCell::new(BoundedMap::new(PLAYLIST_CACHE_CAP)),
-            playlist_inflight: RefCell::default(),
-            rows_appended: Cell::new(false),
-            queue: RefCell::default(),
+            home: HomeData::default(),
+            open_playlist: None,
+            open_artist: None,
+            playlist_cache: BoundedMap::new(PLAYLIST_CACHE_CAP),
+            playlist_inflight: HashSet::new(),
+            rows_appended: false,
+            queue: None,
             skeleton_pulse: Signal::new(1.0),
-            pulse_on: Cell::new(false),
+            pulse_on: false,
         }
     }
 
     // --- in-flight gate + TTL cache -----------------------------------
 
     pub fn is_inflight(&self, id: &str) -> bool {
-        self.playlist_inflight.borrow().contains(id)
+        self.playlist_inflight.contains(id)
     }
 
-    pub fn clear_inflight(&self, id: &str) {
-        self.playlist_inflight.borrow_mut().remove(id);
+    pub fn clear_inflight(&mut self, id: &str) {
+        self.playlist_inflight.remove(id);
     }
 
     /// Cache a fully-loaded playlist for an instant re-open.
-    pub fn cache(&self, detail: PlaylistDetail) {
-        self.playlist_cache.borrow_mut().insert(
+    pub fn cache(&mut self, detail: PlaylistDetail) {
+        self.playlist_cache.insert(
             detail.id.clone(),
             CachedPlaylist {
                 detail,
@@ -143,7 +146,6 @@ impl LibraryModel {
     /// A fresh (within TTL) cached detail clone, if any.
     fn cached_detail(&self, id: &str) -> Option<PlaylistDetail> {
         self.playlist_cache
-            .borrow()
             .get(id)
             .filter(|c| c.fetched.elapsed() < PLAYLIST_TTL)
             .map(|c| c.detail.clone())
@@ -156,7 +158,7 @@ impl LibraryModel {
     /// handle repaints just that thumb), but the **fetch is not dispatched
     /// here** — the cover downloads lazily when the row scrolls into view,
     /// so opening a 989-track playlist doesn't kick off 989 downloads.
-    pub fn build_rows(&self, art: &ArtModel, buf: &RowBuf, tracks: &[PlaylistTrack]) {
+    pub fn build_rows(&self, art: &mut ArtModel, buf: &RowBuf, tracks: &[PlaylistTrack]) {
         let mut out = buf.borrow_mut();
         out.reserve(tracks.len());
         for t in tracks {
@@ -185,8 +187,8 @@ impl LibraryModel {
     /// Drop a playlist's in-memory cached detail so the next open re-fetches
     /// (the disk-cache pages are evicted worker-side). Pairs with the live
     /// patches below so an edit is reflected both now and on re-open.
-    pub fn invalidate_cached(&self, id: &str) {
-        self.playlist_cache.borrow_mut().remove(id);
+    pub fn invalidate_cached(&mut self, id: &str) {
+        self.playlist_cache.remove(id);
     }
 
     /// Whether the playlist `id` (or Liked Songs, when `liked`) is the page
@@ -204,35 +206,40 @@ impl LibraryModel {
     /// (newest-first). No-op (returns false) when that page isn't open or the
     /// track is already present.
     pub fn open_add_track(
-        &self,
-        art: &ArtModel,
+        &mut self,
+        art: &mut ArtModel,
         liked: bool,
         id: &str,
         track: &PlaylistTrack,
     ) -> bool {
-        let mut guard = self.open_playlist.borrow_mut();
-        let Some(open) = guard.as_mut() else {
-            return false;
+        // Extract the shared row buffer (an `Rc` clone) under the
+        // `open_playlist` borrow, then drop it so `build_rows` can run.
+        let rows = {
+            let Some(open) = self.open_playlist.as_mut() else {
+                return false;
+            };
+            if !Self::open_is(open, liked, id)
+                || open.rows.borrow().iter().any(|r| r.uri == track.uri)
+            {
+                return false;
+            }
+            open.total += 1;
+            open.rows.clone()
         };
-        if !Self::open_is(open, liked, id) || open.rows.borrow().iter().any(|r| r.uri == track.uri) {
-            return false;
-        }
-        self.build_rows(art, &open.rows, std::slice::from_ref(track));
+        self.build_rows(art, &rows, std::slice::from_ref(track));
         if liked {
             // Liked Songs lists most-recent first — move the just-appended
             // row to the front (rotate_right(1) sends the last to index 0).
-            open.rows.borrow_mut().rotate_right(1);
+            rows.borrow_mut().rotate_right(1);
         }
-        open.total += 1;
-        self.rows_appended.set(true);
+        self.rows_appended = true;
         true
     }
 
     /// If the affected playlist (or Liked Songs) is open, drop every row for
     /// `uri` live. Returns whether anything was removed.
-    pub fn open_remove_track(&self, liked: bool, id: &str, uri: &str) -> bool {
-        let mut guard = self.open_playlist.borrow_mut();
-        let Some(open) = guard.as_mut() else {
+    pub fn open_remove_track(&mut self, liked: bool, id: &str, uri: &str) -> bool {
+        let Some(open) = self.open_playlist.as_mut() else {
             return false;
         };
         if !Self::open_is(open, liked, id) {
@@ -245,7 +252,7 @@ impl LibraryModel {
             return false;
         }
         open.total = open.total.saturating_sub(removed);
-        self.rows_appended.set(true);
+        self.rows_appended = true;
         true
     }
 
@@ -256,8 +263,8 @@ impl LibraryModel {
     /// built from the sidebar-known name/cover (header shows immediately)
     /// and a streaming fetch is dispatched.
     pub fn open_for(
-        &self,
-        art: &ArtModel,
+        &mut self,
+        art: &mut ArtModel,
         worker: &Worker,
         token: Option<String>,
         id: &str,
@@ -266,7 +273,7 @@ impl LibraryModel {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
             self.build_rows(art, &buf, &detail.tracks);
-            *self.open_playlist.borrow_mut() = Some(OpenPlaylist {
+            self.open_playlist = Some(OpenPlaylist {
                 liked,
                 name: detail.name,
                 owner: detail.owner,
@@ -286,7 +293,6 @@ impl LibraryModel {
             ("Liked Songs".to_string(), None)
         } else {
             self.home
-                .borrow()
                 .playlists
                 .iter()
                 .find(|p| p.id == id)
@@ -299,7 +305,7 @@ impl LibraryModel {
             Some(format!("spotify:playlist:{id}"))
         };
         let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-        *self.open_playlist.borrow_mut() = Some(OpenPlaylist {
+        self.open_playlist = Some(OpenPlaylist {
             liked,
             name,
             owner: String::new(),
@@ -317,11 +323,11 @@ impl LibraryModel {
     /// have a `context_uri` + a track list); a fresh cache hit populates the
     /// buffer instantly, otherwise a blank shell shows while the single-shot
     /// album fetch lands. Mirrors [`Self::open_for`].
-    pub fn open_album(&self, art: &ArtModel, worker: &Worker, token: Option<String>, id: &str) {
+    pub fn open_album(&mut self, art: &mut ArtModel, worker: &Worker, token: Option<String>, id: &str) {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
             self.build_rows(art, &buf, &detail.tracks);
-            *self.open_playlist.borrow_mut() = Some(OpenPlaylist {
+            self.open_playlist = Some(OpenPlaylist {
                 liked: false,
                 name: detail.name,
                 owner: detail.owner,
@@ -335,7 +341,7 @@ impl LibraryModel {
             return;
         }
         let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-        *self.open_playlist.borrow_mut() = Some(OpenPlaylist {
+        self.open_playlist = Some(OpenPlaylist {
             liked: false,
             name: String::new(),
             owner: String::new(),
@@ -351,8 +357,8 @@ impl LibraryModel {
 
     /// Open an artist page. Sets a loading shell + dispatches the profile +
     /// discography fetch; the result lands via `ArtistOpened`.
-    pub fn open_artist(&self, worker: &Worker, token: Option<String>, id: &str) {
-        *self.open_artist.borrow_mut() = Some(OpenArtist {
+    pub fn open_artist(&mut self, worker: &Worker, token: Option<String>, id: &str) {
+        self.open_artist = Some(OpenArtist {
             name: String::new(),
             image_url: None,
             followers: 0,
@@ -367,12 +373,12 @@ impl LibraryModel {
             log::warn!("artist load skipped — no auth token");
             return;
         };
-        self.playlist_inflight.borrow_mut().insert(id.to_string());
+        self.playlist_inflight.insert(id.to_string());
         worker.fetch_artist(token, id.to_string());
     }
 
     /// Dispatch a one-shot album fetch unless one is already in flight.
-    pub fn ensure_loaded_album(&self, worker: &Worker, token: Option<String>, id: &str) {
+    pub fn ensure_loaded_album(&mut self, worker: &Worker, token: Option<String>, id: &str) {
         if self.is_inflight(id) {
             return;
         }
@@ -380,14 +386,14 @@ impl LibraryModel {
             log::warn!("album load skipped — no auth token");
             return;
         };
-        self.playlist_inflight.borrow_mut().insert(id.to_string());
+        self.playlist_inflight.insert(id.to_string());
         worker.fetch_album(token, id.to_string());
     }
 
     /// Dispatch a streaming playlist fetch unless a load is already in
     /// flight. Liked Songs routes through the same path under its sentinel
     /// id. `token` is the live access token (read at call time).
-    pub fn ensure_loaded(&self, worker: &Worker, token: Option<String>, id: &str, liked: bool) {
+    pub fn ensure_loaded(&mut self, worker: &Worker, token: Option<String>, id: &str, liked: bool) {
         if self.is_inflight(id) {
             return;
         }
@@ -395,7 +401,7 @@ impl LibraryModel {
             log::warn!("playlist load skipped — no auth token");
             return;
         };
-        self.playlist_inflight.borrow_mut().insert(id.to_string());
+        self.playlist_inflight.insert(id.to_string());
         worker.fetch_playlist(token, id.to_string(), liked);
     }
 }

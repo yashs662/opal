@@ -124,7 +124,7 @@ pub fn tick(
     // A streamed page appended rows → re-materialize the open detail
     // page's lazy rows, turning any already-on-screen skeletons (fast
     // scroll outran the stream) into real tracks.
-    if state.library.rows_appended.take() {
+    if std::mem::take(&mut state.library.rows_appended) {
         let scroll_node = state.router.detail_scroll_node();
         if let Some(name) = scroll_node
             && let Some(id) = ctx.node(name)
@@ -139,15 +139,14 @@ pub fn tick(
         let streaming = state
             .library
             .open_playlist
-            .borrow()
             .as_ref()
             .map(|o| o.loading || !o.complete)
             .unwrap_or(false);
         let queue_loading = matches!(state.router.nav, crate::views::MainNav::Queue)
-            && state.library.queue.borrow().is_none();
+            && state.library.queue.is_none();
         let want = queue_loading
             || (streaming && state.router.detail_scroll_node().is_some());
-        if want != state.library.pulse_on.get() {
+        if want != state.library.pulse_on {
             let pulse = &state.library.skeleton_pulse;
             if want {
                 cx.tl.animate_pingpong(
@@ -162,7 +161,7 @@ pub fn tick(
                 cx.tl.stop_for(pulse);
                 pulse.set(1.0);
             }
-            state.library.pulse_on.set(want);
+            state.library.pulse_on = want;
         }
     }
     // Debounced prefs save (panel widths + last-player snapshot).

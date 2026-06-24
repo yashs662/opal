@@ -159,7 +159,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             // in-memory cache so a re-open also reflects the edit.
             if add {
                 if let Some(track) = target_track(state) {
-                    state.library.open_add_track(&state.art, false, &playlist_id, &track);
+                    state.library.open_add_track(&mut state.art, false, &playlist_id, &track);
                 }
             } else {
                 state.library.open_remove_track(false, &playlist_id, &uri);
@@ -184,7 +184,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                 if let Some(track) = target_track(state) {
                     state
                         .library
-                        .open_add_track(&state.art, true, api::LIKED_SONGS_ID, &track);
+                        .open_add_track(&mut state.art, true, api::LIKED_SONGS_ID, &track);
                 }
             } else {
                 state

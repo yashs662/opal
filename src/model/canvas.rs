@@ -11,8 +11,7 @@
 //! dispatch) stay in the caller; this slice just exposes the decode
 //! lifecycle + the per-frame ticks.
 
-use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,7 +42,7 @@ pub struct CanvasModel {
     /// UI-thread mirror of [`has_video`](Self::has_video), read at
     /// scene-build time to choose the now-playing layout. Cell (not
     /// Signal): the swap is a deliberate rebuild, not a reactive bind.
-    pub active: Cell<bool>,
+    pub active: bool,
     /// Hover state of the now-playing Canvas video (set by `.on_hover`).
     pub hover: Signal<bool>,
     /// Alpha of the dark overlay over the video — dimmed at rest, tweened
@@ -51,14 +50,14 @@ pub struct CanvasModel {
     pub dim: Signal<f32>,
     /// Staged black dim gradient (opaque top → transparent over the
     /// bottom, matching the video's edge fade), tinted by [`dim`](Self::dim).
-    pub dim_grad: Cell<Option<ImageHandle>>,
+    pub dim_grad: Option<ImageHandle>,
 
     /// Resolved + cached clip for the current track: `(track_id, mp4_path)`.
     /// Set by `CanvasReady`, cleared on track change / `CanvasNone`.
-    path: RefCell<Option<(String, std::path::PathBuf)>>,
+    path: Option<(String, std::path::PathBuf)>,
     /// Engine handle for pushing decoded frames onto the now-playing
     /// `.external()` node. `None` until installed after the `App` is built.
-    frame_sink: RefCell<Option<Arc<FrameSink>>>,
+    frame_sink: Option<Arc<FrameSink>>,
     /// Live `NodeId` of the now-playing canvas node, refreshed each frame
     /// (the id is not stable across rebuilds). Shared with the decode
     /// thread; `None` when the node isn't in the current tree.
@@ -68,37 +67,37 @@ pub struct CanvasModel {
     has_video: Arc<AtomicBool>,
     /// Last observed `hover` value, so the brightness tween only (re)starts
     /// on a hover *transition*.
-    hover_last: Cell<bool>,
+    hover_last: bool,
     /// Active decode session. Replaced on track change; `None` when idle.
-    decode: RefCell<Option<CanvasSession>>,
+    decode: Option<CanvasSession>,
     /// Monotonic decode-session counter. Each `start_decode` takes the next
     /// value and tags every frame it pushes with it, so the GPU side drops a
     /// previous clip's resident frames the instant this one's first frame
     /// lands — no stale frames can ever be looped into the new clip.
-    epoch: AtomicU64,
+    epoch: u64,
 }
 
 impl CanvasModel {
     pub fn new(show_canvas: bool) -> Self {
         Self {
             show: Signal::new(show_canvas),
-            active: Cell::new(false),
+            active: false,
             hover: Signal::new(false),
             dim: Signal::new(CANVAS_DIM_ALPHA),
-            dim_grad: Cell::new(None),
-            path: RefCell::default(),
-            frame_sink: RefCell::default(),
+            dim_grad: None,
+            path: None,
+            frame_sink: None,
             node: Arc::new(Mutex::new(None)),
             has_video: Arc::new(AtomicBool::new(false)),
-            hover_last: Cell::new(false),
-            decode: RefCell::default(),
-            epoch: AtomicU64::new(0),
+            hover_last: false,
+            decode: None,
+            epoch: 0,
         }
     }
 
     /// Install the engine frame sink (after the `App` is built).
-    pub fn set_frame_sink(&self, sink: Arc<FrameSink>) {
-        *self.frame_sink.borrow_mut() = Some(sink);
+    pub fn set_frame_sink(&mut self, sink: Arc<FrameSink>) {
+        self.frame_sink = Some(sink);
     }
 
     /// RGBA pixels `(w, h, rgba)` for the dim-overlay gradient: solid
@@ -129,28 +128,28 @@ impl CanvasModel {
 
     /// Install the staged dim-gradient handle (host uploads
     /// [`dim_grad_rgba`](Self::dim_grad_rgba) and hands back the handle).
-    pub fn set_dim_grad(&self, handle: ImageHandle) {
-        self.dim_grad.set(Some(handle));
+    pub fn set_dim_grad(&mut self, handle: ImageHandle) {
+        self.dim_grad = Some(handle);
     }
 
     // --- cached clip path ---------------------------------------------
 
     /// Clone the cached `(track_id, path)`, if any.
     pub fn cached_path(&self) -> Option<(String, std::path::PathBuf)> {
-        self.path.borrow().clone()
+        self.path.clone()
     }
 
     /// Whether the cached clip is for `track_id`.
     pub fn path_matches(&self, track_id: &str) -> bool {
-        self.path.borrow().as_ref().map(|(t, _)| t == track_id).unwrap_or(false)
+        self.path.as_ref().map(|(t, _)| t == track_id).unwrap_or(false)
     }
 
-    pub fn set_path(&self, track_id: String, path: std::path::PathBuf) {
-        self.path.borrow_mut().replace((track_id, path));
+    pub fn set_path(&mut self, track_id: String, path: std::path::PathBuf) {
+        self.path = Some((track_id, path));
     }
 
-    pub fn clear_path(&self) {
-        self.path.borrow_mut().take();
+    pub fn clear_path(&mut self) {
+        self.path = None;
     }
 
     // --- per-frame ticks ----------------------------------------------
@@ -168,10 +167,10 @@ impl CanvasModel {
     /// Mirror the decode thread's "video is flowing" flag into the
     /// build-time layout flag. Returns `true` on a change (caller rebuilds
     /// so the now-playing pane swaps album-art ↔ full-bleed video).
-    pub fn tick_active(&self) -> bool {
+    pub fn tick_active(&mut self) -> bool {
         let want = self.has_video.load(Ordering::Relaxed);
-        if want != self.active.get() {
-            self.active.set(want);
+        if want != self.active {
+            self.active = want;
             true
         } else {
             false
@@ -180,10 +179,10 @@ impl CanvasModel {
 
     /// Tween the dim overlay on hover transitions: bright (0) while
     /// hovered, dimmed at rest.
-    pub fn tick_dim(&self, tl: &mut Timeline, now: Instant) {
+    pub fn tick_dim(&mut self, tl: &mut Timeline, now: Instant) {
         let hov = self.hover.get();
-        if hov != self.hover_last.get() {
-            self.hover_last.set(hov);
+        if hov != self.hover_last {
+            self.hover_last = hov;
             let target = if hov { 0.0 } else { CANVAS_DIM_ALPHA };
             tl.animate(&self.dim, target, Curve::EaseInOut, CANVAS_DIM_DURATION, now);
         }
@@ -198,10 +197,9 @@ impl CanvasModel {
     /// `FrameSink`, targeting [`node`](Self::node) read fresh each frame so
     /// it follows rebuilds. No-op if already decoding this track or the
     /// frame sink isn't installed yet.
-    pub fn start_decode(&self, track_id: String, path: std::path::PathBuf) {
+    pub fn start_decode(&mut self, track_id: String, path: std::path::PathBuf) {
         if self
             .decode
-            .borrow()
             .as_ref()
             .map(|s| s.track_id == track_id)
             .unwrap_or(false)
@@ -210,14 +208,15 @@ impl CanvasModel {
         }
         log::debug!("start_canvas_decode {track_id}");
         self.stop_decode();
-        let Some(sink) = self.frame_sink.borrow().clone() else {
+        let Some(sink) = self.frame_sink.clone() else {
             return;
         };
         let node = self.node.clone();
         let has_video = self.has_video.clone();
         // Unique generation for this decode — tags every pushed frame so the
         // GPU side evicts the previous clip's resident set on our first frame.
-        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        self.epoch += 1;
+        let epoch = self.epoch;
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let spawned = std::thread::Builder::new()
@@ -322,7 +321,7 @@ impl CanvasModel {
             });
         match spawned {
             Ok(_) => {
-                self.decode.borrow_mut().replace(CanvasSession { track_id, stop });
+                self.decode = Some(CanvasSession { track_id, stop });
             }
             Err(e) => log::warn!("canvas decode: failed to spawn thread: {e}"),
         }
@@ -332,7 +331,7 @@ impl CanvasModel {
     /// decode the cached clip if we have it, else fetch it for the current
     /// track. Turned off: stop decoding + drop the video texture. The
     /// caller persists the (debounced) pref separately.
-    pub fn on_toggle(&self, snapshot: Option<&CurrentlyPlaying>, worker: &Worker) {
+    pub fn on_toggle(&mut self, snapshot: Option<&CurrentlyPlaying>, worker: &Worker) {
         if self.show.get() {
             match self.cached_path() {
                 Some((track_id, path)) => self.start_decode(track_id, path),
@@ -351,13 +350,13 @@ impl CanvasModel {
 
     /// Stop the active decode (if any) and clear the now-playing external
     /// texture so the UI falls back to album art.
-    pub fn stop_decode(&self) {
-        if let Some(old) = self.decode.borrow_mut().take() {
+    pub fn stop_decode(&mut self) {
+        if let Some(old) = self.decode.take() {
             old.stop.store(true, Ordering::Relaxed);
         }
         self.has_video.store(false, Ordering::Relaxed);
         if let (Some(sink), Some(node)) =
-            (self.frame_sink.borrow().clone(), *self.node.lock().unwrap())
+            (self.frame_sink.clone(), *self.node.lock().unwrap())
         {
             sink.clear(node);
         }

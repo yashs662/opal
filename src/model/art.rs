@@ -6,7 +6,6 @@
 //! cache. Resolutions push handles into the reactive signals so an art
 //! arrival repaints just the affected nodes — no scene rebuild.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use opal_gfx::{ImageHandle, Signal};
@@ -30,31 +29,31 @@ pub struct ArtModel {
     /// looks these up narrowly via [`Self::signal`] / [`Self::or_signal`] —
     /// it must NOT hold a long-lived `borrow()` of this map across a build,
     /// or an interleaved `or_signal` (`borrow_mut`) double-borrows at runtime.
-    pub home_art: RefCell<HashMap<String, Signal<Option<ImageHandle>>>>,
+    pub home_art: HashMap<String, Signal<Option<ImageHandle>>>,
     /// cache_keys with a fetch in flight — gate so a cover doesn't get a
     /// second fetch while the first resolves.
-    inflight: RefCell<HashSet<String>>,
+    inflight: HashSet<String>,
     /// cache_key of the cover currently promoted into the backdrop, so
     /// repeated PlayerState pushes for the same track don't re-promote.
-    shown_key: RefCell<Option<String>>,
+    shown_key: Option<String>,
     /// Spotify's own extracted accent per cover (authoritative over the
     /// pixel-average), kept so a late art/accent arrival promotes the
     /// right colour regardless of which request resolves first.
-    accents: RefCell<BoundedMap<String, [f32; 4]>>,
+    accents: BoundedMap<String, [f32; 4]>,
     /// `/v1/tracks/{id}` results keyed by bare track ID — the cluster
     /// carries only `artist_uri`, so the resolved artist name comes from
     /// here.
-    track_details: RefCell<BoundedMap<String, TrackDetails>>,
+    track_details: BoundedMap<String, TrackDetails>,
 }
 
 impl ArtModel {
     pub fn new() -> Self {
         Self {
-            home_art: RefCell::default(),
-            inflight: RefCell::default(),
-            shown_key: RefCell::default(),
-            accents: RefCell::new(BoundedMap::new(ART_CACHE_CAP)),
-            track_details: RefCell::new(BoundedMap::new(ART_CACHE_CAP)),
+            home_art: HashMap::new(),
+            inflight: HashSet::new(),
+            shown_key: None,
+            accents: BoundedMap::new(ART_CACHE_CAP),
+            track_details: BoundedMap::new(ART_CACHE_CAP),
         }
     }
 
@@ -62,9 +61,8 @@ impl ArtModel {
 
     /// Existing-or-fresh reactive handle for `key` (creates `None` on
     /// miss). Rows/tiles bind to the returned signal.
-    pub fn or_signal(&self, key: String) -> Signal<Option<ImageHandle>> {
+    pub fn or_signal(&mut self, key: String) -> Signal<Option<ImageHandle>> {
         self.home_art
-            .borrow_mut()
             .entry(key)
             .or_insert_with(|| Signal::new(None))
             .clone()
@@ -72,13 +70,13 @@ impl ArtModel {
 
     /// Read-only lookup of an existing handle signal.
     pub fn signal(&self, key: &str) -> Option<Signal<Option<ImageHandle>>> {
-        self.home_art.borrow().get(key).cloned()
+        self.home_art.get(key).cloned()
     }
 
     /// Push a resolved handle into the matching signal (repaints bound
     /// nodes, no rebuild). No-op if nothing bound to `key`.
     pub fn set_resolved(&self, key: &str, handle: ImageHandle) {
-        if let Some(sig) = self.home_art.borrow().get(key) {
+        if let Some(sig) = self.home_art.get(key) {
             sig.set(Some(handle));
         }
     }
@@ -86,45 +84,44 @@ impl ArtModel {
     // --- in-flight gate -----------------------------------------------
 
     pub fn is_inflight(&self, key: &str) -> bool {
-        self.inflight.borrow().contains(key)
+        self.inflight.contains(key)
     }
 
-    pub fn mark_inflight(&self, key: String) {
-        self.inflight.borrow_mut().insert(key);
+    pub fn mark_inflight(&mut self, key: String) {
+        self.inflight.insert(key);
     }
 
-    pub fn clear_inflight(&self, key: &str) {
-        self.inflight.borrow_mut().remove(key);
+    pub fn clear_inflight(&mut self, key: &str) {
+        self.inflight.remove(key);
     }
 
     // --- shown key + accent cache -------------------------------------
 
     pub fn is_shown(&self, key: &str) -> bool {
-        self.shown_key.borrow().as_deref() == Some(key)
+        self.shown_key.as_deref() == Some(key)
     }
 
-    pub fn set_shown(&self, key: String) {
-        *self.shown_key.borrow_mut() = Some(key);
+    pub fn set_shown(&mut self, key: String) {
+        self.shown_key = Some(key);
     }
 
     pub fn has_accent(&self, key: &str) -> bool {
-        self.accents.borrow().contains_key(key)
+        self.accents.contains_key(key)
     }
 
-    pub fn cache_accent(&self, key: String, accent: [f32; 4]) {
-        self.accents.borrow_mut().insert(key, accent);
+    pub fn cache_accent(&mut self, key: String, accent: [f32; 4]) {
+        self.accents.insert(key, accent);
     }
 
     /// Spotify's cached accent for `key`, if it arrived already.
     pub fn accent(&self, key: &str) -> Option<[f32; 4]> {
-        self.accents.borrow().get(key).copied()
+        self.accents.get(key).copied()
     }
 
     // --- track details ------------------------------------------------
 
-    pub fn insert_track_detail(&self, details: TrackDetails) {
+    pub fn insert_track_detail(&mut self, details: TrackDetails) {
         self.track_details
-            .borrow_mut()
             .insert(details.track_id.clone(), details);
     }
 
@@ -132,14 +129,14 @@ impl ArtModel {
     /// resolved — patches sparse cluster updates that arrive without
     /// title metadata (e.g. `DEVICES_DISAPPEARED` pushes).
     pub fn track_detail(&self, track_id: &str) -> Option<TrackDetails> {
-        self.track_details.borrow().get(track_id).cloned()
+        self.track_details.get(track_id).cloned()
     }
 
     // --- fetch dispatch -----------------------------------------------
 
     /// Lazily fetch a track cover (called when a row materializes). Gated:
     /// already-resolved / in-flight covers are no-ops.
-    pub fn dispatch_cover(&self, worker: &Worker, url: String) {
+    pub fn dispatch_cover(&mut self, worker: &Worker, url: String) {
         let key = album_art::cache_key(&url);
         if let Some(sig) = self.signal(&key)
             && sig.get().is_some()
@@ -158,7 +155,7 @@ impl ArtModel {
     /// extracted accent, so the launch backdrop is already populated +
     /// correctly tinted before the first live cluster push (instead of the
     /// washed-out pixel-average until the next track change).
-    pub fn rehydrate_cover(&self, url: &str, worker: &Worker) {
+    pub fn rehydrate_cover(&mut self, url: &str, worker: &Worker) {
         let key = album_art::cache_key(url);
         self.mark_inflight(key.clone());
         worker.fetch_album_art(url.to_string(), key.clone());
@@ -168,7 +165,7 @@ impl ArtModel {
     /// Ensure a reactive handle exists per cover URL in `data`, and
     /// dispatch a fetch for each key that's neither in flight nor already
     /// resolved. Later `AlbumArtReady` arrivals fill the signals.
-    pub fn prefetch(&self, worker: &Worker, data: &HomeData) {
+    pub fn prefetch(&mut self, worker: &Worker, data: &HomeData) {
         let (pl, pl_with) = count_with_image(&data.playlists, |p| p.image_url.is_some());
         let (rc, rc_with) = count_with_image(&data.recent, |t| t.album_image_url.is_some());
         let (ta, ta_with) = count_with_image(&data.top_artists, |a| a.image_url.is_some());
@@ -216,19 +213,18 @@ impl ArtModel {
                     .iter()
                     .filter_map(|a| a.image_url.as_ref()),
             );
-        let mut signals = self.home_art.borrow_mut();
-        let mut inflight = self.inflight.borrow_mut();
         let mut dispatched = 0_usize;
         for url in urls {
             let key = album_art::cache_key(url);
-            let sig = signals
+            let sig = self
+                .home_art
                 .entry(key.clone())
                 .or_insert_with(|| Signal::new(None))
                 .clone();
-            if sig.get().is_some() || inflight.contains(&key) {
+            if sig.get().is_some() || self.inflight.contains(&key) {
                 continue;
             }
-            inflight.insert(key.clone());
+            self.inflight.insert(key.clone());
             worker.fetch_album_art(url.clone(), key);
             dispatched += 1;
         }

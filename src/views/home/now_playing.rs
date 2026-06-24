@@ -24,7 +24,7 @@ impl Component for NowPlaying<'_> {
     fn view(&self, s: &mut Scene) {
         // The decode thread flips `canvas.active` once video is flowing,
         // and a rebuild swaps this layout (see `CanvasModel::tick_active`).
-        if self.canvas.active.get() {
+        if self.canvas.active {
             self.canvas_layout(s);
         } else {
             self.art_layout(s);
@@ -105,7 +105,7 @@ impl NowPlaying<'_> {
                         // gradient (solid top → transparent over the bottom
                         // 35%) matching the video's `fade_bottom`, tinted by
                         // `canvas.dim` (→ 0 on hover = full brightness).
-                        if let Some(g) = self.canvas.dim_grad.get() {
+                        if let Some(g) = self.canvas.dim_grad {
                             let dim = self.canvas.dim.clone();
                             b.image((), g)
                                 .abs(0.0, 0.0)

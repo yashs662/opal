@@ -175,11 +175,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     worker.try_load_tokens(state.borrow().prefs.data.client_id().unwrap_or_default());
     // Hand the state the engine's frame sink so the Canvas decode thread
     // can push video frames onto the now-playing external node.
-    state.borrow().canvas.set_frame_sink(app.frame_sink());
+    state.borrow_mut().canvas.set_frame_sink(app.frame_sink());
     // Stage the Canvas dim gradient — the model owns the gradient shape;
     // here we only do the GPU upload and hand the handle back.
     let (gw, gh, px) = CanvasModel::dim_grad_rgba();
-    state.borrow().canvas.set_dim_grad(app.stage_image_rgba(gw, gh, px));
+    state.borrow_mut().canvas.set_dim_grad(app.stage_image_rgba(gw, gh, px));
 
     // Re-hydrate the album-art backdrop from the persisted last track so
     // it's populated before the user sees Home (disk-cache → near-instant).
@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .and_then(|p| p.album_image_url.clone());
     if let Some(url) = last_cover {
-        state.borrow().art.rehydrate_cover(&url, &worker);
+        state.borrow_mut().art.rehydrate_cover(&url, &worker);
     }
     // Re-hydrate the last track's Canvas too (when enabled), so the
     // now-playing pane loops its video on cold start rather than only the

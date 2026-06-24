@@ -123,7 +123,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 data.top_tracks.len(),
             );
             state.art.prefetch(worker, &data);
-            *state.library.home.borrow_mut() = data;
+            state.library.home = data;
             cx.rebuild();
         }
         WorkerResponse::SpotifySessionConnected { device_id } => {
@@ -200,7 +200,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     state.art.dispatch_cover(worker, url.clone());
                 }
             }
-            *state.library.queue.borrow_mut() = Some(tracks);
+            state.library.queue = Some(tracks);
             if matches!(state.router.nav, crate::views::MainNav::Queue) {
                 cx.rebuild();
             }
@@ -530,22 +530,19 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // total). Subsequent pages append without a rebuild.
             let applies = state.router.nav_is_open(&id);
             if applies {
-                let buf = {
-                    let mut op = state.library.open_playlist.borrow_mut();
-                    op.as_mut().map(|o| {
-                        o.name = detail.name.clone();
-                        o.owner = detail.owner.clone();
-                        o.image_url = detail.image_url.clone();
-                        o.context_uri = detail.context_uri.clone();
-                        o.total = detail.total;
-                        o.loading = false;
-                        o.complete = complete;
-                        o.rows.clone()
-                    })
-                };
+                let buf = state.library.open_playlist.as_mut().map(|o| {
+                    o.name = detail.name.clone();
+                    o.owner = detail.owner.clone();
+                    o.image_url = detail.image_url.clone();
+                    o.context_uri = detail.context_uri.clone();
+                    o.total = detail.total;
+                    o.loading = false;
+                    o.complete = complete;
+                    o.rows.clone()
+                });
                 if let Some(buf) = buf {
                     buf.borrow_mut().clear();
-                    state.library.build_rows(&state.art, &buf, &detail.tracks);
+                    state.library.build_rows(&mut state.art, &buf, &detail.tracks);
                     cx.rebuild();
                 }
             }
@@ -566,18 +563,17 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 let buf = state
                     .library
                     .open_playlist
-                    .borrow()
                     .as_ref()
                     .map(|o| o.rows.clone());
                 if let Some(buf) = buf {
-                    state.library.build_rows(&state.art, &buf, &tracks);
+                    state.library.build_rows(&mut state.art, &buf, &tracks);
                     // Tell the frame tick to re-materialize the lazy list:
                     // rows the user scrolled past while this page was in
                     // flight are on screen as skeletons and won't re-render
                     // from a buffer append alone.
-                    state.library.rows_appended.set(true);
+                    state.library.rows_appended = true;
                 }
-                if done && let Some(o) = state.library.open_playlist.borrow_mut().as_mut() {
+                if done && let Some(o) = state.library.open_playlist.as_mut() {
                     o.complete = true;
                 }
             }
@@ -615,7 +611,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     state.art.or_signal(album_art::cache_key(u));
                     state.art.dispatch_cover(worker, u.clone());
                 }
-                if let Some(a) = state.library.open_artist.borrow_mut().as_mut() {
+                if let Some(a) = state.library.open_artist.as_mut() {
                     a.name = name;
                     a.image_url = image_url;
                     a.followers = followers;
