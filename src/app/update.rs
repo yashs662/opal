@@ -258,5 +258,34 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         Msg::ChangeCacheDir => state.settings.pick_cache_dir(),
 
         Msg::MarkDirty => state.prefs.mark_dirty(cx.now),
+
+        Msg::StartLogin => {
+            if let Some(id) = state.prefs.data.client_id() {
+                worker.start_oauth(id);
+            }
+        }
+
+        Msg::BackToSetup => {
+            state.router.go_view(View::Setup, cx.tl, cx.now);
+            cx.rebuild();
+        }
+
+        Msg::ResetPrefs => {
+            state.prefs.reset();
+            state.auth.sign_out();
+            state.router.go_view(View::Setup, cx.tl, cx.now);
+            cx.rebuild();
+        }
+
+        Msg::SaveClientId(id) => {
+            state.prefs.data.spotify_client_id = Some(id);
+            if let Err(e) = state.prefs.data.save() {
+                log::warn!("saving client id failed: {e}");
+            }
+            // Reached Login *from* Setup → offer a Back affordance there.
+            state.router.came_from_setup = true;
+            state.router.go_view(View::Login, cx.tl, cx.now);
+            cx.rebuild();
+        }
     }
 }

@@ -220,10 +220,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hand the loop wake to settings so its off-thread cache scans (and the
     // folder picker) can nudge the frame loop when their result is ready.
     state.borrow_mut().settings.set_wake(app.wake_handle());
-    let home_view = views::home::HomeView::new(state.clone(), dispatch, icons.clone());
-    let login_view =
-        views::login::LoginView::new(state.clone(), worker.clone(), icons.clone(), rebuild.clone());
-    let setup_view = views::setup::SetupView::new(state.clone(), icons.clone(), rebuild.clone());
+    let home_view = views::home::HomeView::new(state.clone(), dispatch.clone(), icons.clone());
+    let login_view = views::login::LoginView::new(state.clone(), dispatch.clone(), icons.clone());
+    let setup_view = views::setup::SetupView::new(state.clone(), dispatch, icons.clone());
 
     let app = {
         let state = state.clone();

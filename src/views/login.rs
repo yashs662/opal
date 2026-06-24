@@ -12,35 +12,29 @@
 //! - bottom-left **Reset preferences** → wipe all prefs + stored tokens and
 //!   bounce back to setup.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use opal_gfx::{Align, Computed, EventCtx, Len, Scene};
 
 use crate::app::AppState;
+use crate::app::msg::{Dispatch, Msg};
 use crate::views::View;
 use crate::widgets::button::{ButtonTone, pill_button};
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::{chrome, tokens};
-use crate::worker::Worker;
 
 /// The Login view controller — owns the OAuth-start, back, and reset
-/// callbacks.
+/// callbacks (pure `Msg` emitters; the logic lives in `app::update`).
 pub struct LoginView {
     state: Rc<RefCell<AppState>>,
-    worker: Rc<Worker>,
     icons: Rc<IconSet>,
-    rebuild: Rc<Cell<bool>>,
+    dispatch: Dispatch,
 }
 
 impl LoginView {
-    pub fn new(
-        state: Rc<RefCell<AppState>>,
-        worker: Rc<Worker>,
-        icons: Rc<IconSet>,
-        rebuild: Rc<Cell<bool>>,
-    ) -> Self {
-        Self { state, worker, icons, rebuild }
+    pub fn new(state: Rc<RefCell<AppState>>, dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
+        Self { state, icons, dispatch }
     }
 
     pub fn build(&self, s: &mut Scene) {
@@ -55,11 +49,11 @@ impl LoginView {
         // 'static event closure.
         let on_back = {
             let me = self.handle();
-            move |ctx: &mut EventCtx| me.back_to_setup(ctx.timeline, ctx.now)
+            move |_: &mut EventCtx| me.back_to_setup()
         };
         let on_reset = {
             let me = self.handle();
-            move |ctx: &mut EventCtx| me.reset_prefs(ctx.timeline, ctx.now)
+            move |_: &mut EventCtx| me.reset_prefs()
         };
         let on_login = {
             let me = self.handle();
@@ -134,12 +128,11 @@ impl LoginView {
             });
     }
 
-    /// Capture-friendly `Rc` handle for 'static event closures.
+    /// Capture-friendly handle for 'static event closures — holds only the
+    /// `Dispatch` (no `AppState`), so the callbacks just emit intents.
     fn handle(&self) -> LoginHandle {
         LoginHandle {
-            state: self.state.clone(),
-            worker: self.worker.clone(),
-            rebuild: self.rebuild.clone(),
+            dispatch: self.dispatch.clone(),
         }
     }
 }
@@ -147,27 +140,18 @@ impl LoginView {
 /// The slice of [`LoginView`] the event closures need.
 #[derive(Clone)]
 struct LoginHandle {
-    state: Rc<RefCell<AppState>>,
-    worker: Rc<Worker>,
-    rebuild: Rc<Cell<bool>>,
+    dispatch: Dispatch,
 }
 
 impl LoginHandle {
     fn start_login(&self) {
-        if let Some(id) = self.state.borrow().prefs.data.client_id() {
-            self.worker.start_oauth(id);
-        }
+        self.dispatch.send(Msg::StartLogin);
     }
-    fn back_to_setup(&self, tl: &mut opal_gfx::Timeline, now: std::time::Instant) {
-        self.state.borrow_mut().router.go_view(View::Setup, tl, now);
-        self.rebuild.set(true);
+    fn back_to_setup(&self) {
+        self.dispatch.send(Msg::BackToSetup);
     }
-    fn reset_prefs(&self, tl: &mut opal_gfx::Timeline, now: std::time::Instant) {
-        let mut st = self.state.borrow_mut();
-        st.prefs.reset();
-        st.auth.sign_out();
-        st.router.go_view(View::Setup, tl, now);
-        self.rebuild.set(true);
+    fn reset_prefs(&self) {
+        self.dispatch.send(Msg::ResetPrefs);
     }
 }
 

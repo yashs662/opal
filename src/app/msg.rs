@@ -103,4 +103,12 @@ pub enum Msg {
     ChangeCacheDir,
     /// Mark preferences dirty so the debounced save persists them.
     MarkDirty,
+    /// Begin the OAuth login flow (login-screen button).
+    StartLogin,
+    /// Return from Login to the Setup screen to edit the client id.
+    BackToSetup,
+    /// Wipe prefs + tokens and return to Setup ("Reset preferences").
+    ResetPrefs,
+    /// Persist a validated client id and advance to Login (setup save).
+    SaveClientId(String),
 }

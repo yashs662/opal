@@ -16,8 +16,8 @@ use opal_gfx::{
 };
 
 use crate::app::AppState;
+use crate::app::msg::{Dispatch, Msg};
 use crate::constants::SPOTIFY_REDIRECT_URI;
-use crate::views::View;
 use crate::widgets::icon::IconSet;
 use crate::widgets::{chrome, tokens};
 
@@ -35,7 +35,7 @@ const INSTRUCTIONS: &[&str] = &[
 pub struct SetupView {
     state: Rc<RefCell<AppState>>,
     icons: Rc<IconSet>,
-    rebuild: Rc<Cell<bool>>,
+    dispatch: Dispatch,
     /// Live mirror of the paste-field value, so the Save button can read it
     /// without the field re-emitting on click. The field owns its own
     /// editor state across rebuilds; this only feeds the button.
@@ -77,11 +77,11 @@ fn validate_client_id(raw: &str) -> Result<String, &'static str> {
 }
 
 impl SetupView {
-    pub fn new(state: Rc<RefCell<AppState>>, icons: Rc<IconSet>, rebuild: Rc<Cell<bool>>) -> Self {
+    pub fn new(state: Rc<RefCell<AppState>>, dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
         Self {
             state,
             icons,
-            rebuild,
+            dispatch,
             draft: Rc::new(RefCell::new(String::new())),
             copied: Signal::new(0.0),
             copy_label: TextSignal::new("Click to copy"),
@@ -165,8 +165,7 @@ impl SetupView {
     /// event closures (the view itself isn't `Clone`).
     fn clone_handle(&self) -> SetupHandle {
         SetupHandle {
-            state: self.state.clone(),
-            rebuild: self.rebuild.clone(),
+            dispatch: self.dispatch.clone(),
             error: self.error.clone(),
             field_id: self.field_id.clone(),
         }
@@ -174,10 +173,11 @@ impl SetupView {
 }
 
 /// The capture-friendly slice of [`SetupView`] needed by the save closures.
+/// Holds no `AppState` — the synchronous validation + re-focus stay here
+/// (they need the `EventCtx`), and the actual save is emitted as a `Msg`.
 #[derive(Clone)]
 struct SetupHandle {
-    state: Rc<RefCell<AppState>>,
-    rebuild: Rc<Cell<bool>>,
+    dispatch: Dispatch,
     error: TextSignal,
     field_id: Rc<Cell<Option<NodeId>>>,
 }
@@ -200,15 +200,7 @@ impl SetupHandle {
             }
         };
         self.error.set("");
-        let mut st = self.state.borrow_mut();
-        st.prefs.data.spotify_client_id = Some(id);
-        if let Err(e) = st.prefs.data.save() {
-            log::warn!("saving client id failed: {e}");
-        }
-        // Reached Login *from* Setup → offer a Back affordance there.
-        st.router.came_from_setup = true;
-        st.router.go_view(View::Login, ctx.timeline, ctx.now);
-        self.rebuild.set(true);
+        self.dispatch.send(Msg::SaveClientId(id));
     }
 }
 
