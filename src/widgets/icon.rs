@@ -129,7 +129,7 @@ impl IconSet {
     }
 }
 
-pub fn load_all(app: &mut App) -> IconSet {
+pub fn load_all<S>(app: &mut App<S>) -> IconSet {
     let mut handles = HashMap::with_capacity(ALL.len());
     for &icon in ALL {
         let h = app.stage_image_svg(icon.svg_bytes(), RASTER_PX);

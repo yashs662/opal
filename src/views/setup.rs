@@ -33,7 +33,6 @@ const INSTRUCTIONS: &[&str] = &[
 /// The Setup view controller — owns the client-id-save callback and the
 /// live paste-field draft.
 pub struct SetupView {
-    state: Rc<RefCell<AppState>>,
     icons: Rc<IconSet>,
     dispatch: Dispatch,
     /// Live mirror of the paste-field value, so the Save button can read it
@@ -77,9 +76,8 @@ fn validate_client_id(raw: &str) -> Result<String, &'static str> {
 }
 
 impl SetupView {
-    pub fn new(state: Rc<RefCell<AppState>>, dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
+    pub fn new(dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
         Self {
-            state,
             icons,
             dispatch,
             draft: Rc::new(RefCell::new(String::new())),
@@ -90,8 +88,7 @@ impl SetupView {
         }
     }
 
-    pub fn build(&self, s: &mut Scene) {
-        let state = self.state.clone();
+    pub fn build(&self, s: &mut Scene, state: &AppState) {
         let draft = self.draft.clone();
 
         // Two save entry points (field Enter + button) share one path; each
@@ -126,7 +123,7 @@ impl SetupView {
                 chrome::title_bar(root, &self.icons, "Opal");
 
                 // Fade + slide the content in on view entry (`view_t` 0→1).
-                let t = state.borrow().router.view_t.clone();
+                let t = state.router.view_t.clone();
                 let fade = Computed::new((t.clone(),), |(tt,)| tt.clamp(0.0, 1.0));
                 let slide =
                     Computed::new((t.clone(),), |(tt,)| [0.0, (1.0 - tt.clamp(0.0, 1.0)) * 16.0]);

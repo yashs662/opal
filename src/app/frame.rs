@@ -6,7 +6,7 @@
 //! background once the album-art backdrop fully covers it. Pure shell
 //! logic — no view building.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -20,7 +20,7 @@ use crate::disk_cache;
 use crate::worker::Worker;
 
 pub fn tick(
-    state: &Rc<RefCell<AppState>>,
+    state: &mut AppState,
     worker: &Rc<Worker>,
     rebuild: &Rc<Cell<bool>>,
     msgs: &MsgQueue,
@@ -29,11 +29,6 @@ pub fn tick(
     now: Instant,
 ) {
     let mut cx = Cx::new(tl, now, rebuild);
-    // Hold the single root borrow for the whole tick (the write phase). The
-    // build phase takes a shared `borrow()`; the frame loop runs the two in
-    // distinct, non-overlapping passes, so this never contends.
-    let mut guard = state.borrow_mut();
-    let state = &mut *guard;
     // A hot-patch landed since the last tick: rebuild so the patched
     // `Component::view` bodies run. No-op unless the `hotreload` feature is on.
     if crate::hotreload::take_patched() {

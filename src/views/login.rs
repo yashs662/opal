@@ -12,7 +12,6 @@
 //! - bottom-left **Reset preferences** → wipe all prefs + stored tokens and
 //!   bounce back to setup.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use opal_gfx::{Align, Computed, EventCtx, Len, Scene};
@@ -27,23 +26,21 @@ use crate::widgets::{chrome, tokens};
 /// The Login view controller — owns the OAuth-start, back, and reset
 /// callbacks (pure `Msg` emitters; the logic lives in `app::update`).
 pub struct LoginView {
-    state: Rc<RefCell<AppState>>,
     icons: Rc<IconSet>,
     dispatch: Dispatch,
 }
 
 impl LoginView {
-    pub fn new(state: Rc<RefCell<AppState>>, dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
-        Self { state, icons, dispatch }
+    pub fn new(dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
+        Self { icons, dispatch }
     }
 
-    pub fn build(&self, s: &mut Scene) {
+    pub fn build(&self, s: &mut Scene, state: &AppState) {
         // Splash = the startup token-load is still running → show "checking".
-        let checking = matches!(self.state.borrow().router.view, View::Splash);
+        let checking = matches!(state.router.view, View::Splash);
         // Back is only meaningful when we arrived here from Setup (the user
         // just entered a client id) — not on a fresh launch or after logout.
-        let show_back = !checking && self.state.borrow().router.came_from_setup;
-        let state = self.state.clone();
+        let show_back = !checking && state.router.came_from_setup;
 
         // Corner actions — each captures its own handle clone into a
         // 'static event closure.
@@ -90,7 +87,7 @@ impl LoginView {
                         // corners out of flow). `h(Fill)` pushes Reset to the
                         // bottom.
                         let fade = Computed::new(
-                            (state.borrow().router.view_t.clone(),),
+                            (state.router.view_t.clone(),),
                             |(tt,)| tt.clamp(0.0, 1.0),
                         );
                         body.col(())

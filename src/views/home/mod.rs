@@ -17,7 +17,6 @@ pub mod show_all;
 pub mod sidebar;
 pub mod top_bar;
 
-use std::cell::RefCell;
 use std::rc::Rc;
 use opal_gfx::{Computed, EventCtx, ImageHandle, Len, Scene, Signal};
 
@@ -246,7 +245,6 @@ fn render(s: &mut Scene, v: &Layout) {
 /// and assembles the scene ([`HomeView::build`]). This is the composition
 /// that used to live in `main`.
 pub struct HomeView {
-    state: Rc<RefCell<AppState>>,
     icons: Rc<IconSet>,
     on_action: Rc<dyn Fn(PlayerAction)>,
     on_canvas_change: Rc<dyn Fn()>,
@@ -275,7 +273,7 @@ impl HomeView {
     /// Build the view + all its event callbacks once. Post-TEA the callbacks
     /// capture only the `msgs` queue (not the models / worker / rebuild),
     /// pushing typed intents the frame tick drains through `app::update`.
-    pub fn new(state: Rc<RefCell<AppState>>, dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
+    pub fn new(dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
         // TEA emitters: each host callback now just pushes a typed `Msg`
         // onto the queue (capturing only the queue, not the models). The
         // frame tick drains them through `app::update`, which holds the
@@ -377,7 +375,6 @@ impl HomeView {
             Rc::new(move || dispatch.send(Msg::MarkDirty))
         };
         Self {
-            state,
             icons,
             on_action,
             on_canvas_change,
@@ -405,11 +402,7 @@ impl HomeView {
 
     /// Assemble the Home scene: build the view data + sub-components from
     /// the live model and hand them to the shell `render`.
-    pub fn build(&self, s: &mut Scene) {
-        // Shared root borrow for the whole build (the read phase) — never
-        // overlaps the tick's `borrow_mut` (distinct frame-loop passes).
-        let state = self.state.borrow();
-        let state = &*state;
+    pub fn build(&self, s: &mut Scene, state: &AppState) {
         let icons = &self.icons;
         let nav = &state.router.nav;
         // Hold the home borrow for the whole build (read-only feed data).
