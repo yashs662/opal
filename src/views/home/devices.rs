@@ -25,9 +25,9 @@ pub struct DevicesPanel<'a> {
 impl Component for DevicesPanel<'_> {
     fn view(&self, s: &mut Scene) {
         let icons = self.icons;
-        let list = self.devices.list.borrow().clone();
-        let active_id = self.devices.active_id.borrow().clone();
-        let self_id = self.devices.self_id.borrow().clone();
+        let list = self.devices.list.clone();
+        let active_id = self.devices.active_id.clone();
+        let self_id = self.devices.self_id.clone();
         let overlay = self.devices.overlay.clone();
         let accent = self.accent.clone();
         let on_transfer = self.on_transfer.clone();

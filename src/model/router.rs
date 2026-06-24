@@ -8,7 +8,6 @@
 //! (the content is structurally different; the reactive path can't
 //! restructure the tree).
 
-use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use opal_gfx::{Curve, Signal, Timeline};
@@ -22,7 +21,7 @@ const MAIN_NAV_DURATION: Duration = Duration::from_millis(260);
 const NAV_CURVE: Curve = Curve::CubicBezier([0.16, 1.0, 0.3, 1.0]);
 
 pub struct RouterModel {
-    pub view: Cell<View>,
+    pub view: View,
     /// 0 → 1 fade/slide progress for a top-level view change (Splash ↔ Setup
     /// ↔ Login ↔ Home), retween'd by [`RouterModel::go_view`]. Parks at 1.0.
     /// The pre-auth views (`setup`/`login`) wrap their content in it so a
@@ -32,15 +31,15 @@ pub struct RouterModel {
     /// saved a client id), so Login shows a "Back" affordance to edit it.
     /// Cleared on every other path to Login (startup, logout) — there's
     /// nowhere meaningful to go "back" to in those cases.
-    pub came_from_setup: Cell<bool>,
+    pub came_from_setup: bool,
     /// What the Home centre pane is showing (feed vs a playlist page).
-    pub nav: RefCell<MainNav>,
+    pub nav: MainNav,
     /// Cached scroller-node name for the current `nav` (`detail_scroll:{id}`
     /// for a detail page, else `None`). Recomputed once per nav change in
     /// [`Self::go`] so the frame tick — which needs it every active frame to
     /// drive the collapsing header — reads it without re-`format!`-ing a
     /// fresh `String` each frame.
-    nav_scroll_node: RefCell<Option<String>>,
+    nav_scroll_node: Option<String>,
     /// 0 → 1 slide/fade progress for the centre-pane content, retween'd on
     /// every nav change. Parks at 1.0 (settled).
     pub main_t: Signal<f32>,
@@ -54,12 +53,12 @@ pub struct RouterModel {
 impl RouterModel {
     pub fn new() -> Self {
         Self {
-            view: Cell::default(),
+            view: View::default(),
             view_t: Signal::new(1.0),
-            came_from_setup: Cell::new(false),
-            nav: RefCell::default(),
+            came_from_setup: false,
+            nav: MainNav::default(),
             // Default nav is the Home feed → no detail scroller.
-            nav_scroll_node: RefCell::new(None),
+            nav_scroll_node: None,
             main_t: Signal::new(1.0),
             detail_collapse: Signal::new(0.0),
         }
@@ -68,11 +67,11 @@ impl RouterModel {
     /// Switch the mounted top-level view and restart its entrance tween
     /// (`view_t` 0 → 1). No-op if already on `view`. The caller still owns
     /// requesting the one-shot scene rebuild that mounts the new view.
-    pub fn go_view(&self, view: View, tl: &mut Timeline, now: Instant) {
-        if self.view.get() == view {
+    pub fn go_view(&mut self, view: View, tl: &mut Timeline, now: Instant) {
+        if self.view == view {
             return;
         }
-        self.view.set(view);
+        self.view = view;
         self.view_t.set(0.0);
         tl.animate(&self.view_t, 1.0, NAV_CURVE, MAIN_NAV_DURATION, now);
     }
@@ -81,7 +80,7 @@ impl RouterModel {
     /// for `id`. Used by the reducer to decide if a `PlaylistOpened`/`Tracks`
     /// response still applies to the open pane (albums reuse that response).
     pub fn nav_is_open(&self, id: &str) -> bool {
-        match &*self.nav.borrow() {
+        match &self.nav {
             MainNav::Playlist { id: nid, .. } | MainNav::Album { id: nid } => nid == id,
             MainNav::Home
             | MainNav::Artist { .. }
@@ -93,23 +92,23 @@ impl RouterModel {
     /// The current detail page's scroller-node name (`detail_scroll:{id}`),
     /// or `None` on the feed/artist/queue. Cached — reading it allocates
     /// nothing, so the per-frame collapsing-header drive is alloc-free.
-    pub fn detail_scroll_node(&self) -> std::cell::Ref<'_, Option<String>> {
-        self.nav_scroll_node.borrow()
+    pub fn detail_scroll_node(&self) -> Option<&str> {
+        self.nav_scroll_node.as_deref()
     }
 
     /// Whether the centre pane is showing the artist page for `id`.
     pub fn nav_is_artist(&self, id: &str) -> bool {
-        matches!(&*self.nav.borrow(), MainNav::Artist { id: nid } if nid == id)
+        matches!(&self.nav, MainNav::Artist { id: nid } if nid == id)
     }
 
     /// Flip nav to `nav` and restart the entrance transition from 0 — the
     /// scene rebuild mounts the new content; the tween fades + slides it in
     /// over ~260 ms (timeline-pumped, no manual rebuild cadence).
-    pub fn go(&self, nav: MainNav, tl: &mut Timeline, now: Instant) {
+    pub fn go(&mut self, nav: MainNav, tl: &mut Timeline, now: Instant) {
         // Recompute the cached scroller name once, here — the frame tick then
         // reads it every active frame without allocating.
-        *self.nav_scroll_node.borrow_mut() = nav.detail_scroll_node();
-        *self.nav.borrow_mut() = nav;
+        self.nav_scroll_node = nav.detail_scroll_node();
+        self.nav = nav;
         // New page starts scrolled to top → header fully expanded.
         self.detail_collapse.set(0.0);
         self.main_t.set(0.0);

@@ -12,7 +12,7 @@
 //! - bottom-left **Reset preferences** → wipe all prefs + stored tokens and
 //!   bounce back to setup.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use opal_gfx::{Align, Computed, EventCtx, Len, Scene};
@@ -27,7 +27,7 @@ use crate::worker::Worker;
 /// The Login view controller — owns the OAuth-start, back, and reset
 /// callbacks.
 pub struct LoginView {
-    state: Rc<AppState>,
+    state: Rc<RefCell<AppState>>,
     worker: Rc<Worker>,
     icons: Rc<IconSet>,
     rebuild: Rc<Cell<bool>>,
@@ -35,7 +35,7 @@ pub struct LoginView {
 
 impl LoginView {
     pub fn new(
-        state: Rc<AppState>,
+        state: Rc<RefCell<AppState>>,
         worker: Rc<Worker>,
         icons: Rc<IconSet>,
         rebuild: Rc<Cell<bool>>,
@@ -45,10 +45,10 @@ impl LoginView {
 
     pub fn build(&self, s: &mut Scene) {
         // Splash = the startup token-load is still running → show "checking".
-        let checking = matches!(self.state.router.view.get(), View::Splash);
+        let checking = matches!(self.state.borrow().router.view, View::Splash);
         // Back is only meaningful when we arrived here from Setup (the user
         // just entered a client id) — not on a fresh launch or after logout.
-        let show_back = !checking && self.state.router.came_from_setup.get();
+        let show_back = !checking && self.state.borrow().router.came_from_setup;
         let state = self.state.clone();
 
         // Corner actions — each captures its own handle clone into a
@@ -96,7 +96,7 @@ impl LoginView {
                         // corners out of flow). `h(Fill)` pushes Reset to the
                         // bottom.
                         let fade = Computed::new(
-                            (state.router.view_t.clone(),),
+                            (state.borrow().router.view_t.clone(),),
                             |(tt,)| tt.clamp(0.0, 1.0),
                         );
                         body.col(())
@@ -147,25 +147,26 @@ impl LoginView {
 /// The slice of [`LoginView`] the event closures need.
 #[derive(Clone)]
 struct LoginHandle {
-    state: Rc<AppState>,
+    state: Rc<RefCell<AppState>>,
     worker: Rc<Worker>,
     rebuild: Rc<Cell<bool>>,
 }
 
 impl LoginHandle {
     fn start_login(&self) {
-        if let Some(id) = self.state.prefs.data.borrow().client_id() {
+        if let Some(id) = self.state.borrow().prefs.data.client_id() {
             self.worker.start_oauth(id);
         }
     }
     fn back_to_setup(&self, tl: &mut opal_gfx::Timeline, now: std::time::Instant) {
-        self.state.router.go_view(View::Setup, tl, now);
+        self.state.borrow_mut().router.go_view(View::Setup, tl, now);
         self.rebuild.set(true);
     }
     fn reset_prefs(&self, tl: &mut opal_gfx::Timeline, now: std::time::Instant) {
-        self.state.prefs.reset();
-        self.state.auth.sign_out();
-        self.state.router.go_view(View::Setup, tl, now);
+        let mut st = self.state.borrow_mut();
+        st.prefs.reset();
+        st.auth.sign_out();
+        st.router.go_view(View::Setup, tl, now);
         self.rebuild.set(true);
     }
 }

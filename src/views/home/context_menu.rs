@@ -28,11 +28,11 @@ pub fn view(
     on_navigate: NavFn,
     on_close: Rc<dyn Fn()>,
 ) {
-    if !menu.open.get() {
+    if !menu.open {
         return;
     }
-    let pos = menu.pos.get();
-    let target = menu.target.borrow().clone();
+    let pos = menu.pos;
+    let target = menu.target.clone();
 
     // Full-window scrim: transparent but click/right-click-absorbing, so
     // the next press anywhere outside the menu dismisses it.

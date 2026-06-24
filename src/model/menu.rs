@@ -6,8 +6,6 @@
 //! at the new position with the new target's actions; dismissing closes
 //! it the same way.
 
-use std::cell::{Cell, RefCell};
-
 /// The right-clicked track's data the menu acts on.
 #[derive(Clone, Default)]
 pub struct MenuTarget {
@@ -20,29 +18,29 @@ pub struct MenuTarget {
 }
 
 pub struct MenuModel {
-    pub open: Cell<bool>,
+    pub open: bool,
     /// Anchor position in **logical px** (cursor at right-click time).
-    pub pos: Cell<[f32; 2]>,
-    pub target: RefCell<MenuTarget>,
+    pub pos: [f32; 2],
+    pub target: MenuTarget,
 }
 
 impl MenuModel {
     pub fn new() -> Self {
         Self {
-            open: Cell::new(false),
-            pos: Cell::new([0.0; 2]),
-            target: RefCell::default(),
+            open: false,
+            pos: [0.0; 2],
+            target: MenuTarget::default(),
         }
     }
 
-    pub fn show(&self, target: MenuTarget, pos: [f32; 2]) {
-        *self.target.borrow_mut() = target;
-        self.pos.set(pos);
-        self.open.set(true);
+    pub fn show(&mut self, target: MenuTarget, pos: [f32; 2]) {
+        self.target = target;
+        self.pos = pos;
+        self.open = true;
     }
 
-    pub fn close(&self) {
-        self.open.set(false);
+    pub fn close(&mut self) {
+        self.open = false;
     }
 }
 

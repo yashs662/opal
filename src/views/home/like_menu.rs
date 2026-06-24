@@ -37,9 +37,9 @@ impl Component for LikeMenu<'_> {
     fn view(&self, s: &mut Scene) {
         let icons = self.icons;
         let accent = self.accent.clone();
-        let playlists = self.membership.playlists.borrow().clone();
-        let ready = self.membership.ready.get();
-        let target = self.membership.target.borrow().clone();
+        let playlists = self.membership.playlists.clone();
+        let ready = self.membership.ready;
+        let target = self.membership.target.clone();
         let liked_now = self.liked.get();
         // Pre-read membership for each playlist row (static read + rebuild on
         // toggle keeps the checkbox honest without a per-row signal).

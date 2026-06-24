@@ -10,7 +10,6 @@
 //! This is the UI-facing reactive mirror; the authoritative
 //! [`crate::api::CurrentlyPlaying`] snapshot still lives on the app state.
 
-use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use opal_gfx::{Curve, Signal, TextSignal, Timeline};
@@ -57,10 +56,10 @@ pub struct PlayerModel {
     /// a `String` 60×/s for a label that only changes once a second. (The
     /// seek tooltip needs no such guard — it's interaction-only and
     /// `TextSignal::set` already dedups the re-flatten.)
-    last_elapsed_secs: Cell<u32>,
+    last_elapsed_secs: u32,
     /// Last observed `seeking` value, for release-edge detection in
     /// [`Self::tick_seek`].
-    seek_held_last: Cell<bool>,
+    seek_held_last: bool,
     /// Active device volume as a 0..=1 fraction — drives the volume
     /// slider fill. Updated by `VolumeChanged` (local mixer event or
     /// cluster push) unless the user is mid-drag.
@@ -84,12 +83,12 @@ pub struct PlayerModel {
     /// Authoritative live player snapshot (the latest cluster push). The
     /// reactive signals above are the UI mirror; this is the source of
     /// truth handlers read for the current track/cover/repeat mode.
-    pub snapshot: RefCell<Option<CurrentlyPlaying>>,
+    pub snapshot: Option<CurrentlyPlaying>,
     /// Whether a real live push has landed this session. False while the
     /// snapshot is only the cold-start seed (persisted last track) — lets the
     /// play button know nothing is actually playing yet, so it resumes the
     /// last track explicitly instead of a bare Web API resume that no-ops.
-    pub live: Cell<bool>,
+    pub live: bool,
 }
 
 impl PlayerModel {
@@ -124,8 +123,8 @@ impl PlayerModel {
             seek_label: TextSignal::new("0:00"),
             elapsed_label: TextSignal::new(fmt_ms(progress_ms.min(duration_ms) as u32).as_str()),
             total_label: TextSignal::new(fmt_ms(duration_ms as u32).as_str()),
-            last_elapsed_secs: Cell::new(u32::MAX),
-            seek_held_last: Cell::new(false),
+            last_elapsed_secs: u32::MAX,
+            seek_held_last: false,
             volume: Signal::new(volume.clamp(0.0, 1.0)),
             vol_dragging: Signal::new(false),
             liked: Signal::new(false),
@@ -138,8 +137,8 @@ impl PlayerModel {
             // The cold-start seed counts as the *current* track (paused) so
             // the heart/membership/canvas checks fire on launch — see
             // `AppState::from_prefs`. The first live cluster push overwrites it.
-            snapshot: RefCell::new(restored),
-            live: Cell::new(false),
+            snapshot: restored,
+            live: false,
         }
     }
 
@@ -152,37 +151,34 @@ impl PlayerModel {
     /// Read the live snapshot under a short borrow, mapping it to `T`.
     /// `None` when nothing is loaded.
     pub fn with_snapshot<T>(&self, f: impl FnOnce(&CurrentlyPlaying) -> T) -> Option<T> {
-        self.snapshot.borrow().as_ref().map(f)
+        self.snapshot.as_ref().map(f)
     }
 
     /// The current track's `spotify:track:…` uri, if a snapshot is loaded.
     pub fn current_track_uri(&self) -> Option<String> {
-        self.snapshot.borrow().as_ref().map(|p| p.track_id.clone())
+        self.snapshot.as_ref().map(|p| p.track_id.clone())
     }
 
     /// Whether a snapshot is loaded at all (something is playing or was
     /// restored from the cold-start seed).
     pub fn has_snapshot(&self) -> bool {
-        self.snapshot.borrow().is_some()
+        self.snapshot.is_some()
     }
 
     /// Clone the whole live snapshot — for rollback paths that need the
     /// full struct back.
     pub fn snapshot_clone(&self) -> Option<CurrentlyPlaying> {
-        self.snapshot.borrow().clone()
+        self.snapshot.clone()
     }
 
     /// Replace the live snapshot (an authoritative cluster push landed).
-    pub fn set_snapshot(&self, snapshot: Option<CurrentlyPlaying>) {
-        *self.snapshot.borrow_mut() = snapshot;
+    pub fn set_snapshot(&mut self, snapshot: Option<CurrentlyPlaying>) {
+        self.snapshot = snapshot;
     }
 
-    /// Mutate the live snapshot in place under a short borrow, if one is
-    /// loaded. The borrow is released before this returns, so the caller
-    /// can safely touch other player signals afterwards (the pattern the
-    /// `TrackDetails` patch relies on).
-    pub fn patch_snapshot<T>(&self, f: impl FnOnce(&mut CurrentlyPlaying) -> T) -> Option<T> {
-        self.snapshot.borrow_mut().as_mut().map(f)
+    /// Mutate the live snapshot in place, if one is loaded.
+    pub fn patch_snapshot<T>(&mut self, f: impl FnOnce(&mut CurrentlyPlaying) -> T) -> Option<T> {
+        self.snapshot.as_mut().map(f)
     }
 
     /// Set the volume fraction + its "NN%" tooltip label together — the
@@ -210,8 +206,8 @@ impl PlayerModel {
     /// playing) tweens to 1.0 over the remaining duration so the bar
     /// advances smoothly between cluster pushes; paused stops the tween so
     /// the bar holds.
-    pub fn sync(&self, p: &CurrentlyPlaying, tl: &mut Timeline, now: Instant) {
-        self.live.set(true);
+    pub fn sync(&mut self, p: &CurrentlyPlaying, tl: &mut Timeline, now: Instant) {
+        self.live = true;
         self.title.set(p.name.as_str());
         self.artist.set(p.artist.as_str());
         self.is_playing.set(p.is_playing);
@@ -272,7 +268,6 @@ impl PlayerModel {
     pub fn cycle_repeat(&self) -> RepeatMode {
         let current = self
             .snapshot
-            .borrow()
             .as_ref()
             .map(|p| p.repeat)
             .unwrap_or(RepeatMode::Off);
@@ -290,10 +285,10 @@ impl PlayerModel {
     /// Called each frame; re-formats (and dirties the text) only when the
     /// whole-second value changes, so the smoothly-tweening progress doesn't
     /// re-flatten the bar every frame.
-    pub fn tick_clock(&self) {
+    pub fn tick_clock(&mut self) {
         let secs = (self.progress.get() * self.duration_ms.get() / 1000.0).max(0.0) as u32;
-        if secs != self.last_elapsed_secs.get() {
-            self.last_elapsed_secs.set(secs);
+        if secs != self.last_elapsed_secs {
+            self.last_elapsed_secs = secs;
             self.elapsed_label.set(fmt_ms(secs * 1000).as_str());
         }
     }
@@ -317,9 +312,10 @@ impl PlayerModel {
     /// position (so it doesn't jump back to the live tween mid-flight) and
     /// return the absolute target position (ms) for the host to dispatch as
     /// a Web API seek. The dealer cluster push re-syncs shortly after.
-    pub fn tick_seek(&self, tl: &mut Timeline) -> Option<u32> {
+    pub fn tick_seek(&mut self, tl: &mut Timeline) -> Option<u32> {
         let held = self.seeking.get();
-        let was_held = self.seek_held_last.replace(held);
+        let was_held = self.seek_held_last;
+        self.seek_held_last = held;
         if was_held && !held {
             let frac = self.seek_preview.get().clamp(0.0, 1.0);
             let dur = self.duration_ms.get();

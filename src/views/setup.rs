@@ -33,7 +33,7 @@ const INSTRUCTIONS: &[&str] = &[
 /// The Setup view controller — owns the client-id-save callback and the
 /// live paste-field draft.
 pub struct SetupView {
-    state: Rc<AppState>,
+    state: Rc<RefCell<AppState>>,
     icons: Rc<IconSet>,
     rebuild: Rc<Cell<bool>>,
     /// Live mirror of the paste-field value, so the Save button can read it
@@ -77,7 +77,7 @@ fn validate_client_id(raw: &str) -> Result<String, &'static str> {
 }
 
 impl SetupView {
-    pub fn new(state: Rc<AppState>, icons: Rc<IconSet>, rebuild: Rc<Cell<bool>>) -> Self {
+    pub fn new(state: Rc<RefCell<AppState>>, icons: Rc<IconSet>, rebuild: Rc<Cell<bool>>) -> Self {
         Self {
             state,
             icons,
@@ -126,7 +126,7 @@ impl SetupView {
                 chrome::title_bar(root, &self.icons, "Opal");
 
                 // Fade + slide the content in on view entry (`view_t` 0→1).
-                let t = &state.router.view_t;
+                let t = state.borrow().router.view_t.clone();
                 let fade = Computed::new((t.clone(),), |(tt,)| tt.clamp(0.0, 1.0));
                 let slide =
                     Computed::new((t.clone(),), |(tt,)| [0.0, (1.0 - tt.clamp(0.0, 1.0)) * 16.0]);
@@ -176,7 +176,7 @@ impl SetupView {
 /// The capture-friendly slice of [`SetupView`] needed by the save closures.
 #[derive(Clone)]
 struct SetupHandle {
-    state: Rc<AppState>,
+    state: Rc<RefCell<AppState>>,
     rebuild: Rc<Cell<bool>>,
     error: TextSignal,
     field_id: Rc<Cell<Option<NodeId>>>,
@@ -200,13 +200,14 @@ impl SetupHandle {
             }
         };
         self.error.set("");
-        self.state.prefs.data.borrow_mut().spotify_client_id = Some(id);
-        if let Err(e) = self.state.prefs.data.borrow().save() {
+        let mut st = self.state.borrow_mut();
+        st.prefs.data.spotify_client_id = Some(id);
+        if let Err(e) = st.prefs.data.save() {
             log::warn!("saving client id failed: {e}");
         }
         // Reached Login *from* Setup → offer a Back affordance there.
-        self.state.router.came_from_setup.set(true);
-        self.state.router.go_view(View::Login, ctx.timeline, ctx.now);
+        st.router.came_from_setup = true;
+        st.router.go_view(View::Login, ctx.timeline, ctx.now);
         self.rebuild.set(true);
     }
 }

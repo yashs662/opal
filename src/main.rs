@@ -114,17 +114,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => (win_w, win_h),
     };
 
-    let state = Rc::new(AppState::from_prefs(prefs));
+    // The whole app state lives behind one root `RefCell`: the build phase
+    // takes a shared `borrow()`, the frame tick a `borrow_mut()`, and the
+    // frame loop runs them in distinct non-overlapping passes. (Flatten-first
+    // step toward the TEA ownership flip — see PLAN_TEA.md.)
+    let state = Rc::new(std::cell::RefCell::new(AppState::from_prefs(prefs)));
     let force_home = std::env::var_os("OPAL_FORCE_HOME").is_some();
     #[cfg(feature = "automation")]
     let force_home = force_home || debug_cfg.as_ref().map(|c| c.force_home).unwrap_or(false);
     if force_home {
-        state.router.view.set(View::Home);
-    } else if state.prefs.data.borrow().client_id().is_none() {
+        state.borrow_mut().router.view = View::Home;
+    } else if state.borrow().prefs.data.client_id().is_none() {
         // No client id yet → go straight to first-run setup instead of
         // flashing the Splash "checking credentials" (there's nothing to
         // check, and an expired token couldn't be refreshed without an id).
-        state.router.view.set(View::Setup);
+        state.borrow_mut().router.view = View::Setup;
     }
 
     let mut app = App::new("Opal", win_w, win_h)
@@ -156,6 +160,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let icons = std::rc::Rc::new(widgets::icon::load_all(&mut app));
     let rebuild = app.rebuild_token();
+    // View-intent queue: callbacks push a `Msg` (via `Dispatch`, which also
+    // wakes the loop); the frame tick drains it through `app::update::drain`
+    // (TEA Stage 1 — see PLAN_TEA.md).
+    let msgs = app::msg::queue();
+    let dispatch = app::msg::Dispatch::new(msgs.clone(), app.wake_handle());
     // Connect to the dx devserver for runtime hot-patching (no-op unless the
     // `hotreload` feature is on). The patch handler latches a flag + wakes the
     // loop; the per-frame tick drains it into a scene rebuild.
@@ -163,26 +172,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker = Rc::new(Worker::new(app.wake_handle(), app.uploader()));
     // Stored tokens can only be refreshed with the user's own client id;
     // empty when unconfigured (then an expired pair just routes to login).
-    worker.try_load_tokens(state.prefs.data.borrow().client_id().unwrap_or_default());
+    worker.try_load_tokens(state.borrow().prefs.data.client_id().unwrap_or_default());
     // Hand the state the engine's frame sink so the Canvas decode thread
     // can push video frames onto the now-playing external node.
-    state.canvas.set_frame_sink(app.frame_sink());
+    state.borrow().canvas.set_frame_sink(app.frame_sink());
     // Stage the Canvas dim gradient — the model owns the gradient shape;
     // here we only do the GPU upload and hand the handle back.
     let (gw, gh, px) = CanvasModel::dim_grad_rgba();
-    state.canvas.set_dim_grad(app.stage_image_rgba(gw, gh, px));
+    state.borrow().canvas.set_dim_grad(app.stage_image_rgba(gw, gh, px));
 
     // Re-hydrate the album-art backdrop from the persisted last track so
     // it's populated before the user sees Home (disk-cache → near-instant).
     let last_cover = state
+        .borrow()
         .prefs
         .data
-        .borrow()
         .last_player
         .as_ref()
         .and_then(|p| p.album_image_url.clone());
     if let Some(url) = last_cover {
-        state.art.rehydrate_cover(&url, &worker);
+        state.borrow().art.rehydrate_cover(&url, &worker);
     }
     // Re-hydrate the last track's Canvas too (when enabled), so the
     // now-playing pane loops its video on cold start rather than only the
@@ -191,7 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `CanvasReady` handler decodes it (and ignores it if a different live
     // track has meanwhile started — see the reducer guard).
     let (last_uri, show_canvas) = {
-        let d = state.prefs.data.borrow();
+        let st = state.borrow();
+        let d = &st.prefs.data;
         (
             d.last_player.as_ref().map(|p| p.track_id.clone()),
             d.show_canvas,
@@ -207,17 +217,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The two views own their components + callbacks; the router state
     // (`state.router.view`) selects which one builds each scene rebuild —
     // `main` no longer composes any UI itself.
-    let wake = app.wake_handle();
-    // Hand the loop wake to settings so its off-thread cache scans can
-    // nudge the frame loop when their result is ready.
-    state.settings.set_wake(wake.clone());
-    let home_view = views::home::HomeView::new(
-        state.clone(),
-        worker.clone(),
-        rebuild.clone(),
-        icons.clone(),
-        wake,
-    );
+    // Hand the loop wake to settings so its off-thread cache scans (and the
+    // folder picker) can nudge the frame loop when their result is ready.
+    state.borrow_mut().settings.set_wake(app.wake_handle());
+    let home_view = views::home::HomeView::new(state.clone(), dispatch, icons.clone());
     let login_view =
         views::login::LoginView::new(state.clone(), worker.clone(), icons.clone(), rebuild.clone());
     let setup_view = views::setup::SetupView::new(state.clone(), icons.clone(), rebuild.clone());
@@ -229,7 +232,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // bodies on the next rebuild. Plain call-through when the feature
         // is off.
         app.scene(move |s| {
-            hotreload::call(|| match state.router.view.get() {
+            // Read the active view under a short shared borrow, released
+            // before the view's own `build` takes its build-phase borrow.
+            let view = state.borrow().router.view;
+            hotreload::call(|| match view {
                 View::Setup => setup_view.build(s),
                 View::Splash | View::Login => login_view.build(s),
                 View::Home => home_view.build(s),
@@ -241,7 +247,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         let worker = worker.clone();
         let rebuild = rebuild.clone();
-        app.on_frame(move |ctx, tl, now| app::frame::tick(&state, &worker, &rebuild, ctx, tl, now))
+        let msgs = msgs.clone();
+        app.on_frame(move |ctx, tl, now| {
+            app::frame::tick(&state, &worker, &rebuild, &msgs, ctx, tl, now)
+        })
     };
 
     // Force a final prefs flush on app close — picks up any mouse-up
@@ -250,9 +259,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // launch can re-hydrate the chrome immediately.
     let state_for_exit = state.clone();
     let app = app.on_exit(move || {
-        state_for_exit.prefs.flush_on_exit(
-            state_for_exit.player_ui.snapshot.borrow().as_ref(),
-            state_for_exit.canvas.show.get(),
+        let mut guard = state_for_exit.borrow_mut();
+        // Reborrow to a plain `&mut AppState` so the disjoint field borrows
+        // below (mut `prefs` + shared `player_ui`/`canvas`) are allowed — a
+        // `RefMut` would deref-borrow the whole guard.
+        let st = &mut *guard;
+        st.prefs.flush_on_exit(
+            st.player_ui.snapshot.as_ref(),
+            st.canvas.show.get(),
         );
     });
 

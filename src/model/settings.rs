@@ -4,7 +4,6 @@
 //! the last-measured on-disk cache usage shown in the storage bar, and
 //! the cross-thread handoff slot for the (blocking) folder-picker dialog.
 
-use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +18,7 @@ pub struct SettingsModel {
     /// Last-measured on-disk cache usage (art vs JSON), shown in the
     /// storage bar. Recomputed off-thread on open / clear / relocate and
     /// published here by the frame tick (see [`Self::take_pending_usage`]).
-    pub cache_usage: Cell<CacheUsage>,
+    pub cache_usage: CacheUsage,
     /// "Normalize volume" toggle state — seeded from prefs, drives the
     /// switch reactively. The pref is read at session start (applies on
     /// next launch), so this only mirrors + persists the choice.
@@ -33,26 +32,26 @@ pub struct SettingsModel {
     pending_usage: Arc<Mutex<Option<CacheUsage>>>,
     /// Loop wake handle, stored once after app construction so the cache
     /// scan/clear threads can nudge the frame loop to pick up their result.
-    wake: RefCell<Option<Arc<WakeHandle>>>,
+    wake: Option<Arc<WakeHandle>>,
 }
 
 impl SettingsModel {
     pub fn new(normalize: bool) -> Self {
         Self {
             overlay: Overlay::new(),
-            cache_usage: Cell::new(CacheUsage::default()),
+            cache_usage: CacheUsage::default(),
             normalize: Signal::new(normalize),
             pending_cache_dir: Arc::new(Mutex::new(None)),
             pending_usage: Arc::new(Mutex::new(None)),
-            wake: RefCell::new(None),
+            wake: None,
         }
     }
 
     /// Stash the loop wake handle (available only after the window/app is
     /// built). Lets the off-thread cache scans re-run the frame loop when
     /// their result is ready.
-    pub fn set_wake(&self, wake: Arc<WakeHandle>) {
-        *self.wake.borrow_mut() = Some(wake);
+    pub fn set_wake(&mut self, wake: Arc<WakeHandle>) {
+        self.wake = Some(wake);
     }
 
     /// Re-measure on-disk cache usage **off the UI thread** (settings open /
@@ -62,7 +61,7 @@ impl SettingsModel {
     /// [`Self::take_pending_usage`].
     pub fn refresh_usage(&self) {
         let pending = self.pending_usage.clone();
-        let wake = self.wake.borrow().clone();
+        let wake = self.wake.clone();
         std::thread::spawn(move || {
             let usage = disk_cache::usage();
             *pending.lock().unwrap() = Some(usage);
@@ -78,7 +77,7 @@ impl SettingsModel {
     /// in `pending_usage`.
     pub fn clear_cache(&self) {
         let pending = self.pending_usage.clone();
-        let wake = self.wake.borrow().clone();
+        let wake = self.wake.clone();
         std::thread::spawn(move || {
             let freed = disk_cache::clear();
             log::info!("cleared disk cache (freed {freed} bytes)");
@@ -99,17 +98,20 @@ impl SettingsModel {
 
     /// Open the native folder picker on a worker thread (the dialog
     /// blocks) and stash the chosen path for the frame loop to apply via
-    /// [`take_pending_dir`](Self::take_pending_dir); `wake` re-runs the
-    /// loop once a folder is picked.
-    pub fn pick_cache_dir(&self, wake: Arc<WakeHandle>) {
+    /// [`take_pending_dir`](Self::take_pending_dir); the stored wake re-runs
+    /// the loop once a folder is picked.
+    pub fn pick_cache_dir(&self) {
         let pending = self.pending_cache_dir.clone();
+        let wake = self.wake.clone();
         std::thread::spawn(move || {
             if let Some(dir) = rfd::FileDialog::new()
                 .set_title("Choose cache folder")
                 .pick_folder()
             {
                 *pending.lock().unwrap() = Some(dir);
-                wake.wake();
+                if let Some(w) = wake {
+                    w.wake();
+                }
             }
         });
     }

@@ -79,7 +79,7 @@ impl Component for SettingsPanel<'_> {
     fn view(&self, s: &mut Scene) {
         let icons = self.icons;
         // Measured on settings-open (a dir walk), not per build.
-        let cache_usage = self.settings.cache_usage.get();
+        let cache_usage = self.settings.cache_usage;
         let cache_path = disk_cache::root_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();

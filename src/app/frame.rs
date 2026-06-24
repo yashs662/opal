@@ -6,7 +6,7 @@
 //! background once the album-art backdrop fully covers it. Pure shell
 //! logic — no view building.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -14,19 +14,26 @@ use opal_gfx::{SceneCtx, Timeline};
 
 use crate::app::AppState;
 use crate::app::cx::Cx;
-use crate::app::reducer;
+use crate::app::msg::MsgQueue;
+use crate::app::{reducer, update};
 use crate::disk_cache;
 use crate::worker::Worker;
 
 pub fn tick(
-    state: &Rc<AppState>,
+    state: &Rc<RefCell<AppState>>,
     worker: &Rc<Worker>,
     rebuild: &Rc<Cell<bool>>,
+    msgs: &MsgQueue,
     ctx: &mut SceneCtx,
     tl: &mut Timeline,
     now: Instant,
 ) {
     let mut cx = Cx::new(tl, now, rebuild);
+    // Hold the single root borrow for the whole tick (the write phase). The
+    // build phase takes a shared `borrow()`; the frame loop runs the two in
+    // distinct, non-overlapping passes, so this never contends.
+    let mut guard = state.borrow_mut();
+    let state = &mut *guard;
     // A hot-patch landed since the last tick: rebuild so the patched
     // `Component::view` bodies run. No-op unless the `hotreload` feature is on.
     if crate::hotreload::take_patched() {
@@ -45,7 +52,7 @@ pub fn tick(
         // so rebuilds preserve the offset while navigation resets it. Read
         // the cached name (no per-frame `format!`).
         let scroll_node = state.router.detail_scroll_node();
-        if let Some(id) = scroll_node.as_deref().and_then(|n| ctx.node(n)) {
+        if let Some(id) = scroll_node.and_then(|n| ctx.node(n)) {
             // scroll offset is physical px; collapse range is logical.
             let off = ctx.tree.scroll_offset(id)[1] / ctx.scale.max(1.0);
             let collapse = (off / pl::COLLAPSE_RANGE).clamp(0.0, 1.0);
@@ -65,14 +72,14 @@ pub fn tick(
     // Publish a background cache-usage scan (settings open / clear /
     // relocate dispatched it off-thread) and repaint the storage bar.
     if let Some(usage) = state.settings.take_pending_usage() {
-        state.settings.cache_usage.set(usage);
+        state.settings.cache_usage = usage;
         cx.rebuild();
     }
     // Apply a cache relocation picked by the folder dialog: point the disk
     // cache at the new dir, persist it, rebuild so the storage bar refreshes.
     if let Some(dir) = state.settings.take_pending_dir() {
         disk_cache::set_root(Some(dir.clone()));
-        state.prefs.data.borrow_mut().cache_dir = Some(dir.display().to_string());
+        state.prefs.data.cache_dir = Some(dir.display().to_string());
         state.settings.refresh_usage();
         state.prefs.mark_dirty(cx.now);
         cx.rebuild();
@@ -106,8 +113,10 @@ pub fn tick(
     // window (the in-flight gate holds until the response lands).
     if let Some(rt) = state.auth.refresh_due(cx.now) {
         log::info!("access token nearing expiry — refreshing");
-        worker.refresh_tokens(rt, state.prefs.data.borrow().client_id().unwrap_or_default());
+        worker.refresh_tokens(rt, state.prefs.data.client_id().unwrap_or_default());
     }
+    // Apply view-emitted intents (clicks/nav/etc.) queued since last frame.
+    update::drain(state, worker, msgs, &mut cx);
     // Drain worker responses through the reducer.
     while let Some(resp) = worker.poll() {
         reducer::handle(state, &mut cx, worker, resp);
@@ -117,7 +126,7 @@ pub fn tick(
     // scroll outran the stream) into real tracks.
     if state.library.rows_appended.take() {
         let scroll_node = state.router.detail_scroll_node();
-        if let Some(name) = scroll_node.as_deref()
+        if let Some(name) = scroll_node
             && let Some(id) = ctx.node(name)
         {
             ctx.tree.invalidate_lazy_list(id);
@@ -134,7 +143,7 @@ pub fn tick(
             .as_ref()
             .map(|o| o.loading || !o.complete)
             .unwrap_or(false);
-        let queue_loading = matches!(*state.router.nav.borrow(), crate::views::MainNav::Queue)
+        let queue_loading = matches!(state.router.nav, crate::views::MainNav::Queue)
             && state.library.queue.borrow().is_none();
         let want = queue_loading
             || (streaming && state.router.detail_scroll_node().is_some());
@@ -158,7 +167,7 @@ pub fn tick(
     }
     // Debounced prefs save (panel widths + last-player snapshot).
     state.prefs.tick(
-        state.player_ui.snapshot.borrow().as_ref(),
+        state.player_ui.snapshot.as_ref(),
         state.canvas.show.get(),
         cx.tl,
         cx.now,

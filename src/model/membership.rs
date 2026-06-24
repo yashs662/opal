@@ -8,7 +8,6 @@
 //! list, the current track's membership (drives the heart + checkboxes),
 //! and the picker popup state. The heavy index stays in the worker.
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
 use opal_gfx::{Overlay, Signal, TextSignal};
@@ -46,11 +45,11 @@ pub struct MembershipTarget {
 pub struct MembershipModel {
     /// Editable playlists — picker rows + id→name lookup. From the worker's
     /// `MembershipLoaded`.
-    pub playlists: RefCell<Vec<MembershipPlaylist>>,
+    pub playlists: Vec<MembershipPlaylist>,
     /// Index loaded/built this session (picker shows a spinner until then).
-    pub ready: Cell<bool>,
+    pub ready: bool,
     /// The current track's playlist ids — drives the picker checkboxes.
-    pub current: RefCell<HashSet<String>>,
+    pub current: HashSet<String>,
     /// Current track is in ≥1 playlist; combined with `liked` for the heart
     /// fill.
     pub in_playlist: Signal<bool>,
@@ -61,73 +60,68 @@ pub struct MembershipModel {
     /// devices / settings popups).
     pub overlay: Overlay,
     /// The track the open picker acts on.
-    pub target: RefCell<MembershipTarget>,
+    pub target: MembershipTarget,
 }
 
 impl MembershipModel {
     pub fn new() -> Self {
         Self {
-            playlists: RefCell::default(),
-            ready: Cell::new(false),
-            current: RefCell::default(),
+            playlists: Vec::new(),
+            ready: false,
+            current: HashSet::new(),
             in_playlist: Signal::new(false),
             hint: TextSignal::new(""),
             overlay: Overlay::new(),
-            target: RefCell::default(),
+            target: MembershipTarget::default(),
         }
     }
 
     /// Point the picker at a track (called when the like icon opens it).
-    pub fn set_target(&self, target: MembershipTarget) {
-        *self.target.borrow_mut() = target;
+    pub fn set_target(&mut self, target: MembershipTarget) {
+        self.target = target;
     }
 
     /// Apply the loaded/refreshed playlist list (the index landed).
-    pub fn set_playlists(&self, playlists: Vec<MembershipPlaylist>) {
-        *self.playlists.borrow_mut() = playlists;
-        self.ready.set(true);
+    pub fn set_playlists(&mut self, playlists: Vec<MembershipPlaylist>) {
+        self.playlists = playlists;
+        self.ready = true;
     }
 
     /// Replace the current track's membership (from the worker's lookup) and
     /// refresh the derived heart state + tooltip.
-    pub fn set_current(&self, ids: Vec<String>, liked: bool) {
+    pub fn set_current(&mut self, ids: Vec<String>, liked: bool) {
         let set: HashSet<String> = ids.into_iter().collect();
         self.in_playlist.set(!set.is_empty());
-        *self.current.borrow_mut() = set;
+        self.current = set;
         self.rebuild_hint(liked);
     }
 
     /// Optimistically flip one playlist's membership for the current track
     /// (the picker checkbox), refreshing the heart + tooltip.
-    pub fn toggle_local(&self, playlist_id: &str, add: bool, liked: bool) {
-        {
-            let mut cur = self.current.borrow_mut();
-            if add {
-                cur.insert(playlist_id.to_string());
-            } else {
-                cur.remove(playlist_id);
-            }
-            self.in_playlist.set(!cur.is_empty());
+    pub fn toggle_local(&mut self, playlist_id: &str, add: bool, liked: bool) {
+        if add {
+            self.current.insert(playlist_id.to_string());
+        } else {
+            self.current.remove(playlist_id);
         }
+        self.in_playlist.set(!self.current.is_empty());
         self.rebuild_hint(liked);
     }
 
     /// Whether the current track is in playlist `id` (picker checkbox state).
     pub fn contains(&self, id: &str) -> bool {
-        self.current.borrow().contains(id)
+        self.current.contains(id)
     }
 
     /// Rebuild the heart tooltip from the current membership + liked flag.
     /// "Liked Songs, Chill, Focus" — or empty when in nothing.
     pub fn rebuild_hint(&self, liked: bool) {
-        let cur = self.current.borrow();
-        let names = self.playlists.borrow();
         let mut parts: Vec<&str> = Vec::new();
         if liked {
             parts.push("Liked Songs");
         }
-        for p in names.iter() {
-            if cur.contains(&p.id) {
+        for p in self.playlists.iter() {
+            if self.current.contains(&p.id) {
                 parts.push(p.name.as_str());
             }
         }

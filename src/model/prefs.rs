@@ -11,7 +11,6 @@
 //! passed *in* to the save methods rather than reached for, so this slice
 //! stays self-contained.
 
-use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use opal_gfx::{Curve, Signal, Timeline};
@@ -26,13 +25,13 @@ const PREFS_DEBOUNCE: Duration = Duration::from_millis(500);
 pub struct PrefsModel {
     /// The serialized preferences. Mutated in place (cache dir, last
     /// player, panel widths) and written by the debounced save.
-    pub data: RefCell<UserPreferences>,
+    pub data: UserPreferences,
     /// Resizable panel widths in logical px, driven live by the splitters
     /// (`width_px_bind`); snapshotted back into `data.panels` on save.
     pub sidebar_w: Signal<f32>,
     pub now_playing_w: Signal<f32>,
     /// Earliest unsaved change since the last save. `None` = clean.
-    dirty_since: Cell<Option<Instant>>,
+    dirty_since: Option<Instant>,
     /// Throwaway signal anchoring a timeline tween that keeps the loop
     /// awake until the debounce deadline. Value never read or rendered.
     save_anchor: Signal<f32>,
@@ -45,8 +44,8 @@ impl PrefsModel {
         Self {
             sidebar_w,
             now_playing_w,
-            data: RefCell::new(prefs),
-            dirty_since: Cell::new(None),
+            data: prefs,
+            dirty_since: None,
             save_anchor: Signal::new(0.0),
         }
     }
@@ -55,17 +54,17 @@ impl PrefsModel {
     /// [`Self::tick`] after [`PREFS_DEBOUNCE`] of quiescence. Sliding the
     /// timestamp forward on every call resets the debounce window, so a
     /// continuous splitter drag yields **one** save after the drag ends.
-    pub fn mark_dirty(&self, now: Instant) {
-        self.dirty_since.set(Some(now));
+    pub fn mark_dirty(&mut self, now: Instant) {
+        self.dirty_since = Some(now);
     }
 
     /// Copy the live player snapshot into prefs. **Only when one exists** —
     /// a fast close before the first cluster push (or with nothing
     /// playing) preserves the previously persisted snapshot instead of
     /// wiping it to blank.
-    fn snapshot_player(&self, player: Option<&CurrentlyPlaying>) {
+    fn snapshot_player(&mut self, player: Option<&CurrentlyPlaying>) {
         if let Some(p) = player {
-            self.data.borrow_mut().last_player = Some(StoredPlayer {
+            self.data.last_player = Some(StoredPlayer {
                 track_id: p.track_id.clone(),
                 name: p.name.clone(),
                 artist: p.artist.clone(),
@@ -79,15 +78,12 @@ impl PrefsModel {
 
     /// Snapshot the signal-backed values (player + panel widths + canvas
     /// flag) into the serialized prefs, then write to disk.
-    fn flush(&self, player: Option<&CurrentlyPlaying>, show_canvas: bool) -> std::io::Result<()> {
+    fn flush(&mut self, player: Option<&CurrentlyPlaying>, show_canvas: bool) -> std::io::Result<()> {
         self.snapshot_player(player);
-        {
-            let mut prefs = self.data.borrow_mut();
-            prefs.panels.sidebar_w = self.sidebar_w.get();
-            prefs.panels.now_playing_w = self.now_playing_w.get();
-            prefs.show_canvas = show_canvas;
-        }
-        self.data.borrow().save()
+        self.data.panels.sidebar_w = self.sidebar_w.get();
+        self.data.panels.now_playing_w = self.now_playing_w.get();
+        self.data.show_canvas = show_canvas;
+        self.data.save()
     }
 
     /// Debounced save tick (run from the frame loop). Writes once the
@@ -96,13 +92,13 @@ impl PrefsModel {
     /// even after the last user event (idempotent — `animate` on the same
     /// signal replaces any in-flight tween).
     pub fn tick(
-        &self,
+        &mut self,
         player: Option<&CurrentlyPlaying>,
         show_canvas: bool,
         tl: &mut Timeline,
         now: Instant,
     ) {
-        let Some(dirty_at) = self.dirty_since.get() else {
+        let Some(dirty_at) = self.dirty_since else {
             return;
         };
         let elapsed = now.saturating_duration_since(dirty_at);
@@ -111,7 +107,7 @@ impl PrefsModel {
                 Ok(()) => log::debug!("prefs saved"),
                 Err(e) => log::warn!("prefs save failed: {e}"),
             }
-            self.dirty_since.set(None);
+            self.dirty_since = None;
             tl.stop_for(&self.save_anchor);
         } else {
             let remaining = PREFS_DEBOUNCE - elapsed + Duration::from_millis(50);
@@ -125,13 +121,13 @@ impl PrefsModel {
     /// signal-backed panel widths too so the live UI matches, and clears the
     /// configured client id — the caller then routes back to the setup view.
     /// Best-effort write; logged, not propagated.
-    pub fn reset(&self) {
+    pub fn reset(&mut self) {
         let defaults = UserPreferences::default();
         self.sidebar_w.set(defaults.panels.sidebar_w);
         self.now_playing_w.set(defaults.panels.now_playing_w);
-        *self.data.borrow_mut() = defaults;
-        self.dirty_since.set(None);
-        match self.data.borrow().save() {
+        self.data = defaults;
+        self.dirty_since = None;
+        match self.data.save() {
             Ok(()) => log::info!("preferences reset to defaults"),
             Err(e) => log::warn!("preferences reset save failed: {e}"),
         }
@@ -140,7 +136,7 @@ impl PrefsModel {
     /// Force a final flush on app close — picks up a mouse-up we might
     /// have missed (drag released outside the window) and persists the
     /// live snapshot so the next launch re-hydrates immediately.
-    pub fn flush_on_exit(&self, player: Option<&CurrentlyPlaying>, show_canvas: bool) {
+    pub fn flush_on_exit(&mut self, player: Option<&CurrentlyPlaying>, show_canvas: bool) {
         match self.flush(player, show_canvas) {
             Ok(()) => log::info!("prefs flushed on exit"),
             Err(e) => log::warn!("prefs flush on exit failed: {e}"),

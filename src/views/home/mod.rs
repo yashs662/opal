@@ -17,23 +17,21 @@ pub mod show_all;
 pub mod sidebar;
 pub mod top_bar;
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Instant;
-
-use opal_gfx::{Computed, EventCtx, ImageHandle, Len, Scene, Signal, WakeHandle};
+use opal_gfx::{Computed, EventCtx, ImageHandle, Len, Scene, Signal};
 
 use crate::album_art;
 use crate::api::PlayTarget;
 use crate::app::AppState;
 use crate::app::cx::Cx;
-use crate::views::{HomeSection, MainNav, View};
+use crate::app::msg::{Dispatch, Msg};
+use crate::views::{HomeSection, MainNav};
 use crate::widgets::component::Component;
 use crate::widgets::crossfade::OPAQUE_TINT;
 use crate::widgets::icon::IconSet;
 use crate::widgets::tokens as t;
-use crate::worker::{PlaybackCmd, Worker};
+use crate::worker::Worker;
 
 /// Centre-pane navigation callback — opens a playlist or returns Home.
 /// Takes the `EventCtx` so it can start the entrance transition tween at
@@ -248,7 +246,7 @@ fn render(s: &mut Scene, v: &Layout) {
 /// and assembles the scene ([`HomeView::build`]). This is the composition
 /// that used to live in `main`.
 pub struct HomeView {
-    state: Rc<AppState>,
+    state: Rc<RefCell<AppState>>,
     icons: Rc<IconSet>,
     on_action: Rc<dyn Fn(PlayerAction)>,
     on_canvas_change: Rc<dyn Fn()>,
@@ -274,333 +272,109 @@ pub struct HomeView {
 }
 
 impl HomeView {
-    /// Build the view + all its event callbacks once. The callbacks
-    /// capture `Rc` clones of the shared state/worker/rebuild so they
-    /// outlive any single rebuild; `wake` lets the folder-picker thread
-    /// re-run the loop.
-    pub fn new(
-        state: Rc<AppState>,
-        worker: Rc<Worker>,
-        rebuild: Rc<Cell<bool>>,
-        icons: Rc<IconSet>,
-        wake: Arc<WakeHandle>,
-    ) -> Self {
-        // Transport dispatcher: optimistic model flip + the worker command.
+    /// Build the view + all its event callbacks once. Post-TEA the callbacks
+    /// capture only the `msgs` queue (not the models / worker / rebuild),
+    /// pushing typed intents the frame tick drains through `app::update`.
+    pub fn new(state: Rc<RefCell<AppState>>, dispatch: Dispatch, icons: Rc<IconSet>) -> Self {
+        // TEA emitters: each host callback now just pushes a typed `Msg`
+        // onto the queue (capturing only the queue, not the models). The
+        // frame tick drains them through `app::update`, which holds the
+        // actual logic. See PLAN_TEA.md.
         let on_action: Rc<dyn Fn(PlayerAction)> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move |action| {
-                let Some(token) = state.auth.token() else {
-                    log::warn!("playback action ignored — no auth token");
-                    return;
-                };
-                let cmd = match action {
-                    PlayerAction::PlayPause => {
-                        let was_playing = state.player_ui.toggle_play();
-                        let local = state.devices.playing_on_self.get();
-                        if was_playing {
-                            worker.playback(token, PlaybackCmd::Pause, local);
-                            return;
-                        }
-                        // Resume. On cold start nothing is actually playing on
-                        // any device (no live push yet — the snapshot is just
-                        // the persisted seed), so a bare Web API resume 404s /
-                        // no-ops — start the last-played track at exactly the
-                        // position the chrome already shows, so the play button
-                        // matches the displayed progress instead of restarting
-                        // (and without the user first picking a song).
-                        if !state.player_ui.live.get() {
-                            let last = state.prefs.data.borrow().last_player.as_ref().map(|p| {
-                                (p.track_id.clone(), p.progress_ms as u32, p.context_uri.clone())
-                            });
-                            if let Some((uri, position_ms, context_uri)) = last {
-                                // The worker fills a missing context with the
-                                // track's album so playback continues past it.
-                                worker.playback(
-                                    token,
-                                    PlaybackCmd::PlayContext(crate::api::PlayTarget::Resume {
-                                        uri,
-                                        position_ms,
-                                        context_uri,
-                                    }),
-                                    false,
-                                );
-                                return;
-                            }
-                        }
-                        worker.playback(token, PlaybackCmd::Play, local);
-                        return;
-                    }
-                    PlayerAction::Next => PlaybackCmd::Next,
-                    PlayerAction::Prev => PlaybackCmd::Prev,
-                    PlayerAction::ToggleShuffle => {
-                        PlaybackCmd::Shuffle(state.player_ui.toggle_shuffle())
-                    }
-                    PlayerAction::CycleRepeat => {
-                        PlaybackCmd::Repeat(state.player_ui.cycle_repeat())
-                    }
-                    PlayerAction::SetVolume(pct) => PlaybackCmd::Volume(pct),
-                };
-                // Drive our own Spirc directly when Opal is the active
-                // device (instant + reliable; the Web API relay to self can
-                // go stale after long uptime).
-                let local = state.devices.playing_on_self.get();
-                worker.playback(token, cmd, local);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |action| dispatch.send(Msg::Transport(action)))
         };
         let on_canvas_change: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move || {
-                state.prefs.mark_dirty(Instant::now());
-                state
-                    .canvas
-                    .on_toggle(state.player_ui.snapshot.borrow().as_ref(), &worker);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::CanvasToggle))
         };
         let sign_out: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move || {
-                state.auth.sign_out();
-                // Leaving Home — snap the modal shut so it isn't up next sign-in.
-                state.settings.overlay.reset();
-                // Logout lands on Login directly (not from Setup) → no Back.
-                state.router.came_from_setup.set(false);
-                state.router.view.set(View::Login);
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::SignOut))
         };
         let on_settings_open: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move || {
-                state.settings.refresh_usage();
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::SettingsOpen))
         };
         let on_devices_open: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move || {
-                // Fresh list on every open — devices are live state.
-                if let Some(token) = state.auth.token() {
-                    worker.fetch_devices(token);
-                }
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::DevicesOpen))
         };
         let on_like_open: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move || {
-                // Point the picker at the current track (uri + bare id for the
-                // Liked-Songs row + header), then rebuild so the popup mounts.
-                if let Some(target) = state.player_ui.with_snapshot(|p| {
-                    let id = crate::api::track_id_from_uri(&p.track_id)
-                        .unwrap_or_default()
-                        .to_string();
-                    crate::model::MembershipTarget {
-                        uri: p.track_id.clone(),
-                        id,
-                        name: p.name.clone(),
-                        artist: p.artist.clone(),
-                    }
-                }) {
-                    state.membership.set_target(target);
-                }
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::LikeOpen))
         };
         let on_like_toggle_playlist: Rc<dyn Fn(String, bool)> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            let rebuild = rebuild.clone();
+            let dispatch = dispatch.clone();
             Rc::new(move |playlist_id, add| {
-                let Some(token) = state.auth.token() else { return };
-                let uri = state.membership.target.borrow().uri.clone();
-                if uri.is_empty() {
-                    return;
-                }
-                // Optimistic flip (heart + checkbox) — the worker confirms,
-                // and rolls back via MembershipEditFailed on error.
-                state
-                    .membership
-                    .toggle_local(&playlist_id, add, state.player_ui.liked.get());
-                // Live-patch the open page if it's this playlist, and drop its
-                // in-memory cache so a re-open also reflects the edit (the disk
-                // pages are evicted worker-side).
-                if add {
-                    if let Some(track) = target_track(&state) {
-                        state.library.open_add_track(&state.art, false, &playlist_id, &track);
-                    }
-                } else {
-                    state.library.open_remove_track(false, &playlist_id, &uri);
-                }
-                state.library.invalidate_cached(&playlist_id);
-                worker.edit_membership(token, playlist_id, uri, add);
-                rebuild.set(true);
+                dispatch.send(Msg::LikeTogglePlaylist { playlist_id, add })
             })
         };
         let on_like_toggle_liked: Rc<dyn Fn(bool)> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move |add| {
-                let Some(token) = state.auth.token() else { return };
-                let target_uri = state.membership.target.borrow().uri.clone();
-                let id = state.membership.target.borrow().id.clone();
-                if id.is_empty() {
-                    return;
-                }
-                // Optimistic flip; the worker's SavedState echo reconciles.
-                state.player_ui.liked.set(add);
-                state.membership.rebuild_hint(add);
-                // Live-patch the open Liked Songs page (newest-first) + drop
-                // its in-memory cache so a re-open is also correct.
-                if add {
-                    if let Some(track) = target_track(&state) {
-                        state
-                            .library
-                            .open_add_track(&state.art, true, crate::api::LIKED_SONGS_ID, &track);
-                    }
-                } else {
-                    state
-                        .library
-                        .open_remove_track(true, crate::api::LIKED_SONGS_ID, &target_uri);
-                }
-                state.library.invalidate_cached(crate::api::LIKED_SONGS_ID);
-                worker.set_saved(token, id, add);
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |add| dispatch.send(Msg::LikeToggleLiked(add)))
         };
         let on_transfer: Rc<dyn Fn(String)> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move |device_id| {
-                let Some(token) = state.auth.token() else { return };
-                // When leaving Opal itself, carry our locally-tracked
-                // position — the Web API transfer drops the librespot
-                // device's position and the target would restart at 0:00.
-                let position_ms = state.devices.playing_on_self.get().then(|| {
-                    state
-                        .player_ui
-                        .snapshot
-                        .borrow()
-                        .as_ref()
-                        .map(|p| p.live_progress_ms() as u32)
-                        .unwrap_or(0)
-                });
-                log::info!("transferring playback to {device_id} (pos={position_ms:?})");
-                worker.transfer_playback(token, device_id, position_ms);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |device_id| dispatch.send(Msg::Transfer(device_id)))
         };
         let on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)> = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move |q| {
-                state.prefs.data.borrow_mut().audio.quality = q;
-                state.prefs.mark_dirty(Instant::now());
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |q| dispatch.send(Msg::SetQuality(q)))
         };
         let on_normalize: Rc<dyn Fn()> = {
-            let state = state.clone();
-            Rc::new(move || {
-                // The toggle already flipped the signal; persist its new
-                // value (applied at the next session start).
-                let on = state.settings.normalize.get();
-                state.prefs.data.borrow_mut().audio.normalize = on;
-                state.prefs.mark_dirty(Instant::now());
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::ToggleNormalize))
         };
         let on_skip: Rc<dyn Fn(u32)> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move |count| {
-                let Some(token) = state.auth.token() else { return };
-                // Local (Spirc) skip when Opal is the active device —
-                // instant + reliable; else repeated Web API next on the
-                // remote device.
-                let local = state.devices.playing_on_self.get();
-                worker.skip_forward(token, count, local);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |count| dispatch.send(Msg::Skip(count)))
         };
         let on_context_menu: CtxMenuFn = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
+            let dispatch = dispatch.clone();
             Rc::new(move |ctx, target| {
-                // Cursor is physical px; the menu's `.abs()` is logical.
+                // Read the cursor at emit time (physical px → logical, as the
+                // menu's `.abs()` expects) and carry it in the intent.
                 let scale = ctx.tree.scale().max(1.0);
                 let pos = [ctx.cursor[0] / scale, ctx.cursor[1] / scale];
-                state.menu.show(target, pos);
-                rebuild.set(true);
+                dispatch.send(Msg::OpenContextMenu { pos, target });
             })
         };
         let on_add_queue: Rc<dyn Fn(String)> = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move |uri| {
-                if let Some(token) = state.auth.token() {
-                    worker.add_to_queue(token, uri);
-                }
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |uri| dispatch.send(Msg::AddQueue(uri)))
         };
         let on_menu_close: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move || {
-                state.menu.close();
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::MenuClose))
         };
         let on_clear_cache: Rc<dyn Fn()> = {
-            let state = state.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move || {
-                // Off-thread clear + re-scan; the storage bar repaints when
-                // the fresh usage lands (frame tick → `take_pending_usage`).
-                state.settings.clear_cache();
-                rebuild.set(true);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::ClearCache))
         };
         let on_change_cache_dir: Rc<dyn Fn()> = {
-            let state = state.clone();
-            Rc::new(move || state.settings.pick_cache_dir(wake.clone()))
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::ChangeCacheDir))
         };
         let on_navigate: NavFn = {
-            let state = state.clone();
-            let worker = worker.clone();
-            let rebuild = rebuild.clone();
-            Rc::new(move |ctx, nav| {
-                let mut cx = Cx::new(ctx.timeline, ctx.now, &rebuild);
-                navigate(&state, &mut cx, &worker, nav);
-            })
+            // Stage-1 TEA: the host callback is now a pure emitter — it pushes
+            // the intent onto the queue (capturing only the queue, not the
+            // models). The frame tick drains it through `app::update` with the
+            // frame's `Cx`. See PLAN_TEA.md.
+            let dispatch = dispatch.clone();
+            Rc::new(move |_ctx, nav| dispatch.send(Msg::Navigate(nav)))
         };
         let request_cover: playlist::CoverFn = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move |url| state.art.dispatch_cover(&worker, url))
+            let dispatch = dispatch.clone();
+            Rc::new(move |url| dispatch.send(Msg::RequestCover(url)))
         };
         let on_play: PlayFn = {
-            let state = state.clone();
-            let worker = worker.clone();
-            Rc::new(move |target| {
-                let Some(token) = state.auth.token() else {
-                    log::warn!("play ignored — no auth token");
-                    return;
-                };
-                state.player_ui.is_playing.set(true);
-                // PlayContext is a context load, not a transport verb — it
-                // always takes the Web API path (the `local` flag is ignored
-                // for it), so `false` here is just the documented default.
-                worker.playback(token, PlaybackCmd::PlayContext(target), false);
-            })
+            let dispatch = dispatch.clone();
+            Rc::new(move |target| dispatch.send(Msg::Play(target)))
         };
         let mark_dirty: Rc<dyn Fn()> = {
-            let state = state.clone();
-            Rc::new(move || state.prefs.mark_dirty(Instant::now()))
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::MarkDirty))
         };
         Self {
             state,
@@ -632,9 +406,12 @@ impl HomeView {
     /// Assemble the Home scene: build the view data + sub-components from
     /// the live model and hand them to the shell `render`.
     pub fn build(&self, s: &mut Scene) {
-        let state = &self.state;
+        // Shared root borrow for the whole build (the read phase) — never
+        // overlaps the tick's `borrow_mut` (distinct frame-loop passes).
+        let state = self.state.borrow();
+        let state = &*state;
         let icons = &self.icons;
-        let nav = state.router.nav.borrow();
+        let nav = &state.router.nav;
         // Hold the home borrow for the whole build (read-only feed data).
         // The art model is passed by reference and looked up narrowly per
         // tile (`art.signal`) — deliberately NOT a held `home_art` borrow,
@@ -642,11 +419,11 @@ impl HomeView {
         let home_ref = state.library.home.borrow();
         // Both playlist + album pages render through the playlist view (an
         // album is a track list with a context_uri); the hero label differs.
-        let kind_label = match &*nav {
+        let kind_label = match nav {
             MainNav::Album { .. } => "Album",
             _ => "Playlist",
         };
-        let playlist: Option<playlist::PlaylistViewData> = match &*nav {
+        let playlist: Option<playlist::PlaylistViewData> = match nav {
             MainNav::Playlist { .. } | MainNav::Album { .. } => {
                 state.library.open_playlist.borrow().as_ref().map(|o| {
                     let cover = o
@@ -675,7 +452,7 @@ impl HomeView {
         };
         // Artist page view data: bake album cover signals + lazily dispatch
         // their fetches (idempotent), mirroring how playlist rows resolve.
-        let artist_data: Option<artist::ArtistViewData> = match &*nav {
+        let artist_data: Option<artist::ArtistViewData> = match nav {
             MainNav::Artist { .. } => state.library.open_artist.borrow().as_ref().map(|a| {
                 let image = a
                     .image_url
@@ -727,7 +504,7 @@ impl HomeView {
             }),
             _ => None,
         };
-        let show_all_data: Option<show_all::ShowAllViewData> = match &*nav {
+        let show_all_data: Option<show_all::ShowAllViewData> = match nav {
             MainNav::ShowAll { section } => Some(build_show_all(&state.art, &home_ref, *section)),
             _ => None,
         };
@@ -752,7 +529,7 @@ impl HomeView {
         let sidebar = sidebar::Sidebar {
             width: &state.prefs.sidebar_w,
             accent: &state.backdrop.accent,
-            nav: &nav,
+            nav,
             on_navigate: self.on_navigate.clone(),
             home: &home_ref,
             art: &state.art,
@@ -768,7 +545,7 @@ impl HomeView {
             home: &home_ref,
             art: &state.art,
             accent: &state.backdrop.accent,
-            nav: &nav,
+            nav,
             playlist: playlist.as_ref(),
             artist: artist_data.as_ref(),
             show_all: show_all_data.as_ref(),
@@ -791,7 +568,7 @@ impl HomeView {
             on_canvas_change: self.on_canvas_change.clone(),
             on_clear_cache: self.on_clear_cache.clone(),
             on_change_cache_dir: self.on_change_cache_dir.clone(),
-            quality: state.prefs.data.borrow().audio.quality,
+            quality: state.prefs.data.audio.quality,
             on_quality: self.on_quality.clone(),
             on_normalize: self.on_normalize.clone(),
         };
@@ -838,15 +615,14 @@ impl HomeView {
 /// and duration from the now-playing snapshot when it's still that track.
 /// Used to live-patch an open playlist / Liked Songs page when the user
 /// toggles membership, so the change shows without leaving the page.
-fn target_track(state: &AppState) -> Option<crate::api::PlaylistTrack> {
-    let target = state.membership.target.borrow();
+pub(crate) fn target_track(state: &AppState) -> Option<crate::api::PlaylistTrack> {
+    let target = &state.membership.target;
     if target.uri.is_empty() {
         return None;
     }
     let (album_image_url, duration_ms) = state
         .player_ui
         .snapshot
-        .borrow()
         .as_ref()
         .filter(|p| p.track_id == target.uri)
         .map(|p| (p.album_image_url.clone(), p.duration_ms))
@@ -992,7 +768,7 @@ fn build_show_all(
 /// (TTL cache → fetch on miss/stale) via the library slice, flips the nav
 /// state + entrance transition via the router, and requests the one scene
 /// rebuild that swaps the pane content.
-fn navigate(state: &Rc<AppState>, cx: &mut Cx, worker: &Worker, nav: MainNav) {
+pub(crate) fn navigate(state: &mut AppState, cx: &mut Cx, worker: &Worker, nav: MainNav) {
     match &nav {
         MainNav::Playlist { id, liked } => {
             *state.library.open_artist.borrow_mut() = None;

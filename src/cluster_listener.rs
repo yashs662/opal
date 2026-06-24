@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use librespot_core::dealer::Subscription;
@@ -227,7 +227,28 @@ fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
         .map(|s| spotify_image_uri_to_https(s));
 
     let is_playing = !state.is_paused && state.is_playing;
-    let progress_ms = state.position_as_of_timestamp.max(0) as u64;
+    // `position_as_of_timestamp` is the position sampled at Spotify's server
+    // `timestamp` (Unix ms) — NOT now. While playing, the real position has
+    // advanced by (now - timestamp) since then. Spotify only re-samples the
+    // timestamp on a state transition (play/pause/seek/track), so an
+    // unrelated cluster re-broadcast — e.g. a new device merely *joining* the
+    // session with playback already running on a third device — ships the
+    // stale transition-time pair. Anchoring that raw position to
+    // `Instant::now()` (as we used to) threw away the elapsed gap, snapping
+    // the bar back and making the song appear to restart. Fold the gap in
+    // here so `progress_anchor = now` stays consistent. (Matches librespot's
+    // own `update_position_in_relation`: position += now - timestamp.)
+    let base = state.position_as_of_timestamp.max(0) as u64;
+    let progress_ms = if is_playing && state.timestamp > 0 {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let elapsed = (now_ms - state.timestamp).max(0) as u64;
+        base + elapsed
+    } else {
+        base
+    };
     let progress_anchor = Instant::now();
     let duration_ms = state.duration.max(0) as u64;
 

@@ -15,24 +15,24 @@ use crate::worker::{Worker, WorkerResponse};
 /// the setup view if the user hasn't configured a client id yet, else the
 /// login view. Eases in via `go_view` (no-op if already there) + requests
 /// the mount rebuild.
-fn land_pre_auth(state: &Rc<AppState>, cx: &mut Cx) {
+fn land_pre_auth(state: &mut AppState, cx: &mut Cx) {
     // Landing here is startup/logout, not a Setup→Login save, so no Back.
-    state.router.came_from_setup.set(false);
+    state.router.came_from_setup = false;
     // From Splash (the startup credential check) go to login when a client
     // id is configured, else to first-run setup. `go_view` retweens + we
     // request the mount rebuild; it no-ops if we're already there.
-    let target = if state.prefs.data.borrow().client_id().is_some() {
+    let target = if state.prefs.data.client_id().is_some() {
         View::Login
     } else {
         View::Setup
     };
-    if state.router.view.get() != target {
+    if state.router.view != target {
         state.router.go_view(target, cx.tl, cx.now);
         cx.rebuild();
     }
 }
 
-pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: WorkerResponse) {
+pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: WorkerResponse) {
     match resp {
         WorkerResponse::PlaybackFailed { cmd } => {
             // Roll the optimistic chrome flips (play/pause icon, shuffle
@@ -55,7 +55,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             }
             // Persist (debounced) so the device volume survives restarts
             // and seeds the Connect device's advertised initial volume.
-            state.prefs.data.borrow_mut().audio.volume = fraction.clamp(0.0, 1.0);
+            state.prefs.data.audio.volume = fraction.clamp(0.0, 1.0);
             state.prefs.mark_dirty(cx.now);
         }
         WorkerResponse::OAuthStarted { auth_url } => {
@@ -91,7 +91,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 worker.query_membership(uri);
             }
             let (initial_volume, quality, normalize) = {
-                let p = state.prefs.data.borrow();
+                let p = &state.prefs.data;
                 (p.audio.volume, p.audio.quality, p.audio.normalize)
             };
             worker.connect_spotify_session(
@@ -101,8 +101,8 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 normalize,
             );
             state.auth.set(auth);
-            if state.router.view.get() != View::Home {
-                state.router.view.set(View::Home);
+            if state.router.view != View::Home {
+                state.router.view = View::Home;
                 cx.rebuild();
             }
         }
@@ -128,13 +128,13 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::SpotifySessionConnected { device_id } => {
             log::info!("librespot session ready — seeding initial /me/player state");
-            *state.devices.self_id.borrow_mut() = device_id;
+            state.devices.self_id = device_id;
             if let Some(token) = state.auth.token() {
                 worker.seed_player_state(token);
             }
         }
         WorkerResponse::Devices { devices } => {
-            *state.devices.list.borrow_mut() = devices;
+            state.devices.list = devices;
             // The popup is open (it dispatched this fetch) — rebuild so
             // the rows appear.
             cx.rebuild();
@@ -145,7 +145,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 .devices
                 .remote_active
                 .set(!is_self && !device_id.is_empty());
-            *state.devices.active_id.borrow_mut() = device_id;
+            state.devices.active_id = device_id;
             state.devices.playing_on_self.set(is_self);
             // Active-row highlight in the popup, if it's open.
             if state.devices.overlay.is_open() {
@@ -201,7 +201,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 }
             }
             *state.library.queue.borrow_mut() = Some(tracks);
-            if matches!(*state.router.nav.borrow(), crate::views::MainNav::Queue) {
+            if matches!(state.router.nav, crate::views::MainNav::Queue) {
                 cx.rebuild();
             }
         }
@@ -269,7 +269,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             if let Some(token) = state.auth.token() {
                 log::warn!("librespot session lost — reconnecting Connect device");
                 let (initial_volume, quality, normalize) = {
-                    let p = state.prefs.data.borrow();
+                    let p = &state.prefs.data;
                     (p.audio.volume, p.audio.quality, p.audio.normalize)
                 };
                 worker.connect_spotify_session(token, initial_volume, quality, normalize);
@@ -371,7 +371,7 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     // it's open and we're the active player, re-pull the Web
                     // API queue each track so the continuation stays live.
                     if state.devices.playing_on_self.get()
-                        && matches!(*state.router.nav.borrow(), crate::views::MainNav::Queue)
+                        && matches!(state.router.nav, crate::views::MainNav::Queue)
                         && let Some(token) = state.auth.token()
                     {
                         worker.fetch_queue(token);
@@ -449,7 +449,6 @@ pub fn handle(state: &Rc<AppState>, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 && state
                     .prefs
                     .data
-                    .borrow()
                     .last_player
                     .as_ref()
                     .and_then(|p| p.album_image_url.as_ref().map(|u| album_art::cache_key(u)))

@@ -5,7 +5,9 @@
 
 pub mod cx;
 pub mod frame;
+pub mod msg;
 pub mod reducer;
 pub mod state;
+pub mod update;
 
 pub use state::AppState;
