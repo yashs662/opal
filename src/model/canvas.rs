@@ -2,7 +2,7 @@
 //!
 //! Owns the resolved/cached clip path, the off-thread decode session, the
 //! engine `FrameSink` + live target node shared with that thread, and the
-//! hover-driven dim overlay. The decode thread presents frames at a
+//! media window's hover-reveal chrome. The decode thread presents frames at a
 //! running deadline (so decode time doesn't drop the effective fps) onto
 //! the now-playing `.external()` node, following scene rebuilds via the
 //! shared [`node`](Self::node) slot.
@@ -16,17 +16,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use opal_gfx::node::NodeId;
-use opal_gfx::{Curve, FrameSink, ImageHandle, Signal, Timeline};
+use opal_gfx::{Curve, FrameSink, Signal, Timeline};
 
 use crate::api::{CurrentlyPlaying, track_id_from_uri};
 use crate::worker::Worker;
 
-/// Resting alpha of the dark overlay over the Canvas video (dimmed until
-/// hovered). 0 = no dim.
-const CANVAS_DIM_ALPHA: f32 = 0.5;
+/// Resting alpha of the dark scrim over the Canvas video — dimmed until
+/// hovered so the pane doesn't outshine the rest of the UI. The view
+/// derives the scrim colour from [`CanvasModel::hover_t`].
+pub const CANVAS_DIM_ALPHA: f32 = 0.5;
 
-/// Brightness tween duration when the Canvas video is hovered / un-hovered.
-const CANVAS_DIM_DURATION: Duration = Duration::from_millis(280);
+/// Tween duration for the pane's hover chrome (video brightness + the
+/// hide arrow, both riding [`CanvasModel::hover_t`]).
+const HOVER_REVEAL_DURATION: Duration = Duration::from_millis(280);
 
 /// A running Canvas-video decode: the track it's decoding and the flag
 /// the decode thread polls so a track change (or canvas-off) can stop it.
@@ -43,14 +45,13 @@ pub struct CanvasModel {
     /// scene-build time to choose the now-playing layout. Cell (not
     /// Signal): the swap is a deliberate rebuild, not a reactive bind.
     pub active: bool,
-    /// Hover state of the now-playing Canvas video (set by `.on_hover`).
+    /// Hover state of the now-playing media window (set by `.on_hover`).
     pub hover: Signal<bool>,
-    /// Alpha of the dark overlay over the video — dimmed at rest, tweened
-    /// to 0 (full brightness) on hover. Bound to the overlay's colour.
-    pub dim: Signal<f32>,
-    /// Staged black dim gradient (opaque top → transparent over the
-    /// bottom, matching the video's edge fade), tinted by [`dim`](Self::dim).
-    pub dim_grad: Option<ImageHandle>,
+    /// Hover-reveal progress for the pane's chrome: tweened 0 → 1 on
+    /// hover, back on leave. Bound to the hide button's opacity AND
+    /// (inverted) to the video dim scrim — dimmed at rest, full
+    /// brightness on hover.
+    pub hover_t: Signal<f32>,
 
     /// Resolved + cached clip for the current track: `(track_id, mp4_path)`.
     /// Set by `CanvasReady`, cleared on track change / `CanvasNone`.
@@ -83,8 +84,7 @@ impl CanvasModel {
             show: Signal::new(show_canvas),
             active: false,
             hover: Signal::new(false),
-            dim: Signal::new(CANVAS_DIM_ALPHA),
-            dim_grad: None,
+            hover_t: Signal::new(0.0),
             path: None,
             frame_sink: None,
             node: Arc::new(Mutex::new(None)),
@@ -98,38 +98,6 @@ impl CanvasModel {
     /// Install the engine frame sink (after the `App` is built).
     pub fn set_frame_sink(&mut self, sink: Arc<FrameSink>) {
         self.frame_sink = Some(sink);
-    }
-
-    /// RGBA pixels `(w, h, rgba)` for the dim-overlay gradient: solid
-    /// black over the top, fading to transparent across the bottom 35% so
-    /// it matches the video's own `fade_bottom(0.35)` edge fade. The
-    /// gradient *shape* is canvas knowledge and lives here; the host only
-    /// does the GPU upload (the one part that needs the engine) and hands
-    /// the resulting handle back via [`set_dim_grad`](Self::set_dim_grad).
-    /// Tinted at draw time by [`dim`](Self::dim).
-    pub fn dim_grad_rgba() -> (u32, u32, Vec<u8>) {
-        let (gw, gh) = (4u32, 256u32);
-        let fade_start = 0.65f32;
-        let mut px = Vec::with_capacity((gw * gh * 4) as usize);
-        for y in 0..gh {
-            let f = y as f32 / (gh - 1) as f32;
-            let a = if f < fade_start {
-                1.0
-            } else {
-                ((1.0 - f) / (1.0 - fade_start)).clamp(0.0, 1.0)
-            };
-            let a = (a * 255.0) as u8;
-            for _ in 0..gw {
-                px.extend_from_slice(&[0, 0, 0, a]);
-            }
-        }
-        (gw, gh, px)
-    }
-
-    /// Install the staged dim-gradient handle (host uploads
-    /// [`dim_grad_rgba`](Self::dim_grad_rgba) and hands back the handle).
-    pub fn set_dim_grad(&mut self, handle: ImageHandle) {
-        self.dim_grad = Some(handle);
     }
 
     // --- cached clip path ---------------------------------------------
@@ -171,20 +139,33 @@ impl CanvasModel {
         let want = self.has_video.load(Ordering::Relaxed);
         if want != self.active {
             self.active = want;
+            if !want {
+                // Falling edge: sweep the external texture again.
+                // `stop_decode` already cleared once, but the decode
+                // thread may have committed one more frame between the
+                // stop flag being set and its next check — by this frame
+                // it has seen the flag, so this clear is the last word
+                // (no lingering final frame over the album art).
+                if let (Some(sink), Some(node)) =
+                    (self.frame_sink.clone(), *self.node.lock().unwrap())
+                {
+                    sink.clear(node);
+                }
+            }
             true
         } else {
             false
         }
     }
 
-    /// Tween the dim overlay on hover transitions: bright (0) while
-    /// hovered, dimmed at rest.
-    pub fn tick_dim(&mut self, tl: &mut Timeline, now: Instant) {
+    /// Fade the media window's hover chrome on hover transitions: shown
+    /// while hovered, hidden at rest.
+    pub fn tick_hover(&mut self, tl: &mut Timeline, now: Instant) {
         let hov = self.hover.get();
         if hov != self.hover_last {
             self.hover_last = hov;
-            let target = if hov { 0.0 } else { CANVAS_DIM_ALPHA };
-            tl.animate(&self.dim, target, Curve::EaseInOut, CANVAS_DIM_DURATION, now);
+            let target = if hov { 1.0 } else { 0.0 };
+            tl.animate(&self.hover_t, target, Curve::EaseInOut, HOVER_REVEAL_DURATION, now);
         }
     }
 
@@ -264,6 +245,13 @@ impl CanvasModel {
                         _ => {}
                     }
 
+                    // Re-check the stop flag right before any commit: a
+                    // stop raced mid-iteration would otherwise push one
+                    // more frame *after* the main thread's texture clear,
+                    // leaving a stale frame on screen.
+                    if stop_thread.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let dur = if building {
                         match video.next_pass_frame() {
                             Some(frame) => {
@@ -318,6 +306,17 @@ impl CanvasModel {
                         next_at = now;
                     }
                 }
+                // Session over — queue the last word on our own frames.
+                // The pre-commit stop check above can still race: a stop
+                // arriving during the multi-ms decode lands the commit
+                // *after* the main thread's clears, re-registering a stale
+                // frame nothing would ever sweep. This clear is queued from
+                // the same thread as those commits, so FIFO ordering makes
+                // it final; the epoch guard keeps it a no-op once a newer
+                // session owns the node.
+                if let Some(b) = bound {
+                    sink.clear_epoch(b, epoch);
+                }
             });
         match spawned {
             Ok(_) => {
@@ -328,14 +327,21 @@ impl CanvasModel {
     }
 
     /// React to the `show_canvas` toggle flipping. Turned on mid-track:
-    /// decode the cached clip if we have it, else fetch it for the current
-    /// track. Turned off: stop decoding + drop the video texture. The
-    /// caller persists the (debounced) pref separately.
+    /// decode the cached clip **if it's for the current track**, else
+    /// fetch for the current track (a stale cached clip from an earlier
+    /// track must never replay). Turned off: stop decoding + drop the
+    /// video texture. The caller persists the (debounced) pref separately.
     pub fn on_toggle(&mut self, snapshot: Option<&CurrentlyPlaying>, worker: &Worker) {
         if self.show.get() {
+            // Cached-path ids are bare (`path_matches` contract); the
+            // snapshot carries the full `spotify:track:…` uri.
+            let current = snapshot.and_then(|p| track_id_from_uri(&p.track_id));
             match self.cached_path() {
-                Some((track_id, path)) => self.start_decode(track_id, path),
-                None => {
+                Some((track_id, path)) if current == Some(track_id.as_str()) => {
+                    self.start_decode(track_id, path)
+                }
+                _ => {
+                    self.clear_path();
                     if let Some(p) = snapshot
                         && let Some(id) = track_id_from_uri(&p.track_id)
                     {

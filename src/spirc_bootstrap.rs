@@ -5,9 +5,8 @@ use librespot_core::Session;
 use librespot_core::authentication::Credentials;
 use librespot_core::config::DeviceType;
 use librespot_core::dealer::Subscription;
-use librespot_playback::audio_backend;
 use librespot_playback::config::{
-    AudioFormat, Bitrate, NormalisationMethod, NormalisationType, PlayerConfig, VolumeCtrl,
+    Bitrate, NormalisationMethod, NormalisationType, PlayerConfig, VolumeCtrl,
 };
 use librespot_playback::mixer::softmixer::SoftMixer;
 use librespot_playback::mixer::{Mixer, MixerConfig};
@@ -79,8 +78,6 @@ pub async fn start(
     // never provisioned to a librespot session — the account entitlement
     // returned to this client is `high-bitrate` only (verified by probe),
     // so 320 is the ceiling for any third-party Connect client today.
-    let backend = audio_backend::find(Some("rodio".to_string()))
-        .ok_or_else(|| AuthError::Server("rodio audio backend unavailable".into()))?;
     let player_config = PlayerConfig {
         bitrate: match quality {
             crate::prefs::AudioQuality::Low => Bitrate::Bitrate96,
@@ -107,8 +104,11 @@ pub async fn start(
     // and Windows' audio mixer runs in float, so F32 carries essentially
     // the full decoded precision to the OS instead of quantising to 16-bit
     // at our sink. No downside, strictly more faithful to the source.
-    let player = Player::new(player_config, session.clone(), volume_getter, move || {
-        backend(None, AudioFormat::F32)
+    // Our own sink (not the stock rodio backend) so the output FOLLOWS
+    // the OS default device — the stock backend binds one WASAPI stream
+    // to whatever was default at startup, forever (see audio_sink.rs).
+    let player = Player::new(player_config, session.clone(), volume_getter, || {
+        Box::new(crate::audio_sink::SwitchingSink::new())
     });
     // Grab the event stream before Spirc consumes the player.
     let player_events = player.get_player_event_channel();

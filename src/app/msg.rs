@@ -97,6 +97,8 @@ pub enum Msg {
     AddQueue(String),
     /// Close the right-click menu.
     MenuClose,
+    /// Show/hide the now-playing pane (slide-collapse animation).
+    NowPlayingToggle,
     /// Wipe the disk cache (off-thread).
     ClearCache,
     /// Open the folder picker to relocate the disk cache.

@@ -48,9 +48,16 @@ librespot-metadata = { git = "https://github.com/librespot-org/librespot", branc
 # `rodio-backend` (cpal under the hood) is the real audio output — this is
 # what makes Opal an actually-audible Connect device, not just a remote.
 librespot-playback = { git = "https://github.com/librespot-org/librespot", branch = "dev", default-features = false, features = ["rodio-backend"] }
+# Direct rodio/cpal (same versions librespot pins, so the crates unify):
+# Opal supplies its own Sink that follows the OS default output device —
+# the stock rodio backend binds one WASAPI stream forever (see audio_sink.rs).
+rodio = { version = "0.21", default-features = false, features = ["playback"] }
+cpal = "0.16"
 # Must match the version librespot-protocol generates against (3.7.x);
 # protobuf 4.x reorganised the API + the generated code implements 3.x traits.
 protobuf = "3.7.2"
+# `http::Method` for librespot's generic spclient request() (track credits).
+http = "1"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 dirs = "6.0.0"
@@ -80,3 +87,12 @@ linux-keyutils-keyring-store = "1.0.0"
 # Embeds the Windows executable icon (assets/logo/icon.ico) via build.rs.
 [build-dependencies]
 winresource = "0.1"
+
+# Optimized release build. lto = "fat" inlines across crate boundaries;
+# codegen-units = 1 trades parallel codegen for better optimization;
+# panic = "abort" drops unwind tables; strip removes symbols.
+# [profile.release]
+# lto = "fat"
+# codegen-units = 1
+# panic = "abort"
+# strip = true

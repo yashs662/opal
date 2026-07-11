@@ -122,7 +122,7 @@ pub struct AlbumRef {
 /// the bare hex (album-art cache keys etc.).
 /// One artist credited on a track — id + name, for showing every artist
 /// and making each a clickable link to its artist page.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackArtist {
     pub id: String,
     pub name: String,
@@ -218,6 +218,21 @@ pub struct CurrentlyPlaying {
     /// Persisted so a cold-start resume can restart *within* the context and
     /// keep playing past the one track (librespot autoplay needs a context).
     pub context_uri: Option<String>,
+    /// Display name of the playing context ("Chill", "Daily Mix 2",
+    /// "<song> Radio", …) — the dealer cluster ships it as
+    /// `context_metadata["context_description"]`. `None` when the source
+    /// didn't carry one (Web API seed, local events); the UI then falls
+    /// back to the context *kind*.
+    pub context_name: Option<String>,
+    /// Bare id of the track's first artist (cluster `artist_uri` / Web
+    /// API item) — drives the now-playing "About the artist" fetch.
+    /// Empty when the source didn't carry it.
+    pub artist_id: String,
+    /// Every credited artist (id + name), in order — the clickable
+    /// per-artist lines in the player bar + now-playing card. Empty when
+    /// the source was sparse (the track-details backfill fills it, like
+    /// `artist_id`); display falls back to the joined `artist` string.
+    pub artists: Vec<TrackArtist>,
 }
 
 impl CurrentlyPlaying {
@@ -970,6 +985,33 @@ pub async fn get_artist(token: &str, artist_id: &str) -> Result<ArtistDetail, Au
     })
 }
 
+/// Resolve a playing context's display name ("Chill", the album title,
+/// the artist name) from its uri via the Web API. Fallback for pushes
+/// that carry no `context_description` — the `/me/player` cold-start
+/// seed and our own local playback. `None` for kinds without a
+/// fetchable name (the caller keeps its kind label).
+pub async fn get_context_name(token: &str, uri: &str) -> Result<Option<String>, AuthError> {
+    #[derive(Deserialize)]
+    struct Named {
+        #[serde(default)]
+        name: String,
+    }
+    let mut parts = uri.split(':');
+    let (Some("spotify"), Some(kind), Some(id)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Ok(None);
+    };
+    let url = match kind {
+        "playlist" => format!("{API}/playlists/{id}?fields=name"),
+        "album" => format!("{API}/albums/{id}"),
+        "artist" => format!("{API}/artists/{id}"),
+        "show" => format!("{API}/shows/{id}"),
+        _ => return Ok(None),
+    };
+    let r: Named = get_json(token, &url, ttl::SLOW).await?;
+    Ok((!r.name.is_empty()).then_some(r.name))
+}
+
 /// An artist's most popular tracks (`/v1/artists/{id}/top-tracks`). Requires
 /// a `market` (the user's country); falls back to `US` if unknown. Mapped to
 /// `PlaylistTrack` so the artist page reuses the track-row rendering.
@@ -1024,12 +1066,19 @@ pub async fn get_artist_albums(
         #[serde(default)]
         name: String,
     }
-    let url = format!("{API}/artists/{artist_id}/albums?include_groups=album,single&limit={limit}");
-    let r: R = get_json(token, &url, ttl::SLOW).await?;
-    let mut albums: Vec<AlbumRef> = r
-        .items
-        .into_iter()
-        .map(|a| AlbumRef {
+    // Spotify's 2026 Dev-Mode slimming rejects the old page sizes with
+    // 400 "Invalid limit" — 5 is the largest known-accepted value, so
+    // page in 5s (each page disk-cached) up to the requested count.
+    const PAGE: u32 = 5;
+    let mut albums: Vec<AlbumRef> = Vec::new();
+    let mut offset = 0;
+    while (albums.len() as u32) < limit {
+        let url = format!(
+            "{API}/artists/{artist_id}/albums?offset={offset}&limit={PAGE}&include_groups=album,single"
+        );
+        let r: R = get_json(token, &url, ttl::SLOW).await?;
+        let page_len = r.items.len() as u32;
+        albums.extend(r.items.into_iter().map(|a| AlbumRef {
             id: a.id,
             name: a.name,
             artist: a
@@ -1041,8 +1090,13 @@ pub async fn get_artist_albums(
             // "New release" spotlight card (THUMB_XL) — full res.
             image_url: pick_full(&a.images),
             release_date: a.release_date,
-        })
-        .collect();
+        }));
+        if page_len < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+    albums.truncate(limit as usize);
     // Lexicographic sort on `YYYY[-MM[-DD]]` is chronological.
     albums.sort_by(|a, b| b.release_date.cmp(&a.release_date));
     Ok(albums)
@@ -1167,8 +1221,10 @@ pub async fn get_track(token: &str, track_id: &str) -> Result<TrackDetails, Auth
         #[serde(default)]
         album: Album,
     }
-    #[derive(Deserialize)]
+    #[derive(Deserialize, Default)]
     struct Artist {
+        #[serde(default)]
+        id: String,
         #[serde(default)]
         name: String,
     }
@@ -1182,15 +1238,20 @@ pub async fn get_track(token: &str, track_id: &str) -> Result<TrackDetails, Auth
     // Track metadata is immutable — the hot path (refetched on every
     // track change) gets the longest TTL so repeated plays never re-hit.
     let r: R = get_json(token, &format!("{API}/tracks/{track_id}"), ttl::IMMUTABLE).await?;
+    let artists: Vec<TrackArtist> = r
+        .artists
+        .into_iter()
+        .map(|a| TrackArtist {
+            id: a.id,
+            name: a.name,
+        })
+        .collect();
     Ok(TrackDetails {
         track_id: r.id,
         name: r.name,
-        artist: r
-            .artists
-            .into_iter()
-            .next()
-            .map(|a| a.name)
-            .unwrap_or_default(),
+        artist: join_artist_names(&artists),
+        artist_id: artists.first().map(|a| a.id.clone()).unwrap_or_default(),
+        artists,
         // Now-playing cover (large + full-window blurred backdrop) — full res.
         album_image_url: pick_full(&r.album.images),
         album_id: r.album.id,
@@ -1202,6 +1263,13 @@ pub struct TrackDetails {
     pub track_id: String,
     pub name: String,
     pub artist: String,
+    /// First artist's bare id — backfills sparse cluster pushes (some ship
+    /// no `artist_uri`), keeping artist-keyed features (the about card)
+    /// reactive on every track change.
+    pub artist_id: String,
+    /// Every credited artist (id + name) — backfills the clickable
+    /// multi-artist lines the same way.
+    pub artists: Vec<TrackArtist>,
     pub album_image_url: Option<String>,
     pub album_id: String,
 }
@@ -1250,6 +1318,8 @@ pub async fn get_currently_playing(token: &str) -> Result<Option<CurrentlyPlayin
     #[derive(Deserialize)]
     struct Artist {
         #[serde(default)]
+        id: String,
+        #[serde(default)]
         name: String,
     }
     #[derive(Deserialize, Default)]
@@ -1290,10 +1360,23 @@ pub async fn get_currently_playing(token: &str) -> Result<Option<CurrentlyPlayin
         name: item.name,
         artist: item
             .artists
-            .into_iter()
-            .next()
-            .map(|a| a.name)
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        artist_id: item
+            .artists
+            .first()
+            .map(|a| a.id.clone())
             .unwrap_or_default(),
+        artists: item
+            .artists
+            .into_iter()
+            .map(|a| TrackArtist {
+                id: a.id,
+                name: a.name,
+            })
+            .collect(),
         // Now-playing cover — full res (large + blurred backdrop).
         album_image_url: pick_full(&item.album.images),
         is_playing: r.is_playing,
@@ -1306,6 +1389,9 @@ pub async fn get_currently_playing(token: &str) -> Result<Option<CurrentlyPlayin
             .context
             .map(|c| c.uri)
             .filter(|u| !u.is_empty()),
+        // `/me/player` has no context display name (only uri/type);
+        // the UI falls back to the kind until a cluster push names it.
+        context_name: None,
     }))
 }
 
@@ -1374,6 +1460,63 @@ pub enum PlayTarget {
     },
 }
 
+impl PlayTarget {
+    /// The bare track URI this intent centres on, if any — the anchor used to
+    /// recover when Spotify rejects the context (algorithmic playlists 400
+    /// "Non supported context uri"): we look up the track's album and replay
+    /// within that. `Context`/`Uris` carry no single track to anchor on.
+    fn anchor_track_uri(&self) -> Option<&str> {
+        match self {
+            PlayTarget::ContextAt { track_uri, .. } => Some(track_uri),
+            PlayTarget::Resume {
+                uri,
+                context_uri: Some(_),
+                ..
+            } => Some(uri),
+            _ => None,
+        }
+    }
+
+    /// This intent rebased onto a different context (the track's album), so
+    /// playback continues and librespot autoplay keeps suggesting content.
+    fn with_context(&self, ctx: String) -> PlayTarget {
+        match self {
+            PlayTarget::ContextAt { track_uri, .. } => PlayTarget::ContextAt {
+                context_uri: ctx,
+                track_uri: track_uri.clone(),
+            },
+            PlayTarget::Resume {
+                uri, position_ms, ..
+            } => PlayTarget::Resume {
+                uri: uri.clone(),
+                position_ms: *position_ms,
+                context_uri: Some(ctx),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// This intent stripped to the single track (no context) — last resort
+    /// when even the album context can't be resolved. Plays, but won't
+    /// autoplay past the one track.
+    fn track_only(&self) -> Option<PlayTarget> {
+        match self {
+            PlayTarget::ContextAt { track_uri, .. } => Some(PlayTarget::Uris {
+                uris: vec![track_uri.clone()],
+                offset: 0,
+            }),
+            PlayTarget::Resume {
+                uri, position_ms, ..
+            } => Some(PlayTarget::Resume {
+                uri: uri.clone(),
+                position_ms: *position_ms,
+                context_uri: None,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Start playback of a context (playlist/album) or explicit track list.
 /// `device_id = None` targets the user's active Connect device; `Some(id)`
 /// targets that device explicitly (the no-active-device fallback — play on
@@ -1385,7 +1528,49 @@ pub async fn play_context(
     target: PlayTarget,
     device_id: Option<&str>,
 ) -> Result<(), AuthError> {
-    let body = match target {
+    let url = match device_id {
+        Some(id) => format!("{API}/me/player/play?device_id={id}"),
+        None => format!("{API}/me/player/play"),
+    };
+    let first = play_target(token, &url, &target).await;
+    // Algorithmic/personalized playlists (`spotify:playlist:37i9dQZF1E…` —
+    // Daily Mix, Discover Weekly, radio) have no fixed track list the public
+    // Web API will load as a context: it 400s "Non supported context uri".
+    // Recover by re-anchoring on the track's album, so playback continues and
+    // librespot autoplay keeps suggesting content past it. If even the album
+    // can't be resolved, play the track alone (no autoplay, but it plays).
+    let Err(AuthError::Api(_, Some(400))) = &first else {
+        return first;
+    };
+    let Some(track_uri) = target.anchor_track_uri() else {
+        return first;
+    };
+    let album_ctx = match track_id_from_uri(track_uri) {
+        Some(id) => get_track(token, id)
+            .await
+            .ok()
+            .filter(|d| !d.album_id.is_empty())
+            .map(|d| format!("spotify:album:{}", d.album_id)),
+        None => None,
+    };
+    if let Some(ctx) = album_ctx {
+        log::warn!("context uri rejected — re-anchoring on album {ctx}");
+        if play_target(token, &url, &target.with_context(ctx))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    if let Some(t) = target.track_only() {
+        log::warn!("album re-anchor failed — degrading to track-only");
+        return play_target(token, &url, &t).await;
+    }
+    first
+}
+
+fn play_body(target: &PlayTarget) -> serde_json::Value {
+    match target {
         PlayTarget::Context {
             context_uri,
             offset,
@@ -1424,15 +1609,14 @@ pub async fn play_context(
             "uris": [uri],
             "position_ms": position_ms,
         }),
-    };
-    let url = match device_id {
-        Some(id) => format!("{API}/me/player/play?device_id={id}"),
-        None => format!("{API}/me/player/play"),
-    };
+    }
+}
+
+async fn play_target(token: &str, url: &str, target: &PlayTarget) -> Result<(), AuthError> {
     let res = reqwest::Client::new()
         .put(url)
         .bearer_auth(token)
-        .json(&body)
+        .json(&play_body(target))
         .send()
         .await?;
     let status = res.status();

@@ -128,7 +128,16 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::SpotifySessionConnected { device_id } => {
             log::info!("librespot session ready — seeding initial /me/player state");
+            // Cold-start seed for the card sections from the restored
+            // snapshot — with nothing playing anywhere, no player push
+            // will ever arrive to trigger them. Credits specifically
+            // need this session: a pre-session attempt was skipped
+            // worker-side, so clear its in-flight key and re-run.
+            state.player_ui.np_credits_inflight = None;
+            refresh_np_sections(state, worker, cx);
             state.devices.self_id = device_id;
+            // Transport can act now — drop the loading state on the play button.
+            state.player_ui.session_ready.set(true);
             if let Some(token) = state.auth.token() {
                 worker.seed_player_state(token);
             }
@@ -200,9 +209,48 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     state.art.dispatch_cover(worker, url.clone());
                 }
             }
+            // Cluster context/autoplay entries often arrive as bare uris
+            // (no title/duration/cover) — resolve them in one batched
+            // metadata request; `TracksHydrated` patches the rows in.
+            let bare: Vec<String> = tracks
+                .iter()
+                .filter(|t| t.name.is_empty())
+                .map(|t| t.uri.clone())
+                .collect();
+            if !bare.is_empty() {
+                worker.hydrate_tracks(bare);
+            }
             state.library.queue = Some(tracks);
             if matches!(state.router.nav, crate::views::MainNav::Queue) {
                 cx.rebuild();
+            }
+        }
+        WorkerResponse::TracksHydrated { tracks } => {
+            if tracks.is_empty() {
+                return;
+            }
+            let Some(queue) = state.library.queue.as_mut() else {
+                return;
+            };
+            // Patch resolved rows into the live queue by uri (still-blank
+            // entries only — a fresher QueueLoaded may have landed since).
+            let mut patched = false;
+            for row in queue.iter_mut().filter(|r| r.name.is_empty()) {
+                if let Some(full) = tracks.iter().find(|t| t.uri == row.uri) {
+                    *row = full.clone();
+                    patched = true;
+                }
+            }
+            if patched {
+                for tr in state.library.queue.as_deref().unwrap_or_default() {
+                    if let Some(url) = &tr.album_image_url {
+                        state.art.or_signal(album_art::cache_key(url));
+                        state.art.dispatch_cover(worker, url.clone());
+                    }
+                }
+                if matches!(state.router.nav, crate::views::MainNav::Queue) {
+                    cx.rebuild();
+                }
             }
         }
         WorkerResponse::MembershipLoaded { playlists } => {
@@ -261,6 +309,9 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::SpotifySessionFailed { error } => {
             log::warn!("librespot session failed: {error}. Falling back to Web API polling.");
+            // No Connect device, but the user can still drive a remote device
+            // over the Web API — enable transport rather than leave it loading.
+            state.player_ui.session_ready.set(true);
         }
         WorkerResponse::SpotifySessionLost => {
             // The Connect device dropped (long session) — re-bootstrap it with
@@ -313,6 +364,12 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                             }
                             if !d.artist.is_empty() {
                                 p.artist = d.artist.clone();
+                            }
+                            if p.artist_id.is_empty() {
+                                p.artist_id = d.artist_id.clone();
+                            }
+                            if p.artists.is_empty() {
+                                p.artists = d.artists.clone();
                             }
                             if p.album_image_url.is_none() {
                                 p.album_image_url = d.album_image_url.clone();
@@ -379,21 +436,25 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 }
                 // Canvas video: fetch on a real track change (not a
                 // progress tick). Gate on the cached canvas not already
-                // matching this track id; clear any stale canvas first so
-                // the UI falls back to art until the new one resolves.
+                // matching this track id. The stale clip is cleared even
+                // while canvas is *disabled* — otherwise a toggle-off →
+                // track change → toggle-on replays the previous track's
+                // cached clip. Only the fetch is gated on `show`.
                 if let Some(id) = track_id_from_uri(&p.track_id) {
                     let have = state.canvas.path_matches(id);
                     log::debug!(
                         "canvas gate: track={id} have={have} show={}",
                         state.canvas.show.get()
                     );
-                    if !have && state.canvas.show.get() {
+                    if !have {
                         state.canvas.clear_path();
                         // Stop the previous track's video now so it doesn't
                         // linger over the new track's art until the new
                         // Canvas (if any) resolves.
                         state.canvas.stop_decode();
-                        worker.fetch_canvas(p.track_id.clone(), id.to_string());
+                        if state.canvas.show.get() {
+                            worker.fetch_canvas(p.track_id.clone(), id.to_string());
+                        }
                     }
                 }
             }
@@ -412,7 +473,26 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 Some(p) => state.player_ui.sync(p, cx.tl, cx.now),
                 None => state.player_ui.stopped(cx.tl),
             }
-            state.player_ui.set_snapshot(player);
+            // The clickable multi-artist lines are built from the snapshot
+            // at scene-build time (per-artist click targets can't ride a
+            // text bind), so a changed credit set needs a rebuild. Same-
+            // track progress ticks compare equal and skip.
+            if let Some(p) = player {
+                let artists_changed = state
+                    .player_ui
+                    .with_snapshot(|prev| prev.artists != p.artists)
+                    .unwrap_or(!p.artists.is_empty());
+                state.player_ui.set_snapshot(Some(p));
+                if artists_changed {
+                    cx.rebuild();
+                }
+            }
+            // `None` (nothing playing on any device) keeps the existing
+            // snapshot — the restored last track stays the anchor for the
+            // heart, canvas, resume and the card sections; overwriting it
+            // with `None` here used to blank all of them on a cold start
+            // with no active session anywhere.
+            refresh_np_sections(state, worker, cx);
         }
         WorkerResponse::AlbumArtReady {
             key,
@@ -488,6 +568,65 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             if is_current {
                 state.backdrop.set_accent(accent, cx.tl, cx.now);
             }
+        }
+        WorkerResponse::ArtistCardReady { detail, bio } => {
+            state.player_ui.np_about_inflight = None;
+            // Drop a late arrival that no longer matches the current
+            // track's artist (rapid skips) — the in-flight fetch for the
+            // right artist is still coming.
+            let current = state
+                .player_ui
+                .with_snapshot(|p| p.artist_id.clone())
+                .unwrap_or_default();
+            if !current.is_empty() && current != detail.id {
+                log::debug!("stale artist card for {} — ignoring", detail.id);
+                return;
+            }
+            // Register + fetch the artist image so the resolved handle has
+            // a signal to land in (the card binds it reactively).
+            if let Some(url) = detail.image_url.clone() {
+                state.art.or_signal(crate::album_art::cache_key(&url));
+                state.art.dispatch_cover(worker, url);
+            }
+            state.player_ui.np_about = Some(detail);
+            state.player_ui.np_bio = bio;
+            cx.rebuild();
+        }
+        WorkerResponse::ContextNameReady { uri, name } => {
+            state.player_ui.context_inflight = None;
+            // Remember even a failed resolution (empty name) so the
+            // per-push gate doesn't re-dispatch this uri forever.
+            state
+                .player_ui
+                .resolved_context = Some((uri.clone(), name.clone().unwrap_or_default()));
+            // Apply to the live pill only if the playing context still
+            // matches and the pushes still carry no name of their own.
+            if let Some(n) = name
+                && state
+                    .player_ui
+                    .with_snapshot(|p| {
+                        p.context_name.is_none() && p.context_uri.as_deref() == Some(uri.as_str())
+                    })
+                    .unwrap_or(false)
+            {
+                state.player_ui.context_label.set(n.as_str());
+            }
+        }
+        WorkerResponse::TrackCreditsReady { track_id, credits } => {
+            state.player_ui.np_credits_inflight = None;
+            // Key the rows by track so a late arrival for a skipped track
+            // can never caption the current one.
+            let matches_current = state
+                .player_ui
+                .with_snapshot(|p| track_id_from_uri(&p.track_id).map(|cur| cur == track_id))
+                .flatten()
+                .unwrap_or(false);
+            if !matches_current {
+                log::debug!("stale credits for {track_id} — ignoring");
+                return;
+            }
+            state.player_ui.np_credits = Some((track_id, credits));
+            cx.rebuild();
         }
         WorkerResponse::CanvasReady { track_id, path } => {
             // Ignore a canvas that no longer matches the current track —
@@ -592,6 +731,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             followers,
             top_tracks,
             albums,
+            liked_tracks,
         } => {
             state.library.clear_inflight(&id);
             if state.router.nav_is_artist(&id) {
@@ -606,7 +746,12 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 let covers = albums
                     .iter()
                     .filter_map(|al| al.image_url.as_ref())
-                    .chain(top_tracks.iter().filter_map(|t| t.album_image_url.as_ref()));
+                    .chain(top_tracks.iter().filter_map(|t| t.album_image_url.as_ref()))
+                    .chain(
+                        liked_tracks
+                            .iter()
+                            .filter_map(|t| t.album_image_url.as_ref()),
+                    );
                 for u in covers {
                     state.art.or_signal(album_art::cache_key(u));
                     state.art.dispatch_cover(worker, u.clone());
@@ -617,6 +762,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     a.followers = followers;
                     a.top_tracks = top_tracks;
                     a.albums = albums;
+                    a.liked_tracks = liked_tracks;
                     a.loading = false;
                 }
                 cx.rebuild();
@@ -640,6 +786,8 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // Patch the snapshot under a short borrow; the signal sets and the
             // cover fetch happen *after* it's released (see `patch_snapshot`)
             // so no model borrow is ever held across a call.
+            let mut backfilled_artist_id = false;
+            let mut backfilled_artists = false;
             state.player_ui.patch_snapshot(|p| {
                 if track_id_from_uri(&p.track_id) != Some(track_id.as_str()) {
                     return;
@@ -652,6 +800,14 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     p.artist = details.artist.clone();
                     set_artist = true;
                 }
+                if p.artist_id.is_empty() && !details.artist_id.is_empty() {
+                    p.artist_id = details.artist_id.clone();
+                    backfilled_artist_id = true;
+                }
+                if p.artists.is_empty() && !details.artists.is_empty() {
+                    p.artists = details.artists.clone();
+                    backfilled_artists = true;
+                }
                 if p.album_image_url.is_none() && details.album_image_url.is_some() {
                     p.album_image_url = details.album_image_url.clone();
                     fetch_cover = details.album_image_url.clone();
@@ -662,6 +818,17 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             }
             if set_artist {
                 state.player_ui.artist.set(details.artist.as_str());
+            }
+            // The cluster push carried no artist_uri — the about-card gate
+            // couldn't run on the push itself, so run it now that the
+            // detail fetch resolved the artist.
+            if backfilled_artist_id {
+                refresh_artist_card(state, worker, cx, &details.artist_id);
+            }
+            // The multi-artist lines build from the snapshot — a filled-in
+            // credit set needs the click targets rebuilt.
+            if backfilled_artists {
+                cx.rebuild();
             }
             // The cluster push had no cover either — backfill the backdrop
             // from the resolved one (outside the snapshot borrow).
@@ -674,4 +841,83 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             }
         }
     }
+}
+
+/// Fill the now-playing card's track-derived sections — about-artist,
+/// credits, the source-pill name — for whatever the snapshot currently
+/// holds. Every gate self-dedups (shown/in-flight keys), so this is safe
+/// from any trigger: a live push, the cold-start restore (with no active
+/// session anywhere, no push ever arrives to do it), or session-connect
+/// (credits ride the librespot session, not the Web API token).
+fn refresh_np_sections(state: &mut AppState, worker: &Worker, cx: &mut Cx) {
+    let Some((track_id, artist_id, context_uri, context_named)) =
+        state.player_ui.with_snapshot(|p| {
+            (
+                p.track_id.clone(),
+                p.artist_id.clone(),
+                p.context_uri.clone(),
+                p.context_name.is_some(),
+            )
+        })
+    else {
+        return;
+    };
+    refresh_artist_card(state, worker, cx, &artist_id);
+    // Credits: refresh when the track actually changes. The stale rows
+    // are dropped right away so the previous track never captions this one.
+    if let Some(id) = track_id_from_uri(&track_id)
+        && state
+            .player_ui
+            .np_credits
+            .as_ref()
+            .map(|(t, _)| t.as_str())
+            != Some(id)
+        && state.player_ui.np_credits_inflight.as_deref() != Some(id)
+    {
+        if state.player_ui.np_credits.take().is_some() {
+            cx.rebuild();
+        }
+        state.player_ui.np_credits_inflight = Some(id.to_string());
+        worker.fetch_track_credits(id.to_string());
+    }
+    // Queue-source pill: the state carries no display name (cold-start
+    // seed/restore, our own local playback) — resolve it once per context
+    // uri via the Web API. The resolved (or failed) entry gates re-dispatch.
+    if !context_named
+        && let Some(uri) = context_uri.as_deref()
+        && state
+            .player_ui
+            .resolved_context
+            .as_ref()
+            .map(|(u, _)| u.as_str())
+            != Some(uri)
+        && state.player_ui.context_inflight.as_deref() != Some(uri)
+        && let Some(token) = state.auth.token()
+    {
+        state.player_ui.context_inflight = Some(uri.to_string());
+        worker.fetch_context_name(token, uri.to_string());
+    }
+}
+
+/// Keep the now-playing "About the artist" section on the *current*
+/// artist: when `artist_id` differs from what's shown (and isn't already
+/// in flight), drop the stale section immediately and dispatch the card
+/// fetch. Callable from any artist-id source — the player push, or the
+/// track-details backfill when the push shipped no `artist_uri`.
+fn refresh_artist_card(state: &mut AppState, worker: &Worker, cx: &mut Cx, artist_id: &str) {
+    if artist_id.is_empty()
+        || state.player_ui.np_about.as_ref().map(|a| a.id.as_str()) == Some(artist_id)
+        || state.player_ui.np_about_inflight.as_deref() == Some(artist_id)
+    {
+        return;
+    }
+    let Some(token) = state.auth.token() else {
+        return;
+    };
+    if state.player_ui.np_about.take().is_some() {
+        state.player_ui.np_bio = None;
+        cx.rebuild();
+    }
+    state.player_ui.np_about_inflight = Some(artist_id.to_string());
+    worker.fetch_artist_card(token, artist_id.to_string());
 }

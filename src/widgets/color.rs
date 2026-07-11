@@ -85,17 +85,31 @@ pub fn lift_for_chrome(c: [f32; 4]) -> [f32; 4] {
 /// Foreground colour (icon/text) that contrasts with the live accent:
 /// whichever of white / near-black has the higher WCAG contrast against
 /// it. Reactive — follows the accent crossfade.
+/// Non-reactive core of [`accent_fg`] — the contrast-safe foreground (white
+/// or near-black) for `a`. For callers that already hold the accent value
+/// inside a multi-input `Computed` (e.g. the loading play glyph).
+pub fn accent_fg_color(a: &[f32; 4]) -> [f32; 4] {
+    const LIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    const DARK: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
+    let l = luminance(*a);
+    if contrast(l, luminance(LIGHT)) >= contrast(l, luminance(DARK)) {
+        LIGHT
+    } else {
+        DARK
+    }
+}
+
 pub fn accent_fg(accent: &Signal<[f32; 4]>) -> Computed<[f32; 4]> {
-    Computed::new((accent.clone(),), |(a,)| {
-        const LIGHT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-        const DARK: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
-        let l = luminance(a);
-        if contrast(l, luminance(LIGHT)) >= contrast(l, luminance(DARK)) {
-            LIGHT
-        } else {
-            DARK
-        }
-    })
+    Computed::new((accent.clone(),), |(a,)| accent_fg_color(&a))
+}
+
+/// Hover tint for accent-driven icon buttons: the accent lifted toward
+/// white, so a hovered icon reads brighter than both the dim resting
+/// state and the plain accent an *active* toggle already wears.
+pub fn accent_hover_color(a: &[f32; 4]) -> [f32; 4] {
+    use opal_gfx::Lerp;
+    let c = a.lerp([1.0, 1.0, 1.0, 1.0], 0.30);
+    [c[0], c[1], c[2], a[3]]
 }
 
 #[cfg(test)]

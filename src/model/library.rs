@@ -59,13 +59,17 @@ pub struct OpenPlaylist {
     pub complete: bool,
 }
 
-/// The artist page open in the centre pane: profile + popular + discography.
+/// The artist page open in the centre pane: profile + popular + liked +
+/// discography.
 pub struct OpenArtist {
     pub name: String,
     pub image_url: Option<String>,
     pub followers: u64,
     pub top_tracks: Vec<PlaylistTrack>,
     pub albums: Vec<AlbumRef>,
+    /// The user's liked songs by this artist (from the cached Liked
+    /// Songs collection) — the page's "Liked songs" section.
+    pub liked_tracks: Vec<PlaylistTrack>,
     /// Profile/discography not yet arrived.
     pub loading: bool,
 }
@@ -364,6 +368,7 @@ impl LibraryModel {
             followers: 0,
             top_tracks: Vec::new(),
             albums: Vec::new(),
+            liked_tracks: Vec::new(),
             loading: true,
         });
         if self.is_inflight(id) {

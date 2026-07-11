@@ -72,6 +72,8 @@ impl AppState {
             track_id: p.track_id.clone(),
             name: p.name.clone(),
             artist: p.artist.clone(),
+            artist_id: p.artist_id.clone(),
+            artists: p.artists.clone(),
             album_image_url: p.album_image_url.clone(),
             is_playing: false,
             progress_ms: p.progress_ms,
@@ -80,6 +82,7 @@ impl AppState {
             shuffle: false,
             repeat: crate::api::RepeatMode::Off,
             context_uri: p.context_uri.clone(),
+            context_name: p.context_name.clone(),
         });
         Self {
             router: RouterModel::new(),

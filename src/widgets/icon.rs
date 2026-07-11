@@ -30,6 +30,7 @@ pub enum Icon {
     Check,
     Queue,
     Devices,
+    PanelRight,
 }
 
 impl Icon {
@@ -59,6 +60,7 @@ impl Icon {
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
             Icon::Queue => include_bytes!("../../assets/icons/queue.svg"),
             Icon::Devices => include_bytes!("../../assets/icons/devices.svg"),
+            Icon::PanelRight => include_bytes!("../../assets/icons/panel-right.svg"),
         }
     }
 }
@@ -88,6 +90,7 @@ const ALL: &[Icon] = &[
     Icon::Check,
     Icon::Queue,
     Icon::Devices,
+    Icon::PanelRight,
 ];
 
 /// Raster size for the brand logo (gradient dragonfly). Larger than the
@@ -107,6 +110,12 @@ pub struct IconSet {
 impl IconSet {
     pub fn get(&self, icon: Icon) -> ImageHandle {
         *self.handles.get(&icon).expect("icon not loaded — extend ALL")
+    }
+
+    /// The brand logo handle (gradient-preserving — draw it untinted with
+    /// `OPAQUE_TINT`, not an accent tint).
+    pub fn logo(&self) -> ImageHandle {
+        self.logo
     }
 
     pub fn render(

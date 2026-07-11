@@ -85,9 +85,8 @@ struct Layout<'a> {
     /// Mean luminance of the current cover — drives the adaptive
     /// ambient-glass dim.
     pub art_luma: &'a Signal<f32>,
-    /// Resizable panel widths (driven by splitters via `width_px_bind`).
+    /// Resizable sidebar width (driven by its splitter via `width_px_bind`).
     pub sidebar_w: &'a Signal<f32>,
-    pub now_playing_w: &'a Signal<f32>,
     /// Called by the splitters after every committed width change.
     /// Wired by the consumer to debounced prefs persistence.
     pub mark_dirty: std::rc::Rc<dyn Fn()>,
@@ -209,18 +208,8 @@ fn render(s: &mut Scene, v: &Layout) {
                     },
                 );
                 v.main_pane.view(b);
-                crate::widgets::splitter::splitter(
-                    b,
-                    crate::widgets::splitter::SplitterProps {
-                        name: "split_now_playing",
-                        width: v.now_playing_w.clone(),
-                        side: crate::widgets::splitter::PanelSide::Right,
-                        min: t::NOW_PLAYING_MIN,
-                        max: t::NOW_PLAYING_MAX,
-                        collapsed: t::SP_0,
-                        on_change: v.mark_dirty.clone(),
-                    },
-                );
+                // Fixed-width, slide-collapsing — no splitter; its gutter is
+                // folded into the pane's own animated width.
                 v.now_playing.view(b);
             });
         v.player_bar.view(root);
@@ -267,6 +256,7 @@ pub struct HomeView {
     on_context_menu: CtxMenuFn,
     on_add_queue: Rc<dyn Fn(String)>,
     on_menu_close: Rc<dyn Fn()>,
+    on_np_toggle: Rc<dyn Fn()>,
 }
 
 impl HomeView {
@@ -346,6 +336,10 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::MenuClose))
         };
+        let on_np_toggle: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::NowPlayingToggle))
+        };
         let on_clear_cache: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ClearCache))
@@ -397,6 +391,7 @@ impl HomeView {
             on_context_menu,
             on_add_queue,
             on_menu_close,
+            on_np_toggle,
         }
     }
 
@@ -470,28 +465,36 @@ impl HomeView {
                         }
                     })
                     .collect();
-                let popular = a
-                    .top_tracks
-                    .iter()
-                    .map(|tk| {
-                        let cover = tk
-                            .album_image_url
-                            .as_ref()
-                            .and_then(|u| state.art.signal(&album_art::cache_key(u)));
-                        artist::ArtistTrack {
-                            title: tk.name.clone(),
-                            cover,
-                            duration: playlist::fmt_duration(tk.duration_ms),
-                            uri: tk.uri.clone(),
-                        }
-                    })
-                    .collect();
+                let track_rows = |tracks: &[crate::api::PlaylistTrack]| {
+                    tracks
+                        .iter()
+                        .map(|tk| {
+                            let cover = tk
+                                .album_image_url
+                                .as_ref()
+                                .and_then(|u| state.art.signal(&album_art::cache_key(u)));
+                            artist::ArtistTrack {
+                                title: tk.name.clone(),
+                                cover,
+                                duration: playlist::fmt_duration(tk.duration_ms),
+                                uri: tk.uri.clone(),
+                            }
+                        })
+                        .collect()
+                };
+                let liked_context = home_ref
+                    .profile
+                    .as_ref()
+                    .filter(|p| !p.id.is_empty())
+                    .map(|p| format!("spotify:user:{}:collection", p.id));
                 artist::ArtistViewData {
                     name: a.name.clone(),
                     image,
                     followers: a.followers,
                     loading: a.loading,
-                    popular,
+                    popular: track_rows(&a.top_tracks),
+                    liked: track_rows(&a.liked_tracks),
+                    liked_context,
                     albums,
                 }
             }),
@@ -505,7 +508,11 @@ impl HomeView {
             backdrop: &state.backdrop,
             player: &state.player_ui,
             canvas: &state.canvas,
-            width: &state.prefs.now_playing_w,
+            art: &state.art,
+            open_t: &state.prefs.now_playing_open_t,
+            icons,
+            on_toggle: self.on_np_toggle.clone(),
+            nav: self.on_navigate.clone(),
         };
         let queue_ref = &state.library.queue;
         let player_bar = player_bar::PlayerBar {
@@ -517,6 +524,8 @@ impl HomeView {
             on_navigate: self.on_navigate.clone(),
             membership: &state.membership,
             on_like_open: self.on_like_open.clone(),
+            np_open: &state.prefs.now_playing_open,
+            on_np_toggle: self.on_np_toggle.clone(),
             icons,
         };
         let sidebar = sidebar::Sidebar {
@@ -585,7 +594,6 @@ impl HomeView {
             crossfade_t: &state.backdrop.crossfade_t,
             art_luma: &state.backdrop.art_luma,
             sidebar_w: &state.prefs.sidebar_w,
-            now_playing_w: &state.prefs.now_playing_w,
             mark_dirty: self.mark_dirty.clone(),
             now_playing: &now_playing,
             player_bar: &player_bar,

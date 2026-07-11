@@ -37,13 +37,34 @@ where
     while let Some(event) = events.recv().await {
         match event {
             PlayerEvent::TrackChanged { audio_item } => {
-                let artist = match &audio_item.unique_fields {
-                    UniqueFields::Track { artists, .. } => {
-                        artists.first().map(|a| a.name.clone()).unwrap_or_default()
-                    }
-                    UniqueFields::Episode { show_name, .. } => show_name.clone(),
-                    UniqueFields::Local { artists, .. } => artists.clone().unwrap_or_default(),
+                let credited: Vec<crate::api::TrackArtist> = match &audio_item.unique_fields {
+                    UniqueFields::Track { artists, .. } => artists
+                        .iter()
+                        .map(|a| crate::api::TrackArtist {
+                            id: a.id.to_id(),
+                            name: a.name.clone(),
+                        })
+                        .collect(),
+                    UniqueFields::Episode { show_name, .. } => vec![crate::api::TrackArtist {
+                        id: String::new(),
+                        name: show_name.clone(),
+                    }],
+                    UniqueFields::Local { artists, .. } => artists
+                        .clone()
+                        .into_iter()
+                        .filter(|a| !a.is_empty())
+                        .map(|a| crate::api::TrackArtist {
+                            id: String::new(),
+                            name: a,
+                        })
+                        .collect(),
                 };
+                let artist = credited
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let artist_id = credited.first().map(|a| a.id.clone()).unwrap_or_default();
                 // Largest cover for the backdrop + now-playing pane (the
                 // small thumbs downsample from the same handle).
                 let album_image_url = audio_item
@@ -56,6 +77,8 @@ where
                     track_id: audio_item.uri.clone(),
                     name: audio_item.name.clone(),
                     artist,
+                    artist_id,
+                    artists: credited,
                     album_image_url,
                     // Playing/Paused follows immediately with the truth.
                     is_playing: prev.as_ref().map(|p| p.is_playing).unwrap_or(false),
@@ -67,6 +90,7 @@ where
                     // Local PlayerEvents don't carry the context; keep any
                     // previously-known one so it isn't lost across tracks.
                     context_uri: prev.as_ref().and_then(|p| p.context_uri.clone()),
+                    context_name: prev.as_ref().and_then(|p| p.context_name.clone()),
                 });
                 on_state(current.clone());
             }

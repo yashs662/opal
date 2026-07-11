@@ -7,6 +7,7 @@
 //! - [`chip`] / [`thumb`] / [`crossfade`] / [`color`] — shared widgets +
 //!   colour helpers.
 
+pub mod artist_links;
 pub mod button;
 pub mod chip;
 pub mod chrome;

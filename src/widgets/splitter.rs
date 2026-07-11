@@ -42,7 +42,10 @@ pub enum PanelSide {
     /// Panel is to the **left** of the handle. Dragging right grows it.
     Left,
     /// Panel is to the **right** of the handle. Dragging right shrinks
-    /// it (the cursor delta is inverted).
+    /// it (the cursor delta is inverted). Currently unused (the
+    /// now-playing pane stopped being resizable) but kept — it's half
+    /// the widget's API.
+    #[allow(dead_code)]
     Right,
 }
 

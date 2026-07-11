@@ -29,6 +29,38 @@ pub fn fade_in_alpha(crossfade_t: &Signal<f32>) -> Computed<[f32; 4]> {
 /// instead of snapping. Dim placeholder when neither handle resolves. Both
 /// layers are `abs(0,0)` so they overlap — the parent must have a definite
 /// size for `Fill` to resolve against.
+/// Flat (no composite layer) variant of [`crossfaded_art`]: the same
+/// opaque-under / fade-in-over image pair drawn directly into the parent,
+/// with no rounding of its own — clip/round via the parent's
+/// `overflow(Hidden)` + radius instead. **Use this inside scroll
+/// containers**: a nested `.layer()` promotion doesn't ride the scroll
+/// layer's offset, so the layered variant paints at the unscrolled
+/// position (engine gap — revisit if composite-rounded art is ever
+/// needed in scroll content).
+pub fn crossfaded_art_flat(
+    c: &mut Scene,
+    prev: &Signal<Option<ImageHandle>>,
+    curr: &Signal<Option<ImageHandle>>,
+    crossfade_t: &Signal<f32>,
+) {
+    let base = Computed::new(
+        (prev.clone(), curr.clone(), crossfade_t.clone()),
+        |(p, cu, t)| if t >= 1.0 && cu.is_some() { None } else { p },
+    );
+    let fade = fade_in_alpha(crossfade_t);
+    c.image_bound((), base)
+        .abs(0.0, 0.0)
+        .w(Len::Fill)
+        .h(Len::Fill)
+        .placeholder_fill(t::PLACEHOLDER)
+        .color(OPAQUE_TINT);
+    c.image_bound((), curr.clone())
+        .abs(0.0, 0.0)
+        .w(Len::Fill)
+        .h(Len::Fill)
+        .color(fade);
+}
+
 pub fn crossfaded_art(
     c: &mut Scene,
     prev: &Signal<Option<ImageHandle>>,

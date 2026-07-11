@@ -47,7 +47,9 @@ where
     ),
 {
     info!("cluster listener started — awaiting connect-state pushes");
-    let mut last_revision: Option<String> = None;
+    // Hash of the last emitted queue (revision + track uris) — see the
+    // signature dedup below.
+    let mut last_queue_sig: Option<u64> = None;
     while let Some(msg) = sub.next().await {
         let bytes = match msg.payload {
             PayloadValue::Raw(b) => b,
@@ -115,18 +117,38 @@ where
             );
         }
         // Build the full queue (playing track + next_tracks) only when the
-        // revision changed — Spotify bumps `queue_revision` on every queue
-        // edit, so this is a cheap dedup against re-emitting an identical
-        // list on unrelated cluster pushes (progress ticks, volume, etc.).
-        let revision = state.queue_revision.clone();
-        let queue = if last_revision.as_deref() != Some(revision.as_str()) {
-            last_revision = Some(revision);
+        // *content* changed. `queue_revision` alone isn't enough: Spotify
+        // bumps it for explicit queue edits, but the context/autoplay
+        // continuation refilling `next_tracks` right after an edit rides
+        // later pushes under the SAME revision — keying on the revision
+        // left the queue page showing just the added track. Hash the
+        // uris AND the display metadata: entries often arrive as bare
+        // uris first and hydrate (title/duration) on a later push with
+        // identical uris — a uri-only signature deduped the hydration
+        // away, freezing the page on blank rows. Unrelated pushes
+        // (progress ticks, volume) still dedup.
+        let signature = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            state.queue_revision.hash(&mut h);
+            if let Some(now) = state.track.as_ref() {
+                now.uri.hash(&mut h);
+            }
+            for t in &state.next_tracks {
+                t.uri.hash(&mut h);
+                t.metadata.get("title").hash(&mut h);
+                t.metadata.get("duration").hash(&mut h);
+            }
+            h.finish()
+        };
+        let queue = if last_queue_sig != Some(signature) {
+            last_queue_sig = Some(signature);
             let mut q = Vec::with_capacity(1 + state.next_tracks.len());
             if let Some(now) = state.track.as_ref() {
                 q.push(provided_to_track(now));
             }
             q.extend(state.next_tracks.iter().map(provided_to_track));
-            info!("  -> cluster queue: {} tracks (rev changed)", q.len());
+            info!("  -> cluster queue: {} tracks (content changed)", q.len());
             Some(q)
         } else {
             None
@@ -153,19 +175,7 @@ fn provided_to_track(pt: &ProvidedTrack) -> PlaylistTrack {
     let artist_id = id_from_uri(&pt.artist_uri);
     let album_id = id_from_uri(&pt.album_uri);
 
-    // Ordered artist names: `artist_name` (single) or `artist_name:0..n`
-    // (multi). Only the first carries an id (from `artist_uri`).
-    let mut artists: Vec<TrackArtist> = Vec::new();
-    if let Some(a) = md.get("artist_name") {
-        artists.push(TrackArtist { id: artist_id.clone(), name: a.clone() });
-    } else {
-        let mut i = 0;
-        while let Some(a) = md.get(&format!("artist_name:{i}")) {
-            let id = if i == 0 { artist_id.clone() } else { String::new() };
-            artists.push(TrackArtist { id, name: a.clone() });
-            i += 1;
-        }
-    }
+    let artists = artists_from_metadata(md, &artist_id);
     let artist = artists
         .iter()
         .map(|a| a.name.as_str())
@@ -206,15 +216,54 @@ fn id_from_uri(uri: &str) -> String {
     }
 }
 
+/// Ordered artist credits from connect-state track metadata:
+/// `artist_name` (single) or `artist_name:0..n` (multi). Only the first
+/// carries an id (from `artist_uri` — the metadata has no per-artist
+/// uris; the rest resolve when the track-details backfill lands).
+fn artists_from_metadata(
+    md: &std::collections::HashMap<String, String>,
+    first_artist_id: &str,
+) -> Vec<TrackArtist> {
+    let mut artists: Vec<TrackArtist> = Vec::new();
+    if let Some(a) = md.get("artist_name") {
+        artists.push(TrackArtist {
+            id: first_artist_id.to_string(),
+            name: a.clone(),
+        });
+    } else {
+        let mut i = 0;
+        while let Some(a) = md.get(&format!("artist_name:{i}")) {
+            let id = if i == 0 {
+                first_artist_id.to_string()
+            } else {
+                String::new()
+            };
+            artists.push(TrackArtist { id, name: a.clone() });
+            i += 1;
+        }
+    }
+    artists
+}
+
 fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
+    // The context's display name ("Chill", "Daily Mix 2", "<song> Radio")
+    // rides the state's context metadata — exactly what the official
+    // client shows as the queue source.
+    let context_name = state
+        .context_metadata
+        .get("context_description")
+        .filter(|d| !d.is_empty())
+        .cloned();
     let track = state.track.unwrap_or_default();
     let md = &track.metadata;
+    let artist_id = id_from_uri(&track.artist_uri);
     let name = md.get("title").cloned().unwrap_or_default();
-    let artist = md
-        .get("artist_name")
-        .cloned()
-        .or_else(|| md.get("artist_name:0").cloned())
-        .unwrap_or_default();
+    let artists = artists_from_metadata(md, &artist_id);
+    let artist = artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     // Prefer the largest variant Spotify offers (xlarge/large ≈ 640px)
     // so the now-playing pane + full-window backdrop render crisp. The
     // 56px player-bar thumb bilinear-downsamples from the same handle.
@@ -272,6 +321,8 @@ fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
         track_id,
         name,
         artist,
+        artist_id,
+        artists,
         album_image_url,
         is_playing,
         progress_ms,
@@ -280,6 +331,7 @@ fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
         shuffle,
         repeat,
         context_uri,
+        context_name,
     }
 }
 

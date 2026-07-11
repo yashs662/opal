@@ -41,7 +41,9 @@ pub fn view(
     s.col("queue_scroll")
         .w(Len::Fill)
         .h(Len::Fill)
-        .pad_xy(t::SP_6, t::SP_2)
+        // Bottom inset matches the sides so the last row scrolls clear of
+        // the pane edge instead of sitting flush against it.
+        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
         .gap(t::SP_3)
         .scroll_y()
         .layer()

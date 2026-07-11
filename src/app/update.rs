@@ -35,6 +35,12 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         Msg::Navigate(nav) => navigate(state, cx, worker, nav),
 
         Msg::Transport(action) => {
+            // Ignore transport until the Connect session is ready — on cold
+            // start there's no device to act on, so an early press would be a
+            // silent no-op (the play button shows a loading pulse meanwhile).
+            if !state.player_ui.session_ready.get() {
+                return;
+            }
             let Some(token) = state.auth.token() else {
                 log::warn!("playback action ignored — no auth token");
                 return;
@@ -246,6 +252,23 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         Msg::MenuClose => {
             state.menu.close();
             cx.rebuild();
+        }
+
+        Msg::NowPlayingToggle => {
+            // Flip + slide: everything downstream is signal-bound (pane
+            // width/fade ride the open fraction, player-bar toggle tint
+            // rides the flag), so no rebuild — the collapse is a pure
+            // tween the layout follows.
+            let open = !state.prefs.now_playing_open.get();
+            state.prefs.now_playing_open.set(open);
+            cx.tl.animate(
+                &state.prefs.now_playing_open_t,
+                if open { 1.0 } else { 0.0 },
+                opal_gfx::Curve::EaseInOut,
+                std::time::Duration::from_millis(280),
+                cx.now,
+            );
+            state.prefs.mark_dirty(cx.now);
         }
 
         Msg::ClearCache => {

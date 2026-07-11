@@ -107,31 +107,43 @@ pub struct StoredPlayer {
     /// never reported one — the worker then falls back to the track's album).
     #[serde(default)]
     pub context_uri: Option<String>,
+    /// Context display name at save time — re-hydrates the queue-source
+    /// label on cold start.
+    #[serde(default)]
+    pub context_name: Option<String>,
+    /// First-artist id at save time — re-hydrates the "About the artist"
+    /// section on cold start.
+    #[serde(default)]
+    pub artist_id: String,
+    /// Every credited artist at save time — re-hydrates the clickable
+    /// multi-artist lines on cold start.
+    #[serde(default)]
+    pub artists: Vec<crate::api::TrackArtist>,
 }
 
-/// Sidebar + now-playing pane widths in **logical** pixels. `0`
-/// represents a fully collapsed (hidden) panel — the splitter can
-/// re-open it.
+/// Sidebar width in **logical** pixels (`0` = fully collapsed — the
+/// splitter can re-open it) + the now-playing pane's visibility. The
+/// now-playing pane has a fixed width; only whether it's shown persists.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PanelPrefs {
     #[serde(default = "default_sidebar_w")]
     pub sidebar_w: f32,
-    #[serde(default = "default_now_playing_w")]
-    pub now_playing_w: f32,
+    #[serde(default = "default_now_playing_open")]
+    pub now_playing_open: bool,
 }
 
 fn default_sidebar_w() -> f32 {
     320.0
 }
-fn default_now_playing_w() -> f32 {
-    340.0
+fn default_now_playing_open() -> bool {
+    true
 }
 
 impl Default for PanelPrefs {
     fn default() -> Self {
         Self {
             sidebar_w: default_sidebar_w(),
-            now_playing_w: default_now_playing_w(),
+            now_playing_open: default_now_playing_open(),
         }
     }
 }
@@ -298,7 +310,7 @@ mod tests {
         let json = r#"{"panels": {"sidebar_w": 280.0}}"#;
         let prefs: UserPreferences = serde_json::from_str(json).unwrap();
         assert_eq!(prefs.panels.sidebar_w, 280.0);
-        assert_eq!(prefs.panels.now_playing_w, 340.0, "default kicks in");
+        assert!(prefs.panels.now_playing_open, "default kicks in");
         assert_eq!(prefs.audio.volume, 0.8);
         assert_eq!(prefs.version, SCHEMA_VERSION);
     }

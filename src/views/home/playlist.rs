@@ -212,10 +212,24 @@ pub fn view(
 }
 
 /// Build the playback target for the track at `index`. Real playlists
-/// play their context at the offset; Liked Songs (no context) sends a
-/// capped window of URIs from the buffer starting at the clicked track.
+/// play their context at the offset; the Liked Songs collection context
+/// anchors by *track uri* instead (its server-side order is
+/// added-at-desc, which can drift from the listed index — and the uri
+/// anchor doubles as the 400-fallback recovery point). With no context
+/// at all, a capped window of URIs from the clicked track.
 fn make_target(context_uri: &Option<String>, rows: &RowBuf, index: u32) -> PlayTarget {
     match context_uri {
+        Some(uri) if uri.ends_with(":collection") => {
+            let track_uri = rows
+                .borrow()
+                .get(index as usize)
+                .map(|r| r.uri.clone())
+                .unwrap_or_default();
+            PlayTarget::ContextAt {
+                context_uri: uri.clone(),
+                track_uri,
+            }
+        }
         Some(uri) => PlayTarget::Context {
             context_uri: uri.clone(),
             offset: index,

@@ -74,6 +74,33 @@ pub enum WorkerCommand {
         access_token: String,
         id: String,
     },
+    /// Lightweight artist profile only (`/v1/artists/{id}`) — the
+    /// now-playing "About the artist" card, not the full artist page.
+    FetchArtistCard {
+        access_token: String,
+        id: String,
+    },
+    /// Resolve a playing context's display name via the Web API — the
+    /// fallback for player states that carry no `context_description`
+    /// (the `/me/player` cold-start seed, our own local playback).
+    /// Result: `ContextNameReady`.
+    FetchContextName {
+        access_token: String,
+        uri: String,
+    },
+    /// Track credits (performers / writers / producers) via the spclient
+    /// track-credits endpoint — the now-playing card's "Credits" section.
+    /// Needs a live session. Result: `TrackCreditsReady`.
+    FetchTrackCredits {
+        track_id: String,
+    },
+    /// Resolve display metadata (title / artists / duration / cover) for
+    /// tracks the cluster shipped as bare uris — one batched `TRACK_V4`
+    /// extended-metadata request, like the official client hydrates its
+    /// queue. Needs a live session. Result: `TracksHydrated`.
+    HydrateTracks {
+        uris: Vec<String>,
+    },
     FetchAlbumArt {
         url: String,
         key: String,
@@ -302,7 +329,9 @@ pub enum WorkerResponse {
         id: String,
         error: String,
     },
-    /// An artist page resolved: profile + popular tracks + discography.
+    /// An artist page resolved: profile + popular tracks + discography +
+    /// the user's liked songs by this artist (from the cached Liked Songs
+    /// collection — the same data the membership graph is built from).
     ArtistOpened {
         id: String,
         name: String,
@@ -310,10 +339,36 @@ pub enum WorkerResponse {
         followers: u64,
         top_tracks: Vec<api::PlaylistTrack>,
         albums: Vec<api::AlbumRef>,
+        liked_tracks: Vec<api::PlaylistTrack>,
     },
     ArtistFailed {
         id: String,
         error: String,
+    },
+    /// The now-playing "About the artist" profile resolved. `bio` is the
+    /// artist's extended-metadata biography (plain-ish text; may embed
+    /// simple HTML tags Spotify ships, stripped worker-side), `None` when
+    /// the artist has none or no session was up.
+    ArtistCardReady {
+        detail: api::ArtistDetail,
+        bio: Option<String>,
+    },
+    /// A context uri's display name resolved (or `None` — unfetchable
+    /// kind / request failed; the caller keeps its kind label and won't
+    /// re-ask for this uri).
+    ContextNameReady {
+        uri: String,
+        name: Option<String>,
+    },
+    /// A track's credits resolved (possibly empty — endpoint had none).
+    TrackCreditsReady {
+        track_id: String,
+        credits: TrackCredits,
+    },
+    /// Bare queue uris resolved to full rows (order = request order;
+    /// tracks the batch couldn't resolve are absent).
+    TracksHydrated {
+        tracks: Vec<api::PlaylistTrack>,
     },
     AlbumArtReady {
         key: String,
@@ -456,6 +511,18 @@ impl Worker {
                         }
                         WorkerCommand::FetchArtist { access_token, id } => {
                             spawn_fetch_artist(resp.clone(), access_token, id)
+                        }
+                        WorkerCommand::FetchArtistCard { access_token, id } => {
+                            spawn_fetch_artist_card(resp.clone(), session.clone(), access_token, id)
+                        }
+                        WorkerCommand::FetchContextName { access_token, uri } => {
+                            spawn_fetch_context_name(resp.clone(), access_token, uri)
+                        }
+                        WorkerCommand::FetchTrackCredits { track_id } => {
+                            spawn_fetch_track_credits(resp.clone(), session.clone(), track_id)
+                        }
+                        WorkerCommand::HydrateTracks { uris } => {
+                            spawn_hydrate_tracks(resp.clone(), session.clone(), uris)
                         }
                         WorkerCommand::FetchAlbumArt { url, key } => {
                             spawn_fetch_album_art(resp.clone(), uploader.clone(), url, key)
@@ -601,6 +668,24 @@ impl Worker {
         let _ = self
             .cmd_tx
             .send(WorkerCommand::FetchArtist { access_token, id });
+    }
+    pub fn fetch_artist_card(&self, access_token: String, id: String) {
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::FetchArtistCard { access_token, id });
+    }
+    pub fn fetch_context_name(&self, access_token: String, uri: String) {
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::FetchContextName { access_token, uri });
+    }
+    pub fn fetch_track_credits(&self, track_id: String) {
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::FetchTrackCredits { track_id });
+    }
+    pub fn hydrate_tracks(&self, uris: Vec<String>) {
+        let _ = self.cmd_tx.send(WorkerCommand::HydrateTracks { uris });
     }
     pub fn fetch_album_art(&self, url: String, key: String) {
         let _ = self.cmd_tx.send(WorkerCommand::FetchAlbumArt { url, key });
@@ -1170,20 +1255,31 @@ fn spawn_playback(
             PlaybackCmd::PlayContext(api::PlayTarget::Resume {
                 uri,
                 position_ms,
-                context_uri: None,
+                context_uri,
             }) => {
-                let album = match api::track_id_from_uri(&uri) {
-                    Some(id) => api::get_track(&access_token, id)
-                        .await
-                        .ok()
-                        .filter(|d| !d.album_id.is_empty())
-                        .map(|d| format!("spotify:album:{}", d.album_id)),
-                    None => None,
+                // Keep a real, resumable context (playlist/album/…). Drop a
+                // missing one OR Spotify's "spotify:web-api" pseudo-context
+                // (the connect-state reports it for Web-API-initiated
+                // playback; handing it back 400s "Invalid context uri") and
+                // fall back to the track's album so playback continues past
+                // the one track instead of ending dead.
+                let real_context = context_uri
+                    .filter(|c| !c.is_empty() && c != "spotify:web-api");
+                let context_uri = match real_context {
+                    Some(c) => Some(c),
+                    None => match api::track_id_from_uri(&uri) {
+                        Some(id) => api::get_track(&access_token, id)
+                            .await
+                            .ok()
+                            .filter(|d| !d.album_id.is_empty())
+                            .map(|d| format!("spotify:album:{}", d.album_id)),
+                        None => None,
+                    },
                 };
                 PlaybackCmd::PlayContext(api::PlayTarget::Resume {
                     uri,
                     position_ms,
-                    context_uri: album,
+                    context_uri,
                 })
             }
             other => other,
@@ -1344,6 +1440,301 @@ fn spawn_fetch_album(resp: Responder, access_token: String, id: String) {
     });
 }
 
+/// Fetch the now-playing "About the artist" card: the Web API profile
+/// (name / photo / followers — `get_json`'s disk cache makes repeats
+/// near-free) plus the extended-metadata biography when a session is up.
+/// Profile failure is silent — the section simply stays hidden.
+fn spawn_fetch_artist_card(
+    resp: Responder,
+    session_slot: Arc<AsyncMutex<Option<Session>>>,
+    access_token: String,
+    id: String,
+) {
+    tokio::spawn(async move {
+        let detail = match api::get_artist(&access_token, &id).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("artist card ({id}) failed: {e}");
+                return;
+            }
+        };
+        let bio = fetch_artist_bio(&session_slot, &id).await;
+        resp.send(WorkerResponse::ArtistCardReady { detail, bio });
+    });
+}
+
+/// How long an artist's biography stays cached. Edited ~never; this just
+/// bounds growth like the other metadata caches.
+const ARTIST_BIO_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60 * 24 * 30);
+
+/// Disk-cache shape for a biography. An empty `text` is a **negative**
+/// entry — "this artist has no bio" — so we don't re-query every track.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ArtistBio {
+    text: String,
+}
+
+/// Resolve an artist's biography: JSON disk cache first, then the
+/// `ARTIST_V4` extended-metadata query (needs a live session — skipped
+/// silently without one, uncached so a later fetch can still succeed).
+async fn fetch_artist_bio(
+    session_slot: &Arc<AsyncMutex<Option<Session>>>,
+    artist_id: &str,
+) -> Option<String> {
+    let cache_key = format!("artist_bio_{artist_id}");
+    if let Ok(Some(cached)) = tokio::task::spawn_blocking({
+        let k = cache_key.clone();
+        move || disk_cache::read_json::<ArtistBio>(&k, ARTIST_BIO_TTL)
+    })
+    .await
+    {
+        return (!cached.text.is_empty()).then_some(cached.text);
+    }
+    let session = { session_slot.lock().await.clone() };
+    let Some(session) = session else {
+        debug!("artist bio skipped — no session yet ({artist_id})");
+        return None;
+    };
+    let req = BatchedEntityRequest {
+        entity_request: vec![EntityRequest {
+            entity_uri: format!("spotify:artist:{artist_id}"),
+            query: vec![ExtensionQuery {
+                extension_kind: EnumOrUnknown::new(ExtensionKind::ARTIST_V4),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut res = match session.spclient().get_extended_metadata(req).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("artist bio request failed ({artist_id}): {e}");
+            return None;
+        }
+    };
+    let text = (|| {
+        let mut arr = res.extended_metadata.pop()?;
+        let mut data = arr.extension_data.pop()?;
+        let any = data.extension_data.take()?;
+        let artist =
+            <librespot_protocol::metadata::Artist as protobuf::Message>::parse_from_bytes(
+                &any.value,
+            )
+            .ok()?;
+        let bio = artist.biography.first()?;
+        Some(strip_tags(bio.text()))
+    })()
+    .unwrap_or_default();
+    let store = ArtistBio { text: text.clone() };
+    tokio::task::spawn_blocking(move || disk_cache::write_json(&cache_key, &store))
+        .await
+        .ok();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Drop the simple HTML tags (`<a href=…>`, `<b>`, `<br>`) Spotify embeds
+/// in biography text, keeping the visible characters.
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Resolve a context uri's display name via the Web API. Failure reports
+/// `name: None` (not silence) so the model can negative-cache the uri and
+/// stop re-asking on every push.
+fn spawn_fetch_context_name(resp: Responder, access_token: String, uri: String) {
+    tokio::spawn(async move {
+        let name = match api::get_context_name(&access_token, &uri).await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("context name ({uri}) failed: {e}");
+                None
+            }
+        };
+        resp.send(WorkerResponse::ContextNameReady { uri, name });
+    });
+}
+
+/// One person in a credits group: display roles pre-joined ("Composer •
+/// Lyricist"); `artist_id` non-empty when they have a Spotify artist
+/// profile (the row navigates to it).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreditPerson {
+    pub name: String,
+    pub roles: String,
+    pub artist_id: String,
+}
+
+/// One credits section, mirroring Spotify's grouping ("Composition &
+/// Lyrics", "Production & Engineering", "Performers").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CreditGroup {
+    pub title: String,
+    pub people: Vec<CreditPerson>,
+}
+
+/// A track's full credits: the grouped sections plus the source labels
+/// ("Craft Recordings"). Also the disk-cache shape.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TrackCredits {
+    pub groups: Vec<CreditGroup>,
+    pub sources: Vec<String>,
+}
+
+impl TrackCredits {
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty() && self.sources.is_empty()
+    }
+}
+
+/// How long a track's credits stay cached — immutable in practice.
+const CREDITS_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60 * 24 * 30);
+
+/// Resolve a track's credits: JSON disk cache first (covers the empty
+/// list as a negative entry), then the spclient track-credits endpoint.
+/// Skipped silently without a session (uncached, retried on next track).
+fn spawn_fetch_track_credits(
+    resp: Responder,
+    session_slot: Arc<AsyncMutex<Option<Session>>>,
+    track_id: String,
+) {
+    tokio::spawn(async move {
+        let cache_key = format!("credits_{track_id}");
+        if let Ok(Some(credits)) = tokio::task::spawn_blocking({
+            let k = cache_key.clone();
+            move || disk_cache::read_json::<TrackCredits>(&k, CREDITS_TTL)
+        })
+        .await
+        {
+            resp.send(WorkerResponse::TrackCreditsReady { track_id, credits });
+            return;
+        }
+        let session = { session_slot.lock().await.clone() };
+        let Some(session) = session else {
+            debug!("credits fetch skipped — no session yet ({track_id})");
+            return;
+        };
+        let endpoint = format!("/track-credits-view/v0/experimental/{track_id}/credits");
+        let body = match session
+            .spclient()
+            .request(&http::Method::GET, &endpoint, None, None)
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("track credits ({track_id}) failed: {e}");
+                return;
+            }
+        };
+        let credits = parse_credits(&body);
+        let store = credits.clone();
+        tokio::task::spawn_blocking(move || disk_cache::write_json(&cache_key, &store))
+            .await
+            .ok();
+        resp.send(WorkerResponse::TrackCreditsReady { track_id, credits });
+    });
+}
+
+/// spclient credits JSON → grouped display sections, keeping Spotify's
+/// own order and mapping the raw group keys to the official client's
+/// headings (Writers → "Composition & Lyrics", Producers → "Production
+/// & Engineering"). Each person keeps their subroles ("Composer •
+/// Lyricist") and, when they have an artist profile, the bare artist id
+/// so the row can navigate to it.
+fn parse_credits(body: &[u8]) -> TrackCredits {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct R {
+        #[serde(default)]
+        role_credits: Vec<Role>,
+        #[serde(default)]
+        source_names: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Role {
+        #[serde(default)]
+        role_title: String,
+        #[serde(default)]
+        artists: Vec<Person>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Person {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        uri: String,
+        #[serde(default)]
+        subroles: Vec<String>,
+    }
+    let Ok(r) = serde_json::from_slice::<R>(body) else {
+        return TrackCredits::default();
+    };
+    let groups = r
+        .role_credits
+        .into_iter()
+        .filter_map(|role| {
+            let people: Vec<CreditPerson> = role
+                .artists
+                .into_iter()
+                .filter(|p| !p.name.is_empty())
+                .map(|p| CreditPerson {
+                    name: p.name,
+                    roles: p
+                        .subroles
+                        .iter()
+                        .map(|s| title_case(s))
+                        .collect::<Vec<_>>()
+                        .join(" \u{2022} "),
+                    artist_id: p
+                        .uri
+                        .strip_prefix("spotify:artist:")
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+                .collect();
+            if people.is_empty() {
+                return None;
+            }
+            let title = match role.role_title.to_ascii_lowercase().as_str() {
+                "writers" => "Composition & Lyrics".to_string(),
+                "producers" => "Production & Engineering".to_string(),
+                "performers" => "Performers".to_string(),
+                _ => title_case(&role.role_title),
+            };
+            Some(CreditGroup { title, people })
+        })
+        .collect();
+    TrackCredits {
+        groups,
+        sources: r.source_names.into_iter().filter(|s| !s.is_empty()).collect(),
+    }
+}
+
+/// "main artist" → "Main Artist".
+fn title_case(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Load an artist page: profile + discography (newest-first albums), in
 /// parallel. `get_json`'s disk cache makes re-opens cheap.
 fn spawn_fetch_artist(resp: Responder, access_token: String, id: String) {
@@ -1359,14 +1750,51 @@ fn spawn_fetch_artist(resp: Responder, access_token: String, id: String) {
             api::get_artist_top_tracks(&access_token, &id, &market),
             api::get_artist_albums(&access_token, &id, 20),
         );
+        // Partial failures degrade to empty sections, but loudly — a
+        // silent swallow here once hid a whole API regression.
+        let top_tracks = top_tracks
+            .inspect_err(|e| warn!("artist top-tracks ({id}) failed: {e}"))
+            .unwrap_or_default();
+        let albums = albums
+            .inspect_err(|e| warn!("artist albums ({id}) failed: {e}"))
+            .unwrap_or_default();
+        // The user's liked songs by this artist — read from the cached
+        // Liked Songs collection (the membership graph's source data).
+        // Cache miss ⇒ the section just doesn't show; re-streaming a
+        // thousand-track collection for one page would be rude.
+        let liked_tracks = {
+            let artist_id = id.clone();
+            tokio::task::spawn_blocking(move || {
+                disk_cache::read_json::<api::PlaylistDetail>(
+                    api::LIKED_SONGS_ID,
+                    PLAYLIST_DISK_TTL,
+                )
+                .map(|d| {
+                    d.tracks
+                        .into_iter()
+                        .filter(|t| {
+                            t.artist_id == artist_id
+                                || t.artists.iter().any(|a| a.id == artist_id)
+                        })
+                        // A prolific favourite could match dozens — the
+                        // section is a highlight strip, not the library.
+                        .take(10)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default()
+        };
         match profile {
             Ok(p) => resp.send(WorkerResponse::ArtistOpened {
                 id,
                 name: p.name,
                 image_url: p.image_url,
                 followers: p.followers,
-                top_tracks: top_tracks.unwrap_or_default(),
-                albums: albums.unwrap_or_default(),
+                top_tracks,
+                albums,
+                liked_tracks,
             }),
             Err(e) => {
                 warn!("get_artist({id}) failed: {e}");
@@ -1377,6 +1805,143 @@ fn spawn_fetch_artist(resp: Responder, access_token: String, id: String) {
             }
         }
     });
+}
+
+/// Resolve bare track uris to full display rows via ONE batched
+/// `TRACK_V4` extended-metadata request per ~40 uris (the official
+/// client hydrates its queue the same way — cluster `next_tracks` often
+/// ship uri-only for context/autoplay entries). Silent no-op without a
+/// session; unresolvable entries are simply absent from the result.
+fn spawn_hydrate_tracks(
+    resp: Responder,
+    session_slot: Arc<AsyncMutex<Option<Session>>>,
+    uris: Vec<String>,
+) {
+    tokio::spawn(async move {
+        if uris.is_empty() {
+            return;
+        }
+        let session = { session_slot.lock().await.clone() };
+        let Some(session) = session else {
+            debug!("track hydration skipped — no session yet ({} uris)", uris.len());
+            return;
+        };
+        let mut tracks: Vec<api::PlaylistTrack> = Vec::with_capacity(uris.len());
+        for chunk in uris.chunks(40) {
+            let req = BatchedEntityRequest {
+                entity_request: chunk
+                    .iter()
+                    .map(|uri| EntityRequest {
+                        entity_uri: uri.clone(),
+                        query: vec![ExtensionQuery {
+                            extension_kind: EnumOrUnknown::new(ExtensionKind::TRACK_V4),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let res = match session.spclient().get_extended_metadata(req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("track hydration batch failed: {e}");
+                    continue;
+                }
+            };
+            for arr in res.extended_metadata {
+                for mut data in arr.extension_data {
+                    let uri = data.entity_uri.clone();
+                    let Some(any) = data.extension_data.take() else {
+                        continue;
+                    };
+                    let Ok(t) =
+                        <librespot_protocol::metadata::Track as protobuf::Message>::parse_from_bytes(
+                            &any.value,
+                        )
+                    else {
+                        continue;
+                    };
+                    if let Some(row) = proto_track_to_row(uri, &t) {
+                        tracks.push(row);
+                    }
+                }
+            }
+        }
+        info!("track hydration resolved {}/{} uris", tracks.len(), uris.len());
+        resp.send(WorkerResponse::TracksHydrated { tracks });
+    });
+}
+
+/// Map a metadata-proto `Track` to our domain [`api::PlaylistTrack`].
+/// Cover = the largest `album.cover`/`cover_group` image as an
+/// `i.scdn.co` URL; artist gids → base62 ids for the clickable lines.
+fn proto_track_to_row(
+    uri: String,
+    t: &librespot_protocol::metadata::Track,
+) -> Option<api::PlaylistTrack> {
+    let id = api::track_id_from_uri(&uri)?.to_string();
+    let name = t.name().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let artists: Vec<api::TrackArtist> = t
+        .artist
+        .iter()
+        .map(|a| api::TrackArtist {
+            id: librespot_core::SpotifyId::from_raw(a.gid())
+                .map(|g| g.to_base62())
+                .unwrap_or_default(),
+            name: a.name().to_string(),
+        })
+        .collect();
+    let artist = artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let album = t.album.as_ref();
+    let album_id = album
+        .and_then(|al| librespot_core::SpotifyId::from_raw(al.gid()).ok())
+        .map(|g| g.to_base62())
+        .unwrap_or_default();
+    // Largest cover from either the flat list or the grouped one.
+    let album_image_url = album
+        .and_then(|al| {
+            al.cover
+                .iter()
+                .chain(al.cover_group.image.iter())
+                .max_by_key(|img| img.width())
+        })
+        .map(|img| {
+            let hex: String = img.file_id().iter().map(|b| format!("{b:02x}")).collect();
+            format!("https://i.scdn.co/image/{hex}")
+        });
+    Some(api::PlaylistTrack {
+        id,
+        uri,
+        name: name.clone(),
+        artist,
+        album: album.map(|al| al.name().to_string()).unwrap_or_default(),
+        album_image_url,
+        duration_ms: t.duration().max(0) as u64,
+        artist_id: artists.first().map(|a| a.id.clone()).unwrap_or_default(),
+        artists,
+        album_id,
+        playable: true,
+    })
+}
+
+/// The user's Liked Songs collection context uri
+/// (`spotify:user:{id}:collection`) — `get_me` is disk-cached (SLOW), so
+/// this is free after the first call. `None` if the profile can't resolve
+/// (the caller falls back to a bare uris window).
+async fn collection_context_uri(access_token: &str) -> Option<String> {
+    api::get_me(access_token)
+        .await
+        .ok()
+        .filter(|p| !p.id.is_empty())
+        .map(|p| format!("spotify:user:{}:collection", p.id))
 }
 
 fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked: bool) {
@@ -1390,12 +1955,17 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
         .await
         .ok()
         .flatten();
-        if let Some(detail) = cached {
+        if let Some(mut detail) = cached {
             info!(
                 "playlist '{}' disk-cache hit: {} tracks",
                 detail.name,
                 detail.tracks.len()
             );
+            // Older cache entries predate the collection context — patch
+            // it in so cached Liked Songs plays with a context too.
+            if liked && detail.context_uri.is_none() {
+                detail.context_uri = collection_context_uri(&access_token).await;
+            }
             resp.send(WorkerResponse::PlaylistOpened {
                 detail,
                 complete: true,
@@ -1407,7 +1977,13 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
         //    from the first page) so the header + scrollbar appear before
         //    any track page lands.
         let (name, owner, image_url, context_uri) = if liked {
-            ("Liked Songs".to_string(), String::new(), None, None)
+            // Liked Songs IS a playable context — `spotify:user:{id}:collection`,
+            // the same uri the official client plays it through. Playing with
+            // a context (instead of a bare uris window) is what keeps
+            // continuation + autoplay + every connected client's now-playing
+            // coherent.
+            let ctx = collection_context_uri(&access_token).await;
+            ("Liked Songs".to_string(), String::new(), None, ctx)
         } else {
             match api::playlist_meta(&access_token, &id).await {
                 Ok(m) => (

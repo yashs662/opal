@@ -37,6 +37,12 @@ pub fn tick(
     // Keep the live canvas node id in sync so the decode thread targets the
     // correct node even after a scene rebuild.
     state.canvas.sync_node(ctx.node("now_playing_canvas"));
+    // The video backdrop only exists on screen while frames are flowing:
+    // culled whole (external node + dim scrim) otherwise, so a stale frame
+    // surviving in the GPU registry — however it got there — cannot render.
+    if let Some(id) = ctx.node("now_playing_backdrop") {
+        ctx.tree.set_visible(id, state.canvas.active);
+    }
     // Drive the collapsing detail-page header from its scroll offset. Runs
     // every active (scroll) frame; only sets a Signal — the sticky bar's
     // position/opacity binds pick it up with no rebuild. Absent node (Home
@@ -91,10 +97,59 @@ pub fn tick(
     if state.canvas.tick_active() {
         cx.rebuild();
     }
-    // Smoothly tween the Canvas dim overlay on hover transitions.
-    state.canvas.tick_dim(cx.tl, cx.now);
+    // Fade the media window's hover chrome (hide arrow) on hover transitions.
+    state.canvas.tick_hover(cx.tl, cx.now);
+    // Feed the now-playing scroller's live viewport height back to the
+    // pane: width follows height at the Canvas 9:16 aspect, and the
+    // above-card spacer is (viewport − CARD_PEEK) tall so the card's
+    // header rests at the pane's bottom edge until scrolled (canvas
+    // mode). Signals dedup — layout only re-runs on an actual change
+    // (window resize), not per frame.
+    {
+        use crate::views::home::now_playing as np;
+        if let Some(id) = ctx.node("now_playing_scroll")
+            && let Some(n) = ctx.tree.get(id)
+        {
+            let scale = ctx.scale.max(1.0);
+            let viewport_h = n.rect[3] / scale;
+            // Skip pre-layout zero rects (and the collapsed pane's stale
+            // frame) so a bogus measure can't zero the width.
+            // Snap to whole logical px: a fractional pane width lands the
+            // card/scroller edges on half-pixels, anti-aliasing a hairline
+            // of the video through along the card's edge. The video keeps
+            // 9:16 via its own aspect bind; centre + clip absorb the ≤1px
+            // remainder.
+            if viewport_h > 1.0 {
+                state
+                    .player_ui
+                    .np_pane_w
+                    .set((viewport_h * 9.0 / 16.0).round());
+                state
+                    .player_ui
+                    .np_fill_h
+                    .set((viewport_h - np::CARD_PEEK).max(0.0).round());
+            }
+            // Card colour reveal: glassy-dark at rest → full accent as the
+            // card scrolls up over the video (the spring-smoothed offset
+            // makes the blend animate with the scroll physics for free).
+            // No video → the card sits in its final state: pinned at 1.
+            let t = if state.canvas.active {
+                let off = ctx.tree.scroll_offset(id)[1] / scale;
+                (off / np::CARD_REVEAL_RANGE).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if (state.player_ui.np_card_t.get() - t).abs() > 0.001 {
+                state.player_ui.np_card_t.set(t);
+            }
+        }
+    }
     // Refresh the elapsed-time label (once per second, off the live tween).
     state.player_ui.tick_clock();
+    // Pulse the play button while the Connect session is still coming up
+    // (only while the player bar is on screen, so login doesn't spin the loop).
+    let on_home = matches!(state.router.view, crate::views::View::Home);
+    state.player_ui.tick_loading(on_home, cx.tl, cx.now);
     // Commit a seek on the release edge of a progress-bar drag.
     if let Some(ms) = state.player_ui.tick_seek(cx.tl)
         && let Some(token) = state.auth.token()

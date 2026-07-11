@@ -192,8 +192,11 @@ pub const SIDEBAR_MAX: f32 = SP_80 + SP_44; // 320 + 176 = 496
 /// same moment the splitter snap fires.
 pub const SIDEBAR_COLLAPSE_THRESHOLD: f32 = (SIDEBAR_COLLAPSED + SIDEBAR_MIN) / 2.0;
 
-pub const NOW_PLAYING_MIN: f32 = 260.0;
-pub const NOW_PLAYING_MAX: f32 = 520.0;
+/// Gutter between the centre pane and the now-playing pane. Folded into
+/// the pane's animated width so a collapse shrinks to a true 0. (The
+/// pane itself has no width token — its width follows its measured
+/// height at the Canvas 9:16 aspect and is not user-resizable.)
+pub const NOW_PLAYING_GUTTER: f32 = SP_2;
 
 /// Search input chrome (top bar).
 pub const SEARCH_W: f32 = 440.0;

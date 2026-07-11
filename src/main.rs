@@ -6,6 +6,7 @@
 mod album_art;
 mod api;
 mod app;
+mod audio_sink;
 mod auth;
 mod bounded;
 mod canvas;
@@ -32,7 +33,6 @@ use std::rc::Rc;
 use opal_gfx::App;
 
 use crate::app::AppState;
-use crate::model::CanvasModel;
 use crate::prefs::UserPreferences;
 use crate::views::View;
 use crate::widgets::tokens;
@@ -98,12 +98,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokens::SIDEBAR_MIN,
         tokens::SIDEBAR_MAX,
         tokens::SIDEBAR_COLLAPSED,
-    );
-    prefs.panels.now_playing_w = prefs::clamp_panel_width(
-        prefs.panels.now_playing_w,
-        tokens::NOW_PLAYING_MIN,
-        tokens::NOW_PLAYING_MAX,
-        0.0, // now-playing collapses fully
     );
     let win_w = prefs.window.width.unwrap_or(W);
     let win_h = prefs.window.height.unwrap_or(H);
@@ -176,11 +170,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // can push video frames onto the now-playing external node.
     let frame_sink = app.frame_sink();
     app.state_mut().canvas.set_frame_sink(frame_sink);
-    // Stage the Canvas dim gradient — the model owns the gradient shape;
-    // here we only do the GPU upload and hand the handle back.
-    let (gw, gh, px) = CanvasModel::dim_grad_rgba();
-    let dim_handle = app.stage_image_rgba(gw, gh, px);
-    app.state_mut().canvas.set_dim_grad(dim_handle);
 
     // Re-hydrate the album-art backdrop from the persisted last track so
     // it's populated before the user sees Home (disk-cache → near-instant).

@@ -26,10 +26,17 @@ pub struct PrefsModel {
     /// The serialized preferences. Mutated in place (cache dir, last
     /// player, panel widths) and written by the debounced save.
     pub data: UserPreferences,
-    /// Resizable panel widths in logical px, driven live by the splitters
+    /// Resizable sidebar width in logical px, driven live by its splitter
     /// (`width_px_bind`); snapshotted back into `data.panels` on save.
     pub sidebar_w: Signal<f32>,
-    pub now_playing_w: Signal<f32>,
+    /// The now-playing pane's animated open fraction (0..=1). Not
+    /// user-resizable (the pane's width follows its height at 9:16) —
+    /// the toggle tweens this for the slide-collapse; only the open flag
+    /// persists.
+    pub now_playing_open_t: Signal<f32>,
+    /// Whether the now-playing pane is shown — drives the player-bar
+    /// toggle tint reactively; snapshotted into `data.panels` on save.
+    pub now_playing_open: Signal<bool>,
     /// Earliest unsaved change since the last save. `None` = clean.
     dirty_since: Option<Instant>,
     /// Throwaway signal anchoring a timeline tween that keeps the loop
@@ -40,10 +47,11 @@ pub struct PrefsModel {
 impl PrefsModel {
     pub fn new(prefs: UserPreferences) -> Self {
         let sidebar_w = Signal::new(prefs.panels.sidebar_w);
-        let now_playing_w = Signal::new(prefs.panels.now_playing_w);
+        let open = prefs.panels.now_playing_open;
         Self {
             sidebar_w,
-            now_playing_w,
+            now_playing_open_t: Signal::new(if open { 1.0 } else { 0.0 }),
+            now_playing_open: Signal::new(open),
             data: prefs,
             dirty_since: None,
             save_anchor: Signal::new(0.0),
@@ -72,6 +80,9 @@ impl PrefsModel {
                 progress_ms: p.live_progress_ms().min(p.duration_ms),
                 duration_ms: p.duration_ms,
                 context_uri: p.context_uri.clone(),
+                context_name: p.context_name.clone(),
+                artist_id: p.artist_id.clone(),
+                artists: p.artists.clone(),
             });
         }
     }
@@ -81,7 +92,7 @@ impl PrefsModel {
     fn flush(&mut self, player: Option<&CurrentlyPlaying>, show_canvas: bool) -> std::io::Result<()> {
         self.snapshot_player(player);
         self.data.panels.sidebar_w = self.sidebar_w.get();
-        self.data.panels.now_playing_w = self.now_playing_w.get();
+        self.data.panels.now_playing_open = self.now_playing_open.get();
         self.data.show_canvas = show_canvas;
         self.data.save()
     }
@@ -124,7 +135,9 @@ impl PrefsModel {
     pub fn reset(&mut self) {
         let defaults = UserPreferences::default();
         self.sidebar_w.set(defaults.panels.sidebar_w);
-        self.now_playing_w.set(defaults.panels.now_playing_w);
+        self.now_playing_open.set(defaults.panels.now_playing_open);
+        self.now_playing_open_t
+            .set(if defaults.panels.now_playing_open { 1.0 } else { 0.0 });
         self.data = defaults;
         self.dirty_since = None;
         match self.data.save() {

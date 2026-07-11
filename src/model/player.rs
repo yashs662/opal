@@ -19,6 +19,53 @@ use crate::api::{CurrentlyPlaying, RepeatMode};
 pub struct PlayerModel {
     pub title: TextSignal,
     pub artist: TextSignal,
+    /// Display name of the queue source ("Chill", "Daily Mix 2", …) from
+    /// the cluster's context metadata, falling back to the context *kind*
+    /// when unnamed — the now-playing pane's top-left source pill.
+    /// Reactive so a track change updates it without a rebuild.
+    pub context_label: TextSignal,
+    /// Whether the playing context is known at all (a uri or a name) —
+    /// hides the source pill entirely instead of showing a bare "—" disc
+    /// when the state carries neither (fresh cold start, contextless play).
+    pub context_known: Signal<bool>,
+    /// Web-API-resolved fallback name for a context uri whose pushes carry
+    /// no `context_description` (the `/me/player` cold-start seed, our own
+    /// local playback): `(uri, name)`. An empty name is a negative entry —
+    /// resolution failed / unfetchable kind — so the reducer doesn't
+    /// re-dispatch on every push. [`Self::sync`] prefers it over the bare
+    /// kind label.
+    pub resolved_context: Option<(String, String)>,
+    /// Context uri with a name fetch in flight (dedup, like
+    /// [`np_about_inflight`](Self::np_about_inflight)).
+    pub context_inflight: Option<String>,
+    /// "About the artist" data for the current track's first artist —
+    /// fetched by the worker on artist change; `None` hides the section.
+    pub np_about: Option<crate::api::ArtistDetail>,
+    /// The artist's biography paragraph (extended metadata), shown under
+    /// the follower count. Arrives with `np_about`; `None` = no bio.
+    pub np_bio: Option<String>,
+    /// Artist id with a card fetch in flight — dedups re-dispatch on the
+    /// cluster's non-track pushes (play/pause/seek/volume).
+    pub np_about_inflight: Option<String>,
+    /// Credits for the current track (`(track_id, credits)`) — the
+    /// card's "Credits" section. The id keys staleness: a set from the
+    /// previous track never renders under the next one.
+    pub np_credits: Option<(String, crate::worker::TrackCredits)>,
+    /// Track id with a credits fetch in flight (dedup).
+    pub np_credits_inflight: Option<String>,
+    /// Height (logical px) of the now-playing pane's above-card block:
+    /// scroller viewport − card peek, measured by the frame tick, so the
+    /// card's accent header rests at the pane's bottom edge until scrolled.
+    pub np_fill_h: Signal<f32>,
+    /// Now-playing pane width (logical px) — measured pane height ×
+    /// 9/16 by the frame tick, so the pane always holds the Canvas
+    /// aspect as the window resizes.
+    pub np_pane_w: Signal<f32>,
+    /// Scroll progress (0..=1) of the now-playing card reveal, derived from
+    /// the pane's spring-smoothed scroll offset by the frame tick. Drives
+    /// the card's glassy-dark → full-accent colour blend; smooth for free
+    /// because the scroll offset itself is spring-interpolated.
+    pub np_card_t: Signal<f32>,
     pub is_playing: Signal<bool>,
     pub shuffle: Signal<bool>,
     pub repeat_on: Signal<bool>,
@@ -89,6 +136,23 @@ pub struct PlayerModel {
     /// play button know nothing is actually playing yet, so it resumes the
     /// last track explicitly instead of a bare Web API resume that no-ops.
     pub live: bool,
+    /// The Connect (Spirc) session has registered Opal as a device, so
+    /// transport can actually act on something. False on cold start until
+    /// `SpotifySessionConnected` (or `…Failed`, the Web-API fallback) — the
+    /// player bar shows a pulsing "loading" play button and swallows clicks
+    /// until then, so an early press isn't a silent no-op.
+    pub session_ready: Signal<bool>,
+    /// Opacity of the black "loading" overlay (black circle + brand logo) that
+    /// sits over the play button while `!session_ready`. 1 while loading, then
+    /// tweened to 0 so the black background + logo dissolve out together,
+    /// revealing the real play/pause button beneath.
+    pub loading_fade: Signal<f32>,
+    /// Opacity pulse for the logo within the overlay — ping-pong tweened while
+    /// loading so it breathes; parked once ready.
+    pub loading_pulse: Signal<f32>,
+    /// Edge guard so the tick starts/stops the loading animation on the
+    /// readiness transition, not every frame.
+    loading_anim_on: bool,
 }
 
 impl PlayerModel {
@@ -110,6 +174,30 @@ impl PlayerModel {
         Self {
             title: TextSignal::new(title),
             artist: TextSignal::new(artist),
+            context_label: TextSignal::new(
+                restored
+                    .as_ref()
+                    .and_then(|p| p.context_name.as_deref())
+                    .unwrap_or_else(|| {
+                        context_kind(restored.as_ref().and_then(|p| p.context_uri.as_deref()))
+                    }),
+            ),
+            context_known: Signal::new(
+                restored
+                    .as_ref()
+                    .map(|p| p.context_uri.is_some() || p.context_name.is_some())
+                    .unwrap_or(false),
+            ),
+            resolved_context: None,
+            context_inflight: None,
+            np_about: None,
+            np_bio: None,
+            np_about_inflight: None,
+            np_credits: None,
+            np_credits_inflight: None,
+            np_fill_h: Signal::new(480.0),
+            np_pane_w: Signal::new(304.0),
+            np_card_t: Signal::new(0.0),
             is_playing: Signal::new(false),
             shuffle: Signal::new(false),
             repeat_on: Signal::new(false),
@@ -139,6 +227,12 @@ impl PlayerModel {
             // `AppState::from_prefs`. The first live cluster push overwrites it.
             snapshot: restored,
             live: false,
+            session_ready: Signal::new(false),
+            // 0 = overlay hidden; armed to 1 on the first loading tick, so a
+            // session that's already ready when Home mounts shows no overlay.
+            loading_fade: Signal::new(0.0),
+            loading_pulse: Signal::new(1.0),
+            loading_anim_on: false,
         }
     }
 
@@ -208,8 +302,26 @@ impl PlayerModel {
     /// the bar holds.
     pub fn sync(&mut self, p: &CurrentlyPlaying, tl: &mut Timeline, now: Instant) {
         self.live = true;
+        // A live push means there's something to act on (a remote device is
+        // playing even before our own Connect session registers) — enable
+        // transport + drop the loading pulse.
+        self.session_ready.set(true);
         self.title.set(p.name.as_str());
         self.artist.set(p.artist.as_str());
+        // Source-pill label: the push's own display name, else the
+        // Web-API-resolved fallback for this uri, else the bare kind.
+        let label = p.context_name.as_deref().or_else(|| {
+            self.resolved_context
+                .as_ref()
+                .filter(|(u, n)| {
+                    Some(u.as_str()) == p.context_uri.as_deref() && !n.is_empty()
+                })
+                .map(|(_, n)| n.as_str())
+        });
+        self.context_label
+            .set(label.unwrap_or_else(|| context_kind(p.context_uri.as_deref())));
+        self.context_known
+            .set(p.context_uri.is_some() || p.context_name.is_some());
         self.is_playing.set(p.is_playing);
         self.shuffle.set(p.shuffle);
         self.repeat_on.set(!matches!(p.repeat, RepeatMode::Off));
@@ -237,6 +349,49 @@ impl PlayerModel {
     pub fn stopped(&self, tl: &mut Timeline) {
         self.is_playing.set(false);
         tl.stop_for(&self.progress);
+    }
+
+    /// Drive the play button's loading pulse from the frame tick: ping-pong
+    /// the opacity while the player bar is showing (`relevant`) and the
+    /// session isn't ready yet; park at 1.0 otherwise. Edge-guarded so it
+    /// doesn't re-arm (or keep the loop awake) once settled.
+    pub fn tick_loading(&mut self, relevant: bool, tl: &mut Timeline, now: Instant) {
+        let loading = relevant && !self.session_ready.get();
+        if loading == self.loading_anim_on {
+            return;
+        }
+        self.loading_anim_on = loading;
+        if loading {
+            // Fade the black+logo overlay in over the play button + breathe
+            // the logo.
+            tl.animate(
+                &self.loading_fade,
+                1.0,
+                Curve::EaseInOut,
+                Duration::from_millis(220),
+                now,
+            );
+            tl.animate_pingpong(
+                &self.loading_pulse,
+                1.0,
+                0.4,
+                Curve::EaseInOut,
+                Duration::from_millis(800),
+                now,
+            );
+        } else {
+            // Ready — dissolve the overlay (black bg + logo) out together,
+            // revealing the real play/pause button.
+            tl.animate(
+                &self.loading_fade,
+                0.0,
+                Curve::EaseInOut,
+                Duration::from_millis(420),
+                now,
+            );
+            tl.stop_for(&self.loading_pulse);
+            self.loading_pulse.set(1.0);
+        }
     }
 
     // --- optimistic transport (player-bar intents) --------------------
@@ -392,6 +547,19 @@ impl VolumeHandle {
         let frac = frac.clamp(0.0, 1.0);
         self.preview_px.set(frac * lane_w.max(1.0));
         self.label.set(fmt_pct(frac).as_str());
+    }
+}
+
+/// Human label for a playing context uri — the card's "Playing from" row.
+fn context_kind(uri: Option<&str>) -> &'static str {
+    match uri {
+        Some(u) if u.ends_with(":collection") => "Liked Songs",
+        Some(u) if u.contains(":album:") => "Album",
+        Some(u) if u.contains(":playlist:") => "Playlist",
+        Some(u) if u.contains(":artist:") => "Artist",
+        Some(u) if u.contains(":show:") => "Podcast",
+        Some(_) => "Queue",
+        None => "\u{2014}",
     }
 }
 

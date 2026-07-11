@@ -40,6 +40,13 @@ pub struct ArtistViewData {
     pub followers: u64,
     pub loading: bool,
     pub popular: Vec<ArtistTrack>,
+    /// The user's liked songs by this artist (capped) — rendered before
+    /// the discography; rows play within the Liked Songs collection
+    /// context when one resolved.
+    pub liked: Vec<ArtistTrack>,
+    /// `spotify:user:{id}:collection` when the profile is known — the
+    /// liked rows' playing context.
+    pub liked_context: Option<String>,
     pub albums: Vec<ArtistAlbumTile>,
 }
 
@@ -58,7 +65,8 @@ pub fn view(
     s.col(scroll_node)
         .w(Len::Fill)
         .h(Len::Fill)
-        .pad_xy(t::SP_6, t::SP_2)
+        // Bottom inset matches the sides — see the queue scroller.
+        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
         .gap(t::SP_5)
         .scroll_y()
         .layer()
@@ -127,7 +135,38 @@ pub fn view(
                         h.text((), "Popular", 18.0).color(t::TEXT);
                     });
                 for (i, track) in data.popular.iter().enumerate() {
-                    popular_row(c, i as u32, track, &on_play);
+                    let target = PlayTarget::Uris {
+                        uris: vec![track.uri.clone()],
+                        offset: 0,
+                    };
+                    track_row(c, i as u32, track, target, &on_play);
+                }
+            }
+
+            // The user's liked songs by this artist — the membership
+            // graph's view of them, ahead of the discography. Rows play
+            // within the Liked Songs collection when its context is
+            // known (continuation stays inside the user's library).
+            if !data.liked.is_empty() {
+                c.row(())
+                    .w(Len::Fill)
+                    .h_px(t::SP_7)
+                    .align(Align::Center)
+                    .child(|h| {
+                        h.text((), "Liked songs", 18.0).color(t::TEXT);
+                    });
+                for (i, track) in data.liked.iter().enumerate() {
+                    let target = match &data.liked_context {
+                        Some(ctx) => PlayTarget::ContextAt {
+                            context_uri: ctx.clone(),
+                            track_uri: track.uri.clone(),
+                        },
+                        None => PlayTarget::Uris {
+                            uris: vec![track.uri.clone()],
+                            offset: 0,
+                        },
+                    };
+                    track_row(c, i as u32, track, target, &on_play);
                 }
             }
 
@@ -168,10 +207,10 @@ pub fn view(
         });
 }
 
-/// One "Popular" track row: rank + thumb + title; clicking plays the track.
-fn popular_row(s: &mut Scene, index: u32, track: &ArtistTrack, on_play: &PlayFn) {
+/// One track row (Popular / Liked songs): rank + thumb + title + run
+/// time; clicking plays `target`.
+fn track_row(s: &mut Scene, index: u32, track: &ArtistTrack, target: PlayTarget, on_play: &PlayFn) {
     let on_play = on_play.clone();
-    let uri = track.uri.clone();
     s.row(())
         .w(Len::Fill)
         .h_px(t::SP_12)
@@ -180,12 +219,7 @@ fn popular_row(s: &mut Scene, index: u32, track: &ArtistTrack, on_play: &PlayFn)
         .align(Align::Center)
         .radius(t::R_MD)
         .hover_color(t::HOVER_LIFT_SUBTLE)
-        .on_click(move |_| {
-            on_play(PlayTarget::Uris {
-                uris: vec![uri.clone()],
-                offset: 0,
-            })
-        })
+        .on_click(move |_| on_play(target.clone()))
         .child(|r| {
             r.row(()).w_px(t::SP_6).center().child(|c| {
                 c.text((), format!("{}", index + 1), 13.0)
@@ -230,8 +264,8 @@ fn popular_row(s: &mut Scene, index: u32, track: &ArtistTrack, on_play: &PlayFn)
 }
 
 /// Compact follower count: "1.2M followers" / "12.3K followers" / "742
-/// followers".
-fn fmt_followers(n: u64) -> String {
+/// followers". Shared with the now-playing "About the artist" card.
+pub(crate) fn fmt_followers(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M followers", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
