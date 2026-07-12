@@ -258,6 +258,12 @@ pub struct HomeView {
     on_transfer: Rc<dyn Fn(String)>,
     on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     on_normalize: Rc<dyn Fn()>,
+    /// EQ settings: band-drag release (persist), enable toggle, preset
+    /// apply (by index), save-current-as-custom.
+    on_eq_commit: Rc<dyn Fn()>,
+    on_eq_toggle: Rc<dyn Fn()>,
+    on_eq_preset: Rc<dyn Fn(usize)>,
+    on_eq_save: Rc<dyn Fn()>,
     on_skip: Rc<dyn Fn(u32)>,
     on_context_menu: CtxMenuFn,
     on_add_queue: Rc<dyn Fn(String)>,
@@ -327,6 +333,22 @@ impl HomeView {
         let on_normalize: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ToggleNormalize))
+        };
+        let on_eq_commit: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::EqBandCommitted))
+        };
+        let on_eq_toggle: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::EqToggleEnabled))
+        };
+        let on_eq_preset: Rc<dyn Fn(usize)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |i| dispatch.send(Msg::EqApplyPreset(i)))
+        };
+        let on_eq_save: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::EqSaveCustom))
         };
         let on_skip: Rc<dyn Fn(u32)> = {
             let dispatch = dispatch.clone();
@@ -417,6 +439,10 @@ impl HomeView {
             on_transfer,
             on_quality,
             on_normalize,
+            on_eq_commit,
+            on_eq_toggle,
+            on_eq_preset,
+            on_eq_save,
             on_skip,
             on_context_menu,
             on_add_queue,
@@ -626,6 +652,11 @@ impl HomeView {
             quality: state.prefs.data.audio.quality,
             on_quality: self.on_quality.clone(),
             on_normalize: self.on_normalize.clone(),
+            eq: &state.eq,
+            on_eq_commit: self.on_eq_commit.clone(),
+            on_eq_toggle: self.on_eq_toggle.clone(),
+            on_eq_preset: self.on_eq_preset.clone(),
+            on_eq_save: self.on_eq_save.clone(),
         };
         let devices_panel = devices::DevicesPanel {
             devices: &state.devices,

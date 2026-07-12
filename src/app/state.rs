@@ -5,8 +5,8 @@
 //! per-domain logic lives on the models themselves.
 
 use crate::model::{
-    ArtModel, AuthModel, BackdropModel, CanvasModel, DevicesModel, LibraryModel, MembershipModel,
-    MenuModel, PlayerModel, PrefsModel, RouterModel, SettingsModel,
+    ArtModel, AuthModel, BackdropModel, CanvasModel, DevicesModel, EqModel, LibraryModel,
+    MembershipModel, MenuModel, PlayerModel, PrefsModel, RouterModel, SettingsModel,
 };
 use crate::prefs::UserPreferences;
 
@@ -41,6 +41,9 @@ pub struct AppState {
     pub membership: MembershipModel,
     /// Persisted-preferences slice + panel widths + debounced save.
     pub prefs: PrefsModel,
+    /// 10-band equaliser slice: the reactive slider mirror + the shared
+    /// lock-free control surface the audio sink reads.
+    pub eq: EqModel,
 }
 
 impl AppState {
@@ -104,6 +107,7 @@ impl AppState {
             devices: DevicesModel::new(),
             menu: MenuModel::new(),
             membership: MembershipModel::new(),
+            eq: EqModel::from_prefs(&prefs.audio.eq),
             prefs: PrefsModel::new(prefs),
         }
     }

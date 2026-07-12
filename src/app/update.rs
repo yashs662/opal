@@ -322,6 +322,50 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             state.prefs.mark_dirty(cx.now);
         }
 
+        Msg::EqBandCommitted => {
+            // The drag updated the band signal + shared surface live; on
+            // release, re-derive whether the shape still matches a named
+            // preset (the panel shows "Custom" otherwise) and persist.
+            state.eq.refresh_selected();
+            state.prefs.data.audio.eq = state.eq.to_prefs();
+            state.prefs.mark_dirty(cx.now);
+            cx.rebuild();
+        }
+
+        Msg::EqToggleEnabled => {
+            let on = state.eq.enabled.get();
+            state.eq.set_enabled(on);
+            state.prefs.data.audio.eq = state.eq.to_prefs();
+            state.prefs.mark_dirty(cx.now);
+        }
+
+        Msg::EqApplyPreset(index) => {
+            if let Some(bands) = state.eq.apply_preset(index) {
+                // Glide each slider to the preset's value so the change reads
+                // as motion, not a snap (the shared surface already jumped).
+                for (i, target) in bands.iter().enumerate() {
+                    cx.tl.animate(
+                        &state.eq.bands[i],
+                        *target,
+                        opal_gfx::Curve::EaseInOut,
+                        std::time::Duration::from_millis(220),
+                        cx.now,
+                    );
+                }
+                state.prefs.data.audio.eq = state.eq.to_prefs_with_bands(bands);
+                state.prefs.mark_dirty(cx.now);
+                cx.rebuild();
+            }
+        }
+
+        Msg::EqSaveCustom => {
+            let name = state.eq.next_custom_name();
+            state.eq.save_custom(name);
+            state.prefs.data.audio.eq = state.eq.to_prefs();
+            state.prefs.mark_dirty(cx.now);
+            cx.rebuild();
+        }
+
         Msg::Skip(count) => {
             let Some(token) = state.auth.token() else { return };
             // Local (Spirc) skip when Opal is the active device — instant +

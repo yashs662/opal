@@ -198,6 +198,32 @@ pub struct AudioPrefs {
     /// loud masters from clipping. Applies from the next app start.
     #[serde(default = "default_normalize")]
     pub normalize: bool,
+    /// 10-band graphic equaliser — enabled flag + per-band gains + saved
+    /// custom presets. Applied live (see `audio_eq`), so a change takes
+    /// effect immediately, not on next launch.
+    #[serde(default)]
+    pub eq: EqPrefs,
+}
+
+/// Persisted equaliser state. `bands` is the ten ISO-octave gains in dB
+/// (see [`crate::audio_eq::BAND_FREQS`]); `custom` holds user-saved
+/// presets by name.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct EqPrefs {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Per-band gains (dB). Missing/short arrays fall back to flat.
+    #[serde(default)]
+    pub bands: Vec<f32>,
+    /// User-saved custom presets (name → ten band gains).
+    #[serde(default)]
+    pub custom: Vec<EqCustomPreset>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct EqCustomPreset {
+    pub name: String,
+    pub bands: Vec<f32>,
 }
 
 fn default_volume() -> f32 {
@@ -214,6 +240,7 @@ impl Default for AudioPrefs {
             volume: default_volume(),
             quality: AudioQuality::default(),
             normalize: default_normalize(),
+            eq: EqPrefs::default(),
         }
     }
 }

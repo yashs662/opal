@@ -10,11 +10,12 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use opal_gfx::{Align, Computed, Curve, Len, Overlay, Scene, Signal};
+use opal_gfx::{Align, Computed, Curve, Justify, Len, Overlay, Scene, Signal};
 
 use crate::api::Profile;
+use crate::audio_eq::{BAND_LABELS, GAIN_DB_MAX};
 use crate::disk_cache::{self, CacheUsage};
-use crate::model::{BackdropModel, CanvasModel, SettingsModel};
+use crate::model::{BackdropModel, CanvasModel, EqModel, SettingsModel};
 use crate::widgets::component::Component;
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
@@ -42,12 +43,19 @@ const TOGGLE_OFF: [f32; 4] = [1.0, 1.0, 1.0, 0.18];
 /// read as motion.
 const TOGGLE_MS: u64 = 160;
 
-const PANEL_W: f32 = 420.0;
-/// Capped panel height (logical px). Current content fits within this, so
-/// the body doesn't scroll yet; it caps growth so the modal never exceeds
-/// a typical window, scrolling once future sections push past it.
-const PANEL_MAX_H: f32 = 600.0;
+/// Widened from the old 420 so the 10-band EQ's vertical sliders sit in a
+/// comfortable row (each band ≈ 44 px) without crowding the labels.
+const PANEL_W: f32 = 500.0;
+/// Capped panel height (logical px). The body scrolls past this, so the
+/// modal never exceeds a typical window however many sections we add.
+const PANEL_MAX_H: f32 = 640.0;
 const SIGN_OUT_W: f32 = 116.0;
+
+// EQ section geometry (logical px).
+/// Height of the vertical slider track.
+const EQ_SLIDER_H: f32 = 120.0;
+/// Off-state track colour for the slider lane (matches the toggle).
+const EQ_LANE_COL: [f32; 4] = [1.0, 1.0, 1.0, 0.12];
 
 /// The settings modal — a [`Component`]. Reads its toggle/accent/cache
 /// slices off the models directly; owns the [`Overlay`] render wrapper
@@ -73,6 +81,16 @@ pub struct SettingsPanel<'a> {
     pub on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     /// Persist the "Normalize volume" toggle after it flips.
     pub on_normalize: Rc<dyn Fn()>,
+    /// Equaliser slice — the slider signals + presets to bind/read.
+    pub eq: &'a EqModel,
+    /// A band slider was released → re-derive preset + persist.
+    pub on_eq_commit: Rc<dyn Fn()>,
+    /// The EQ enable toggle flipped → push to the sink + persist.
+    pub on_eq_toggle: Rc<dyn Fn()>,
+    /// Apply the preset at this index.
+    pub on_eq_preset: Rc<dyn Fn(usize)>,
+    /// Save the current sliders as a new custom preset.
+    pub on_eq_save: Rc<dyn Fn()>,
 }
 
 impl Component for SettingsPanel<'_> {
@@ -134,6 +152,16 @@ impl Component for SettingsPanel<'_> {
                                 self.on_normalize.clone(),
                             );
                             divider(body);
+                            eq_section(
+                                body,
+                                self.eq,
+                                &self.backdrop.accent,
+                                self.on_eq_toggle.clone(),
+                                self.on_eq_preset.clone(),
+                                self.on_eq_save.clone(),
+                                self.on_eq_commit.clone(),
+                            );
+                            divider(body);
                             cache_section(
                                 body,
                                 cache_usage,
@@ -152,6 +180,195 @@ impl Component for SettingsPanel<'_> {
 /// Hairline divider between settings sections.
 fn divider(s: &mut Scene) {
     s.rect(()).w(Len::Fill).h_px(t::SP_PX).rgba(1.0, 1.0, 1.0, 0.06);
+}
+
+/// The 10-band equaliser: a header row with the enable toggle, a row of
+/// preset chips (built-ins + saved customs, active one accent-filled), the
+/// ten vertical band faders, and a "Save preset" action. The whole band
+/// area dims when the EQ is disabled so it reads as inactive without
+/// disappearing.
+#[allow(clippy::too_many_arguments)]
+fn eq_section(
+    s: &mut Scene,
+    eq: &EqModel,
+    accent: &Signal<[f32; 4]>,
+    on_toggle: Rc<dyn Fn()>,
+    on_preset: Rc<dyn Fn(usize)>,
+    on_save: Rc<dyn Fn()>,
+    on_commit: Rc<dyn Fn()>,
+) {
+    let enabled = eq.enabled.clone();
+    let selected = eq.selected.clone();
+    // Preset chips: (index, name). Cloned out so the closures own them.
+    let presets: Vec<(usize, Rc<str>)> = eq
+        .presets()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i, p.name.clone()))
+        .collect();
+    // Per-band signals + a shared-clone for the fader drag handlers.
+    let shared = eq.shared();
+    let bands: Vec<Signal<f32>> = eq.bands.to_vec();
+
+    s.col(()).w(Len::Fill).gap(t::SP_3).child(move |c| {
+        // Header + enable toggle.
+        c.row(()).w(Len::Fill).align(Align::Center).child(|h| {
+            h.col(()).gap(t::SP_0_5).child(|m| {
+                m.text((), "Equalizer", 14.0).color(t::TEXT);
+                m.text((), "10-band graphic EQ, applied live", t::TEXT_XS)
+                    .color(t::TEXT_DIM);
+            });
+            h.row(())
+                .push_end()
+                .align(Align::Center)
+                .child(|ctrl| toggle_switch(ctrl, &enabled, accent, on_toggle));
+        });
+
+        // Everything below dims when the EQ is off.
+        let dim = Computed::new((enabled.clone(),), |(on,)| if on { 1.0 } else { 0.4 });
+        c.col(())
+            .w(Len::Fill)
+            .gap(t::SP_3)
+            .opacity_bind(dim)
+            .child(move |body| {
+                // Preset chips — the engine has no flex-wrap, so chunk them
+                // into rows of four by hand (built-ins + customs).
+                body.col(()).w(Len::Fill).gap(t::SP_2).child(move |chips| {
+                    for chunk in presets.chunks(4) {
+                        let chunk = chunk.to_vec();
+                        let selected = selected.clone();
+                        let on_preset = on_preset.clone();
+                        chips.row(()).gap(t::SP_2).child(move |row| {
+                            for (i, name) in &chunk {
+                                preset_chip(row, *i, name, &selected, accent, on_preset.clone());
+                            }
+                        });
+                    }
+                });
+
+                // The ten band faders.
+                body.row(())
+                    .w(Len::Fill)
+                    .justify(Justify::SpaceBetween)
+                    .child(move |lane_row| {
+                        for (i, band) in bands.into_iter().enumerate() {
+                            band_fader(lane_row, i, band, shared.clone(), accent, on_commit.clone());
+                        }
+                    });
+
+                // Save current sliders as a custom preset.
+                body.row(())
+                    .w(Len::Fill)
+                    .h_px(t::SP_9)
+                    .radius(t::R_FULL)
+                    .border(1.0, t::BORDER)
+                    .center()
+                    .hover_color(t::BTN_HOVER)
+                    .on_click(move |_| on_save())
+                    .child(|b| {
+                        b.text((), "Save as preset", t::TEXT_SM).color(t::TEXT);
+                    });
+            });
+    });
+}
+
+/// One preset chip — accent-filled when it's the active preset, else a
+/// recessed pill. Clicking applies the preset (tweened by the handler).
+fn preset_chip(
+    s: &mut Scene,
+    index: usize,
+    name: &str,
+    selected: &Signal<i32>,
+    accent: &Signal<[f32; 4]>,
+    on_preset: Rc<dyn Fn(usize)>,
+) {
+    let is_sel = Computed::new((selected.clone(),), move |(sel,)| sel == index as i32);
+    // Fill: accent when selected, recessed panel otherwise.
+    let fill = Computed::new((is_sel.clone(), accent.clone()), |(sel, acc)| {
+        if sel { acc } else { t::PANEL_HI }
+    });
+    let label = name.to_string();
+    let sel_for_text = is_sel.clone();
+    let accent_for_text = accent.clone();
+    s.row(())
+        .h_px(t::CHIP_H)
+        .pad_xy(t::SP_3, t::SP_0)
+        .center()
+        .radius(t::R_FULL)
+        .color(fill)
+        .hover_opacity(0.85)
+        .on_click(move |_| on_preset(index))
+        .child(move |x| {
+            // Contrast-safe text on the accent when selected; plain otherwise.
+            let col = Computed::new(
+                (sel_for_text.clone(), accent_for_text.clone()),
+                |(sel, acc)| {
+                    if sel {
+                        crate::widgets::color::accent_fg_color(&acc)
+                    } else {
+                        t::TEXT
+                    }
+                },
+            );
+            x.text((), &label, 12.0).color(col);
+        });
+}
+
+/// One vertical band fader: an accent fill lane (fill top edge = the gain,
+/// 0 dB at the midpoint) over the frequency label. The lane owns the drag:
+/// `on_drag` writes the band signal (instant fill) + the shared control
+/// surface (instant audio); `on_drag_end` commits (persist + preset
+/// re-derive). The fill is a reactive `Computed`, so a preset apply tweens
+/// it smoothly and a drag tracks the cursor 1:1.
+fn band_fader(
+    s: &mut Scene,
+    index: usize,
+    band: Signal<f32>,
+    shared: std::sync::Arc<crate::audio_eq::EqShared>,
+    accent: &Signal<[f32; 4]>,
+    on_commit: Rc<dyn Fn()>,
+) {
+    // Fill height (px) from the band value: +MAX → full, −MAX → empty,
+    // 0 dB → the midpoint.
+    let fill_h = Computed::new((band.clone(),), |(db,)| {
+        ((db + GAIN_DB_MAX) / (2.0 * GAIN_DB_MAX)).clamp(0.0, 1.0) * EQ_SLIDER_H
+    });
+    let accent_fill = accent.clone();
+    s.col(())
+        .align(Align::Center)
+        .gap(t::SP_1_5)
+        .child(move |col| {
+            // The draggable lane.
+            let sig = band.clone();
+            let sh = shared.clone();
+            let commit = on_commit.clone();
+            col.col(())
+                .w_px(t::SP_2_5)
+                .h_px(EQ_SLIDER_H)
+                .radius(t::R_FULL)
+                .color(EQ_LANE_COL)
+                .overflow(opal_gfx::Overflow::Hidden, opal_gfx::Overflow::Hidden)
+                .justify(Justify::End)
+                .cursor(opal_gfx::CursorIcon::Pointer)
+                .on_drag(move |ctx| {
+                    // Top of the lane = +MAX, bottom = −MAX. The fraction is
+                    // physical/physical, so scale cancels.
+                    let frac = ((ctx.current[1] - ctx.rect[1]) / ctx.rect[3]).clamp(0.0, 1.0);
+                    let db = GAIN_DB_MAX * (1.0 - 2.0 * frac);
+                    sig.set(db);
+                    sh.set_band(index, db);
+                })
+                .on_drag_end(move |_| commit())
+                .child(move |lane| {
+                    lane.rect(())
+                        .w(Len::Fill)
+                        .height_px_bind(fill_h.clone())
+                        .radius(t::R_FULL)
+                        .color(accent_fill.clone());
+                });
+            // Frequency label below.
+            col.text((), BAND_LABELS[index], t::TEXT_XS).color(t::TEXT_DIM);
+        });
 }
 
 /// Streaming-quality picker: three chips (96 / 160 / 320 kbps), the

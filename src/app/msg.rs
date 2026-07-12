@@ -98,6 +98,15 @@ pub enum Msg {
     SetQuality(AudioQuality),
     /// Persist the (already-flipped) "normalize volume" toggle.
     ToggleNormalize,
+    /// A band slider was released — re-derive the selected preset + persist
+    /// (the drag itself already updated the signal + shared surface live).
+    EqBandCommitted,
+    /// Persist the (already-flipped) EQ enable toggle + push it to the sink.
+    EqToggleEnabled,
+    /// Apply a preset by index (tween the sliders + push to the sink).
+    EqApplyPreset(usize),
+    /// Snapshot the current sliders as a new saved custom preset.
+    EqSaveCustom,
     /// Skip forward `count` tracks (queue "play this next-N").
     Skip(u32),
     /// Open the track-row right-click menu at `pos` (logical px).

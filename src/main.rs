@@ -6,6 +6,7 @@
 mod album_art;
 mod api;
 mod app;
+mod audio_eq;
 mod audio_sink;
 mod auth;
 mod bounded;
@@ -162,7 +163,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `hotreload` feature is on). The patch handler latches a flag + wakes the
     // loop; the per-frame tick drains it into a scene rebuild.
     hotreload::connect(app.wake_handle());
-    let worker = Rc::new(Worker::new(app.wake_handle(), app.uploader()));
+    // The EQ's shared control surface: the model owns it (UI writes), the
+    // worker hands a clone to the audio sink at session bootstrap (audio
+    // reads). One `Arc` bridges the two threads lock-free.
+    let eq_shared = app.state().eq.shared();
+    let worker = Rc::new(Worker::new(app.wake_handle(), app.uploader(), eq_shared));
     // Stored tokens can only be refreshed with the user's own client id;
     // empty when unconfigured (then an expired pair just routes to login).
     worker.try_load_tokens(app.state().prefs.data.client_id().unwrap_or_default());

@@ -19,6 +19,7 @@
 //! previously failed); rodio's ~0.5 s in-flight buffer on the old stream
 //! is discarded, which is the expected blip of an output switch.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait};
@@ -27,6 +28,8 @@ use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
 use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 use log::{info, warn};
+
+use crate::audio_eq::{EqProcessor, EqShared};
 
 /// How often `write()` re-checks the default output device's identity.
 const DEVICE_RECHECK: Duration = Duration::from_millis(500);
@@ -43,13 +46,22 @@ struct Out {
 pub struct SwitchingSink {
     out: Option<Out>,
     last_check: Instant,
+    /// 10-band EQ applied to the decoded f64 samples before the f32
+    /// conversion. Reads its live gains lock-free from the shared control
+    /// surface; a disabled/flat EQ is a no-op (see `audio_eq`).
+    eq: EqProcessor,
+    /// Reused scratch buffer for the in-place EQ pass so `write` doesn't
+    /// allocate per packet.
+    scratch: Vec<f64>,
 }
 
 impl SwitchingSink {
-    pub fn new() -> Self {
+    pub fn new(eq: Arc<EqShared>) -> Self {
         Self {
             out: None,
             last_check: Instant::now(),
+            eq: EqProcessor::new(eq, SAMPLE_RATE),
+            scratch: Vec::new(),
         }
     }
 
@@ -184,7 +196,14 @@ impl Sink for SwitchingSink {
         let samples = packet
             .samples()
             .map_err(|e| SinkError::OnWrite(e.to_string()))?;
-        let samples_f32: &[f32] = &converter.f64_to_f32(samples);
+        // Apply the EQ in the f64 domain (before the single conversion to
+        // f32). Copy into the reused scratch so the packet stays immutable;
+        // the pass is skipped internally when the EQ is off/flat, so an
+        // untouched EQ costs only the copy.
+        self.scratch.clear();
+        self.scratch.extend_from_slice(samples);
+        self.eq.process_interleaved(&mut self.scratch);
+        let samples_f32: &[f32] = &converter.f64_to_f32(&self.scratch);
         let source = rodio::buffer::SamplesBuffer::new(
             NUM_CHANNELS as cpal::ChannelCount,
             SAMPLE_RATE,

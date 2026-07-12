@@ -452,7 +452,11 @@ impl Responder {
 }
 
 impl Worker {
-    pub fn new(wake: Arc<WakeHandle>, uploader: Arc<Uploader>) -> Self {
+    pub fn new(
+        wake: Arc<WakeHandle>,
+        uploader: Arc<Uploader>,
+        eq: Arc<crate::audio_eq::EqShared>,
+    ) -> Self {
         let (cmd_tx, mut cmd_rx) = tmpsc::unbounded_channel::<WorkerCommand>();
         let (resp_tx, resp_rx): (Sender<WorkerResponse>, Receiver<WorkerResponse>) = channel();
         let resp = Responder { tx: resp_tx, wake };
@@ -549,6 +553,7 @@ impl Worker {
                             initial_volume,
                             quality,
                             normalize,
+                            eq.clone(),
                         ),
                         WorkerCommand::Playback {
                             access_token,
@@ -2307,6 +2312,7 @@ fn spawn_fetch_album_art(resp: Responder, uploader: Arc<Uploader>, url: String, 
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_connect_session(
     resp: Responder,
     session_slot: Arc<AsyncMutex<Option<Session>>>,
@@ -2315,13 +2321,15 @@ fn spawn_connect_session(
     initial_volume: f32,
     quality: crate::prefs::AudioQuality,
     normalize: bool,
+    eq: Arc<crate::audio_eq::EqShared>,
 ) {
     tokio::spawn(async move {
         let s = spotify_session::new_session();
         *session_slot.lock().await = Some(s.clone());
 
         let creds = Credentials::with_access_token(access_token);
-        let boot = match spirc_bootstrap::start(s, creds, initial_volume, quality, normalize).await {
+        let boot =
+            match spirc_bootstrap::start(s, creds, initial_volume, quality, normalize, eq).await {
             Ok(b) => b,
             Err(e) => {
                 error!("spirc bootstrap failed: {e}");
