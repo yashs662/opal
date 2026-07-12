@@ -339,7 +339,14 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             state.prefs.mark_dirty(cx.now);
         }
 
+        Msg::EqTogglePresetOpen => {
+            let open = state.eq.preset_open.get();
+            state.eq.preset_open.set(!open);
+            cx.rebuild();
+        }
+
         Msg::EqApplyPreset(index) => {
+            state.eq.preset_open.set(false);
             if let Some(bands) = state.eq.apply_preset(index) {
                 // Glide each slider to the preset's value so the change reads
                 // as motion, not a snap (the shared surface already jumped).
@@ -359,6 +366,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         }
 
         Msg::EqSaveCustom => {
+            state.eq.preset_open.set(false);
             let name = state.eq.next_custom_name();
             state.eq.save_custom(name);
             state.prefs.data.audio.eq = state.eq.to_prefs();

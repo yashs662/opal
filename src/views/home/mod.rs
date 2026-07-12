@@ -264,6 +264,7 @@ pub struct HomeView {
     on_eq_toggle: Rc<dyn Fn()>,
     on_eq_preset: Rc<dyn Fn(usize)>,
     on_eq_save: Rc<dyn Fn()>,
+    on_eq_toggle_preset: Rc<dyn Fn()>,
     on_skip: Rc<dyn Fn(u32)>,
     on_context_menu: CtxMenuFn,
     on_add_queue: Rc<dyn Fn(String)>,
@@ -349,6 +350,10 @@ impl HomeView {
         let on_eq_save: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::EqSaveCustom))
+        };
+        let on_eq_toggle_preset: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::EqTogglePresetOpen))
         };
         let on_skip: Rc<dyn Fn(u32)> = {
             let dispatch = dispatch.clone();
@@ -443,6 +448,7 @@ impl HomeView {
             on_eq_toggle,
             on_eq_preset,
             on_eq_save,
+            on_eq_toggle_preset,
             on_skip,
             on_context_menu,
             on_add_queue,
@@ -657,6 +663,7 @@ impl HomeView {
             on_eq_toggle: self.on_eq_toggle.clone(),
             on_eq_preset: self.on_eq_preset.clone(),
             on_eq_save: self.on_eq_save.clone(),
+            on_eq_toggle_preset: self.on_eq_toggle_preset.clone(),
         };
         let devices_panel = devices::DevicesPanel {
             devices: &state.devices,

@@ -10,10 +10,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use opal_gfx::{Align, Computed, Curve, Justify, Len, Overlay, Scene, Signal};
+use opal_gfx::{Align, Computed, Curve, Justify, Len, Overlay, Scene, Signal, TextBind};
 
 use crate::api::Profile;
-use crate::audio_eq::{BAND_LABELS, GAIN_DB_MAX};
+use crate::audio_eq::GAIN_DB_MAX;
 use crate::disk_cache::{self, CacheUsage};
 use crate::model::{BackdropModel, CanvasModel, EqModel, SettingsModel};
 use crate::widgets::component::Component;
@@ -51,11 +51,23 @@ const PANEL_W: f32 = 500.0;
 const PANEL_MAX_H: f32 = 640.0;
 const SIGN_OUT_W: f32 = 116.0;
 
-// EQ section geometry (logical px).
-/// Height of the vertical slider track.
-const EQ_SLIDER_H: f32 = 120.0;
-/// Off-state track colour for the slider lane (matches the toggle).
-const EQ_LANE_COL: [f32; 4] = [1.0, 1.0, 1.0, 0.12];
+// EQ response graph — a Spotify-style filled curve with a draggable handle
+// per band, a dB axis, and frequency labels. Widths are all responsive
+// (`Fill`/`Auto`); the plot keeps one concrete height — a chart needs a
+// definite value→pixel scale to map gains onto, and the handle/fill binds
+// are computed in px against it.
+const GRAPH_H: f32 = t::SP_32;
+/// Sample count for the response fill (its top edge traces the combined
+/// magnitude response); denser = smoother curve. Sized so the bars are
+/// ~1–2 px wide across the plot, dissolving the staircase.
+const CURVE_N: usize = 190;
+/// Sample rate the response preview is evaluated at (matches the sink).
+const CURVE_FS: f64 = 44_100.0;
+/// Draggable band-handle diameter (a small UI token, like an icon size).
+const DOT: f32 = t::SP_2_5;
+/// Graph plot background + 0 dB gridline colours.
+const GRAPH_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.04];
+const GRID_COL: [f32; 4] = [1.0, 1.0, 1.0, 0.16];
 
 /// The settings modal — a [`Component`]. Reads its toggle/accent/cache
 /// slices off the models directly; owns the [`Overlay`] render wrapper
@@ -91,6 +103,8 @@ pub struct SettingsPanel<'a> {
     pub on_eq_preset: Rc<dyn Fn(usize)>,
     /// Save the current sliders as a new custom preset.
     pub on_eq_save: Rc<dyn Fn()>,
+    /// Expand/collapse the presets dropdown.
+    pub on_eq_toggle_preset: Rc<dyn Fn()>,
 }
 
 impl Component for SettingsPanel<'_> {
@@ -106,12 +120,18 @@ impl Component for SettingsPanel<'_> {
             // scrolls, so the modal never grows past the window however
             // many settings sections we add. Current content fits without
             // scrolling; future sections simply scroll into reach.
-            host.col("settings_panel")
+            // The panel is a glass node: it frosts whatever sits directly
+            // behind it (the dimmed app), so a translucent tint reads as
+            // frosted glass rather than a flat fill. `.layer()` promotes it
+            // so the per-glass backdrop pass samples the content beneath.
+            host.glass("settings_panel")
                 .w_px(PANEL_W)
                 .h_px(PANEL_MAX_H)
-                .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 0.98)
+                .blur(28.0)
+                .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 0.72)
                 .radius(t::R_XL)
                 .border(1.0, t::BORDER)
+                .layer()
                 .pad_ltrb(t::SP_6, t::SP_6, t::SP_6, t::SP_0)
                 .gap(t::SP_4)
                 .child(|panel| {
@@ -155,11 +175,13 @@ impl Component for SettingsPanel<'_> {
                             eq_section(
                                 body,
                                 self.eq,
+                                icons,
                                 &self.backdrop.accent,
                                 self.on_eq_toggle.clone(),
                                 self.on_eq_preset.clone(),
                                 self.on_eq_save.clone(),
                                 self.on_eq_commit.clone(),
+                                self.on_eq_toggle_preset.clone(),
                             );
                             divider(body);
                             cache_section(
@@ -182,33 +204,29 @@ fn divider(s: &mut Scene) {
     s.rect(()).w(Len::Fill).h_px(t::SP_PX).rgba(1.0, 1.0, 1.0, 0.06);
 }
 
-/// The 10-band equaliser: a header row with the enable toggle, a row of
-/// preset chips (built-ins + saved customs, active one accent-filled), the
-/// ten vertical band faders, and a "Save preset" action. The whole band
-/// area dims when the EQ is disabled so it reads as inactive without
-/// disappearing.
+/// The 10-band equaliser, Spotify-style: an enable toggle, a presets
+/// dropdown, a filled response graph with a draggable handle per band
+/// (over a dB axis and frequency labels), and a Reset. The body dims when
+/// the EQ is off so it reads as inactive without disappearing.
 #[allow(clippy::too_many_arguments)]
 fn eq_section(
     s: &mut Scene,
     eq: &EqModel,
+    icons: &Rc<IconSet>,
     accent: &Signal<[f32; 4]>,
     on_toggle: Rc<dyn Fn()>,
     on_preset: Rc<dyn Fn(usize)>,
     on_save: Rc<dyn Fn()>,
     on_commit: Rc<dyn Fn()>,
+    on_toggle_preset: Rc<dyn Fn()>,
 ) {
     let enabled = eq.enabled.clone();
     let selected = eq.selected.clone();
-    // Preset chips: (index, name). Cloned out so the closures own them.
-    let presets: Vec<(usize, Rc<str>)> = eq
-        .presets()
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (i, p.name.clone()))
-        .collect();
-    // Per-band signals + a shared-clone for the fader drag handlers.
+    let open = eq.preset_open.get();
+    let names: Vec<Rc<str>> = eq.presets().iter().map(|p| p.name.clone()).collect();
+    let bands = eq.bands.clone();
     let shared = eq.shared();
-    let bands: Vec<Signal<f32>> = eq.bands.to_vec();
+    let icons = icons.clone();
 
     s.col(()).w(Len::Fill).gap(t::SP_3).child(move |c| {
         // Header + enable toggle.
@@ -228,147 +246,336 @@ fn eq_section(
         let dim = Computed::new((enabled.clone(),), |(on,)| if on { 1.0 } else { 0.4 });
         c.col(())
             .w(Len::Fill)
-            .gap(t::SP_3)
+            .gap(t::SP_4)
             .opacity_bind(dim)
             .child(move |body| {
-                // Preset chips — the engine has no flex-wrap, so chunk them
-                // into rows of four by hand (built-ins + customs).
-                body.col(()).w(Len::Fill).gap(t::SP_2).child(move |chips| {
-                    for chunk in presets.chunks(4) {
-                        let chunk = chunk.to_vec();
-                        let selected = selected.clone();
-                        let on_preset = on_preset.clone();
-                        chips.row(()).gap(t::SP_2).child(move |row| {
-                            for (i, name) in &chunk {
-                                preset_chip(row, *i, name, &selected, accent, on_preset.clone());
-                            }
+                let reset = on_preset.clone();
+                preset_dropdown(
+                    body, &icons, accent, &selected, &names, open, on_preset, on_save,
+                    on_toggle_preset,
+                );
+                eq_graph(body, &bands, shared, accent, on_commit);
+                // Reset to flat (preset 0), right-aligned like Spotify's.
+                body.row(()).w(Len::Fill).child(move |f| {
+                    f.row(())
+                        .push_end()
+                        .h_px(t::SP_8)
+                        .pad_xy(t::SP_4, 0.0)
+                        .radius(t::R_FULL)
+                        .border(1.0, t::BORDER)
+                        .center()
+                        .hover_color(t::BTN_HOVER)
+                        .on_click(move |_| reset(0))
+                        .child(|b| {
+                            b.text((), "Reset", t::TEXT_SM).color(t::TEXT);
                         });
-                    }
                 });
-
-                // The ten band faders.
-                body.row(())
-                    .w(Len::Fill)
-                    .justify(Justify::SpaceBetween)
-                    .child(move |lane_row| {
-                        for (i, band) in bands.into_iter().enumerate() {
-                            band_fader(lane_row, i, band, shared.clone(), accent, on_commit.clone());
-                        }
-                    });
-
-                // Save current sliders as a custom preset.
-                body.row(())
-                    .w(Len::Fill)
-                    .h_px(t::SP_9)
-                    .radius(t::R_FULL)
-                    .border(1.0, t::BORDER)
-                    .center()
-                    .hover_color(t::BTN_HOVER)
-                    .on_click(move |_| on_save())
-                    .child(|b| {
-                        b.text((), "Save as preset", t::TEXT_SM).color(t::TEXT);
-                    });
             });
     });
 }
 
-/// One preset chip — accent-filled when it's the active preset, else a
-/// recessed pill. Clicking applies the preset (tweened by the handler).
-fn preset_chip(
+/// The presets row: a "Presets" label and a dropdown whose button shows
+/// the active preset (reactive off `selected`) and, when `open`, expands
+/// an inline list of every preset plus "Save current…". Inline (accordion)
+/// rather than a floating popup so it needs no portal/scrim: the toggle
+/// rebuilds, and picking an item both applies and closes it.
+#[allow(clippy::too_many_arguments)]
+fn preset_dropdown(
     s: &mut Scene,
-    index: usize,
-    name: &str,
-    selected: &Signal<i32>,
+    icons: &Rc<IconSet>,
     accent: &Signal<[f32; 4]>,
+    selected: &Signal<i32>,
+    names: &[Rc<str>],
+    open: bool,
     on_preset: Rc<dyn Fn(usize)>,
+    on_save: Rc<dyn Fn()>,
+    on_toggle: Rc<dyn Fn()>,
 ) {
-    let is_sel = Computed::new((selected.clone(),), move |(sel,)| sel == index as i32);
-    // Fill: accent when selected, recessed panel otherwise.
-    let fill = Computed::new((is_sel.clone(), accent.clone()), |(sel, acc)| {
-        if sel { acc } else { t::PANEL_HI }
-    });
-    let label = name.to_string();
-    let sel_for_text = is_sel.clone();
-    let accent_for_text = accent.clone();
+    let names = names.to_vec();
+    let label_names = names.clone();
+    let sel_now = selected.get();
+    let icons = icons.clone();
     s.row(())
-        .h_px(t::CHIP_H)
-        .pad_xy(t::SP_3, t::SP_0)
-        .center()
-        .radius(t::R_FULL)
-        .color(fill)
-        .hover_opacity(0.85)
-        .on_click(move |_| on_preset(index))
-        .child(move |x| {
-            // Contrast-safe text on the accent when selected; plain otherwise.
-            let col = Computed::new(
-                (sel_for_text.clone(), accent_for_text.clone()),
-                |(sel, acc)| {
-                    if sel {
-                        crate::widgets::color::accent_fg_color(&acc)
-                    } else {
-                        t::TEXT
-                    }
-                },
-            );
-            x.text((), &label, 12.0).color(col);
+        .w(Len::Fill)
+        .align(Align::Start)
+        .gap(t::SP_3)
+        .child(move |row| {
+            row.row(())
+                .h_px(t::SP_9)
+                .align(Align::Center)
+                .child(|l| {
+                    l.text((), "Presets", t::TEXT_SM).color(t::TEXT_DIM);
+                });
+            row.col(()).w(Len::Fill).gap(t::SP_1).child(move |dd| {
+                // The button: current preset name + chevron.
+                let label = TextBind::derived(selected.clone(), move |sel| {
+                    usize::try_from(sel)
+                        .ok()
+                        .and_then(|i| label_names.get(i))
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "Custom".to_string())
+                });
+                let ic = icons.clone();
+                dd.row(())
+                    .w(Len::Fill)
+                    .h_px(t::SP_9)
+                    .pad_xy(t::SP_3, t::SP_0)
+                    .align(Align::Center)
+                    .radius(t::R_MD)
+                    .rgba(t::PANEL_HI[0], t::PANEL_HI[1], t::PANEL_HI[2], 1.0)
+                    .border(1.0, t::BORDER)
+                    .hover_color(t::BTN_HOVER)
+                    .on_click(move |_| on_toggle())
+                    .child(move |b| {
+                        b.text_bound((), label, t::TEXT_BASE).color(t::TEXT);
+                        b.row(()).push_end().w_px(t::SP_5).center().child(|c| {
+                            ic.render(c, Icon::ChevronDown, t::ICON_SM, t::TEXT_DIM);
+                        });
+                    });
+                // The expanded list.
+                if open {
+                    dd.col(())
+                        .w(Len::Fill)
+                        .radius(t::R_MD)
+                        .rgba(t::PANEL_HI[0], t::PANEL_HI[1], t::PANEL_HI[2], 1.0)
+                        .border(1.0, t::BORDER)
+                        .pad_xy(t::SP_0, t::SP_1)
+                        .child(move |list| {
+                            for (i, name) in names.iter().enumerate() {
+                                let is_sel = sel_now == i as i32;
+                                let on_preset = on_preset.clone();
+                                let name = name.to_string();
+                                let mut item = list.row(());
+                                item.w(Len::Fill)
+                                    .h_px(t::SP_8)
+                                    .pad_xy(t::SP_3, t::SP_0)
+                                    .align(Align::Center)
+                                    .hover_color(t::HOVER_LIFT_SUBTLE)
+                                    .on_click(move |_| on_preset(i));
+                                let text_col: opal_gfx::Bind<[f32; 4]> = if is_sel {
+                                    crate::widgets::color::accent_fg(accent).into()
+                                } else {
+                                    t::TEXT.into()
+                                };
+                                // Selected row wears the accent so it stands
+                                // out (text uses the accent's contrast fg).
+                                if is_sel {
+                                    item.color(accent.clone());
+                                }
+                                item.child(move |r| {
+                                    r.text((), &name, t::TEXT_SM).color(text_col);
+                                });
+                            }
+                            list.rect(())
+                                .w(Len::Fill)
+                                .h_px(t::SP_PX)
+                                .rgba(1.0, 1.0, 1.0, 0.08);
+                            list.row(())
+                                .w(Len::Fill)
+                                .h_px(t::SP_8)
+                                .pad_xy(t::SP_3, t::SP_0)
+                                .align(Align::Center)
+                                .hover_color(t::HOVER_LIFT_SUBTLE)
+                                .on_click(move |_| on_save())
+                                .child(|r| {
+                                    r.text((), "Save current\u{2026}", t::TEXT_SM).color(t::TEXT_DIM);
+                                });
+                        });
+                }
+            });
         });
 }
 
-/// One vertical band fader: an accent fill lane (fill top edge = the gain,
-/// 0 dB at the midpoint) over the frequency label. The lane owns the drag:
-/// `on_drag` writes the band signal (instant fill) + the shared control
-/// surface (instant audio); `on_drag_end` commits (persist + preset
-/// re-derive). The fill is a reactive `Computed`, so a preset apply tweens
-/// it smoothly and a drag tracks the cursor 1:1.
-fn band_fader(
+/// The response graph: a translucent-accent filled magnitude-response
+/// curve with a draggable handle per band, a dB axis (auto-width), and
+/// frequency labels — all widths responsive. The fill and the handles are
+/// reactive off two 5-band group `Computed`s (one `Computed` can't take
+/// all ten as deps), so a preset apply tweens them and a drag tracks with
+/// no rebuild. The one fixed dimension is the plot height, which the
+/// gain→pixel binds map onto.
+fn eq_graph(
+    s: &mut Scene,
+    bands: &[Signal<f32>; crate::audio_eq::NUM_BANDS],
+    shared: std::sync::Arc<crate::audio_eq::EqShared>,
+    accent: &Signal<[f32; 4]>,
+    on_commit: Rc<dyn Fn()>,
+) {
+    use crate::audio_eq::BAND_LABELS;
+    let g_lo = band_group(bands, 0);
+    let g_hi = band_group(bands, 5);
+    // Translucent accent fill under the curve (Spotify-style).
+    let fill_col = Computed::new((accent.clone(),), |(a,)| [a[0], a[1], a[2], 0.30]);
+    let bands = bands.clone();
+    let accent = accent.clone();
+
+    s.row(()).w(Len::Fill).align(Align::Start).gap(t::SP_2).child(move |gr| {
+        // dB axis — auto-width (sizes to its labels), right-aligned.
+        gr.col(())
+            .w(Len::Auto)
+            .h_px(GRAPH_H)
+            .justify(Justify::SpaceBetween)
+            .align(Align::End)
+            .child(|ax| {
+                ax.text((), "+12dB", t::TEXT_XS).color(t::TEXT_DIM);
+                ax.text((), "0", t::TEXT_XS).color(t::TEXT_DIM);
+                ax.text((), "-12dB", t::TEXT_XS).color(t::TEXT_DIM);
+            });
+        // Plot + frequency labels fill the remaining width.
+        gr.col(()).w(Len::Fill).gap(t::SP_1).child(move |right| {
+            let g_lo_bars = g_lo.clone();
+            let g_hi_bars = g_hi.clone();
+            right
+                .col(())
+                .w(Len::Fill)
+                .h_px(GRAPH_H)
+                .radius(t::R_SM)
+                .rgba(GRAPH_BG[0], GRAPH_BG[1], GRAPH_BG[2], GRAPH_BG[3])
+                .overflow(opal_gfx::Overflow::Hidden, opal_gfx::Overflow::Hidden)
+                .child(move |plot| {
+                    // Filled response area (CURVE_N bottom-anchored bars).
+                    plot.row(())
+                        .abs(0.0, 0.0)
+                        .w(Len::Fill)
+                        .h_px(GRAPH_H)
+                        .child(move |bars| {
+                            for i in 0..CURVE_N {
+                                let freq = curve_bar_freq(i);
+                                let h = Computed::new(
+                                    (g_lo_bars.clone(), g_hi_bars.clone()),
+                                    move |(lo, hi)| response_frac(lo, hi, freq) * GRAPH_H,
+                                );
+                                let fc = fill_col.clone();
+                                bars.col(()).w(Len::Fill).h_px(GRAPH_H).justify(Justify::End).child(
+                                    move |cell| {
+                                        cell.rect(())
+                                            .w(Len::Fill)
+                                            .height_px_bind(h.clone())
+                                            .color(fc.clone());
+                                    },
+                                );
+                            }
+                        });
+                    // 0 dB gridline across the vertical centre.
+                    plot.rect(())
+                        .abs(0.0, GRAPH_H / 2.0 - 0.5)
+                        .w(Len::Fill)
+                        .h_px(1.0)
+                        .rgba(GRID_COL[0], GRID_COL[1], GRID_COL[2], GRID_COL[3]);
+                    // Draggable band handles on top.
+                    plot.row(()).abs(0.0, 0.0).w(Len::Fill).h_px(GRAPH_H).child(move |cols| {
+                        for (i, band) in bands.into_iter().enumerate() {
+                            band_handle(
+                                cols,
+                                i,
+                                g_lo.clone(),
+                                g_hi.clone(),
+                                band,
+                                shared.clone(),
+                                &accent,
+                                on_commit.clone(),
+                            );
+                        }
+                    });
+                });
+            // Frequency labels, one per handle column (aligned by matching
+            // the handle row's equal Fill columns).
+            right.row(()).w(Len::Fill).child(|fl| {
+                for label in BAND_LABELS.iter() {
+                    fl.col(()).w(Len::Fill).center().child(|c| {
+                        c.text((), *label, t::TEXT_XS).color(t::TEXT_DIM);
+                    });
+                }
+            });
+        });
+    });
+}
+
+/// A draggable band handle: a dot sitting on the curve at its band's
+/// centre frequency (positioned by the reactive response, so it rides the
+/// fill), inside a full-height column that captures the drag. Dragging
+/// maps the cursor to a whole-dB gain and writes the band signal + shared
+/// surface; release commits.
+#[allow(clippy::too_many_arguments)]
+fn band_handle(
     s: &mut Scene,
     index: usize,
+    g_lo: Computed<[f32; 5]>,
+    g_hi: Computed<[f32; 5]>,
     band: Signal<f32>,
     shared: std::sync::Arc<crate::audio_eq::EqShared>,
     accent: &Signal<[f32; 4]>,
     on_commit: Rc<dyn Fn()>,
 ) {
-    // Fill height (px) from the band value: +MAX → full, −MAX → empty,
-    // 0 dB → the midpoint.
-    let fill_h = Computed::new((band.clone(),), |(db,)| {
-        ((db + GAIN_DB_MAX) / (2.0 * GAIN_DB_MAX)).clamp(0.0, 1.0) * EQ_SLIDER_H
+    let freq = crate::audio_eq::BAND_FREQS[index] as f64;
+    // Dot top offset (px): the response height at this band, centred on the
+    // dot, so the dot sits on the curve.
+    let dot_top = Computed::new((g_lo, g_hi), move |(lo, hi)| {
+        let y = (1.0 - response_frac(lo, hi, freq)) * GRAPH_H;
+        (y - DOT / 2.0).clamp(0.0, GRAPH_H - DOT)
     });
-    let accent_fill = accent.clone();
+    let sig = band;
+    let sh = shared;
+    let commit = on_commit;
+    let acc = accent.clone();
     s.col(())
+        .w(Len::Fill)
+        .h_px(GRAPH_H)
         .align(Align::Center)
-        .gap(t::SP_1_5)
+        .cursor(opal_gfx::CursorIcon::Pointer)
+        .on_drag(move |ctx| {
+            // Top = +MAX, bottom = −MAX; fraction physical/physical so scale
+            // cancels. Snap to whole dB.
+            let frac = ((ctx.current[1] - ctx.rect[1]) / ctx.rect[3]).clamp(0.0, 1.0);
+            let db = (GAIN_DB_MAX * (1.0 - 2.0 * frac)).round();
+            sig.set(db);
+            sh.set_band(index, db);
+        })
+        .on_drag_end(move |_| commit())
         .child(move |col| {
-            // The draggable lane.
-            let sig = band.clone();
-            let sh = shared.clone();
-            let commit = on_commit.clone();
-            col.col(())
-                .w_px(t::SP_2_5)
-                .h_px(EQ_SLIDER_H)
-                .radius(t::R_FULL)
-                .color(EQ_LANE_COL)
-                .overflow(opal_gfx::Overflow::Hidden, opal_gfx::Overflow::Hidden)
-                .justify(Justify::End)
-                .cursor(opal_gfx::CursorIcon::Pointer)
-                .on_drag(move |ctx| {
-                    // Top of the lane = +MAX, bottom = −MAX. The fraction is
-                    // physical/physical, so scale cancels.
-                    let frac = ((ctx.current[1] - ctx.rect[1]) / ctx.rect[3]).clamp(0.0, 1.0);
-                    let db = GAIN_DB_MAX * (1.0 - 2.0 * frac);
-                    sig.set(db);
-                    sh.set_band(index, db);
-                })
-                .on_drag_end(move |_| commit())
-                .child(move |lane| {
-                    lane.rect(())
-                        .w(Len::Fill)
-                        .height_px_bind(fill_h.clone())
-                        .radius(t::R_FULL)
-                        .color(accent_fill.clone());
-                });
-            // Frequency label below.
-            col.text((), BAND_LABELS[index], t::TEXT_XS).color(t::TEXT_DIM);
+            // Transparent spacer pushes the dot down to the curve.
+            col.rect(()).w_px(1.0).height_px_bind(dot_top.clone()).rgba(0.0, 0.0, 0.0, 0.0);
+            col.rect(()).w_px(DOT).h_px(DOT).radius(t::R_FULL).color(acc.clone());
         });
+}
+
+/// A `Computed<[f32;5]>` over five consecutive band signals starting at
+/// `base` — the group deps for the response `Computed`s (which can't take
+/// all ten bands at once).
+fn band_group(bands: &[Signal<f32>; crate::audio_eq::NUM_BANDS], base: usize) -> Computed<[f32; 5]> {
+    Computed::new(
+        (
+            bands[base].clone(),
+            bands[base + 1].clone(),
+            bands[base + 2].clone(),
+            bands[base + 3].clone(),
+            bands[base + 4].clone(),
+        ),
+        |(a, b, c, d, e)| [a, b, c, d, e],
+    )
+}
+
+/// Combined response at `freq` as a 0..1 fraction of the graph height
+/// (0 = −12 dB at the bottom, 0.5 = 0 dB, 1 = +12 dB at the top).
+fn response_frac(lo: [f32; 5], hi: [f32; 5], freq: f64) -> f32 {
+    let gains = [
+        lo[0], lo[1], lo[2], lo[3], lo[4], hi[0], hi[1], hi[2], hi[3], hi[4],
+    ];
+    let db = crate::audio_eq::response_db(&gains, freq, CURVE_FS) as f32;
+    ((db + GAIN_DB_MAX) / (2.0 * GAIN_DB_MAX)).clamp(0.0, 1.0)
+}
+
+/// Frequency (Hz) for response sample `i`, log-interpolated so band `k`'s
+/// peak lands at handle-column centre `(k + 0.5) / NUM_BANDS` — aligning
+/// the curve with the handles and frequency labels.
+fn curve_bar_freq(i: usize) -> f64 {
+    use crate::audio_eq::{BAND_FREQS, NUM_BANDS};
+    let p = (i as f64 + 0.5) / CURVE_N as f64;
+    let bi = (p * NUM_BANDS as f64 - 0.5).clamp(0.0, (NUM_BANDS - 1) as f64);
+    let lo = (bi.floor() as usize).min(NUM_BANDS - 2);
+    let frac = bi - lo as f64;
+    let a = (BAND_FREQS[lo] as f64).ln();
+    let b = (BAND_FREQS[lo + 1] as f64).ln();
+    (a + (b - a) * frac).exp()
 }
 
 /// Streaming-quality picker: three chips (96 / 160 / 320 kbps), the

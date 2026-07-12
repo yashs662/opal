@@ -35,6 +35,9 @@ fn builtin_presets() -> Vec<EqPreset> {
     };
     vec![
         p("Flat", [0.0; NUM_BANDS]),
+        // Spotify's "Small speakers": lift the lows, roll off the highs to
+        // compensate for tiny drivers.
+        p("Small speakers", [4.0, 4.0, 3.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0, -5.0]),
         p("Bass boost", [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         p("Treble boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.5, 4.0, 5.0, 6.0]),
         p("Vocal", [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0]),
@@ -57,6 +60,8 @@ pub struct EqModel {
     /// Index into [`Self::presets`] of the matching preset, or `-1` when the
     /// current gains are a hand-edited "Custom" shape.
     pub selected: Signal<i32>,
+    /// Whether the presets dropdown is expanded (UI-only, not persisted).
+    pub preset_open: Signal<bool>,
     /// Built-ins followed by the user's saved custom presets.
     presets: Vec<EqPreset>,
 }
@@ -80,9 +85,11 @@ impl EqModel {
             enabled: Signal::new(eq.enabled),
             bands,
             selected,
+            preset_open: Signal::new(false),
             presets,
         }
     }
+
 
     /// Clone of the shared control surface, for the worker/sink.
     pub fn shared(&self) -> Arc<EqShared> {

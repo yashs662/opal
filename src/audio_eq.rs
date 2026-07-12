@@ -150,6 +150,41 @@ impl Biquad {
         self.z1 = 0.0;
         self.z2 = 0.0;
     }
+
+    /// Magnitude of the transfer function |H(e^jω)| at `freq` (linear).
+    /// Evaluates the normalised biquad (a0 = 1) on the unit circle.
+    fn magnitude_at(&self, freq: f64, fs: f64) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * freq / fs;
+        let (s1, c1) = w.sin_cos();
+        let (s2, c2) = (2.0 * w).sin_cos();
+        // Numerator b0 + b1 e^-jw + b2 e^-2jw, denominator 1 + a1 e^-jw + a2 e^-2jw.
+        let num_re = self.b0 + self.b1 * c1 + self.b2 * c2;
+        let num_im = -(self.b1 * s1 + self.b2 * s2);
+        let den_re = 1.0 + self.a1 * c1 + self.a2 * c2;
+        let den_im = -(self.a1 * s1 + self.a2 * s2);
+        let num = (num_re * num_re + num_im * num_im).sqrt();
+        let den = (den_re * den_re + den_im * den_im).sqrt();
+        if den > 0.0 { num / den } else { 1.0 }
+    }
+}
+
+/// Combined EQ magnitude response in dB at `freq` for the given band
+/// gains — the sum (in dB) of every peaking band's response. This is the
+/// *tone shape* the EQ imparts (auto-headroom, a uniform makeup trim, is
+/// deliberately excluded so the curve reads as boosts/cuts, not an
+/// overall level drop). Overlapping octave bands sum to a smooth curve,
+/// which is what the settings visualization draws.
+pub fn response_db(gains: &[f32; NUM_BANDS], freq: f64, fs: f64) -> f64 {
+    let mut total_db = 0.0;
+    for (b, &g) in gains.iter().enumerate() {
+        if g.abs() < 1e-3 {
+            continue;
+        }
+        let mut bq = Biquad::identity();
+        bq.set_peaking(BAND_FREQS[b] as f64, BAND_Q, g as f64, fs);
+        total_db += 20.0 * bq.magnitude_at(freq, fs).log10();
+    }
+    total_db
 }
 
 /// Per-sink DSP state: a cascade of [`NUM_BANDS`] biquads for each of the
@@ -344,6 +379,21 @@ mod tests {
         let orig = buf2.clone();
         eq.process_interleaved(&mut buf2);
         assert!(buf2 != orig, "a live band edit must engage processing");
+    }
+
+    /// The response curve peaks near a boosted band's centre and is ~flat
+    /// far from it — the shape the settings visualization draws.
+    #[test]
+    fn response_curve_tracks_boosted_band() {
+        let mut gains = [0.0; NUM_BANDS];
+        gains[2] = 8.0; // 125 Hz boost
+        let at_band = response_db(&gains, BAND_FREQS[2] as f64, FS as f64);
+        let far = response_db(&gains, BAND_FREQS[9] as f64, FS as f64); // 16 kHz
+        assert!(at_band > 6.0, "near the boosted band the curve rises: {at_band}");
+        assert!(far.abs() < 1.0, "far from it the curve is ~flat: {far}");
+        // Flat gains → flat (0 dB) curve everywhere.
+        let flat = [0.0; NUM_BANDS];
+        assert!(response_db(&flat, 1000.0, FS as f64).abs() < 1e-6);
     }
 
     /// Output never exceeds full scale even with every band slammed to max

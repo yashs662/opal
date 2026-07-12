@@ -107,6 +107,8 @@ pub enum Msg {
     EqApplyPreset(usize),
     /// Snapshot the current sliders as a new saved custom preset.
     EqSaveCustom,
+    /// Expand/collapse the EQ presets dropdown.
+    EqTogglePresetOpen,
     /// Skip forward `count` tracks (queue "play this next-N").
     Skip(u32),
     /// Open the track-row right-click menu at `pos` (logical px).
