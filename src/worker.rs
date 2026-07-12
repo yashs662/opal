@@ -330,8 +330,9 @@ pub enum WorkerResponse {
         error: String,
     },
     /// An artist page resolved: profile + popular tracks + discography +
-    /// the user's liked songs by this artist (from the cached Liked Songs
-    /// collection — the same data the membership graph is built from).
+    /// the user's saved songs by this artist across the whole library
+    /// (Liked Songs + every membership-indexed playlist), each with the
+    /// names of the sources that contain it.
     ArtistOpened {
         id: String,
         name: String,
@@ -339,7 +340,7 @@ pub enum WorkerResponse {
         followers: u64,
         top_tracks: Vec<api::PlaylistTrack>,
         albums: Vec<api::AlbumRef>,
-        liked_tracks: Vec<api::PlaylistTrack>,
+        library_tracks: Vec<(api::PlaylistTrack, Vec<String>)>,
     },
     ArtistFailed {
         id: String,
@@ -416,6 +417,7 @@ pub enum WorkerResponse {
     /// playlist list (id + name) for the heart picker.
     MembershipLoaded {
         playlists: Vec<crate::model::membership::MembershipPlaylist>,
+        index: std::collections::HashMap<String, Vec<String>>,
     },
     /// Which playlists the given track is in (answer to `QueryMembership`).
     TrackMembership {
@@ -1395,6 +1397,16 @@ fn spawn_fetch_track_details(resp: Responder, access_token: String, track_id: St
 /// not days.
 const PLAYLIST_DISK_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 30);
 
+/// Disk key for a playlist/album detail listing. **Versioned**: bump the
+/// prefix whenever `PlaylistTrack` grows fields the UI depends on (e.g.
+/// the per-artist ids behind the clickable credit spans) — old-schema
+/// entries deserialize with silent defaults, which shows up as features
+/// working on freshly-cached pages and not on stale ones. A bump orphans
+/// the old files (the json cache cap evicts them) and refetches honestly.
+fn detail_cache_key(id: &str) -> String {
+    format!("detail_v2_{id}")
+}
+
 /// Hard ceiling on streamed tracks — guards against a pathological
 /// `total` driving an unbounded loop. 10k covers every realistic
 /// library; the windowed-play UX matters more than completeness beyond.
@@ -1405,7 +1417,7 @@ const MAX_STREAM_TRACKS: usize = 10_000;
 /// cache (shared with playlists, keyed by id) makes re-opens instant.
 fn spawn_fetch_album(resp: Responder, access_token: String, id: String) {
     tokio::spawn(async move {
-        let key = id.clone();
+        let key = detail_cache_key(&id);
         let cached = tokio::task::spawn_blocking(move || {
             disk_cache::read_json::<api::PlaylistDetail>(&key, PLAYLIST_DISK_TTL)
         })
@@ -1421,7 +1433,7 @@ fn spawn_fetch_album(resp: Responder, access_token: String, id: String) {
         }
         match api::get_album(&access_token, &id).await {
             Ok(detail) => {
-                let key = id.clone();
+                let key = detail_cache_key(&id);
                 let to_cache = detail.clone();
                 tokio::task::spawn_blocking(move || disk_cache::write_json(&key, &to_cache));
                 resp.send(WorkerResponse::PlaylistOpened {
@@ -1758,44 +1770,34 @@ fn spawn_fetch_artist(resp: Responder, access_token: String, id: String) {
         let albums = albums
             .inspect_err(|e| warn!("artist albums ({id}) failed: {e}"))
             .unwrap_or_default();
-        // The user's liked songs by this artist — read from the cached
-        // Liked Songs collection (the membership graph's source data).
-        // Cache miss ⇒ the section just doesn't show; re-streaming a
-        // thousand-track collection for one page would be rude.
-        let liked_tracks = {
-            let artist_id = id.clone();
-            tokio::task::spawn_blocking(move || {
-                disk_cache::read_json::<api::PlaylistDetail>(
-                    api::LIKED_SONGS_ID,
-                    PLAYLIST_DISK_TTL,
-                )
-                .map(|d| {
-                    d.tracks
-                        .into_iter()
-                        .filter(|t| {
-                            t.artist_id == artist_id
-                                || t.artists.iter().any(|a| a.id == artist_id)
-                        })
-                        // A prolific favourite could match dozens — the
-                        // section is a highlight strip, not the library.
-                        .take(10)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default()
-        };
         match profile {
-            Ok(p) => resp.send(WorkerResponse::ArtistOpened {
-                id,
-                name: p.name,
-                image_url: p.image_url,
-                followers: p.followers,
-                top_tracks,
-                albums,
-                liked_tracks,
-            }),
+            Ok(p) => {
+                // The user's saved songs by this artist, across the whole
+                // library: membership index (uri → playlist ids) + Liked
+                // Songs, with track metadata joined from whichever page
+                // caches hold it (liked is always cached; playlists cache
+                // on first open — a track saved only in a never-opened
+                // playlist has no metadata to show yet and is skipped
+                // rather than fetched, this is a highlight strip).
+                let library_tracks = {
+                    let artist_id = id.clone();
+                    let artist_name = p.name.clone();
+                    tokio::task::spawn_blocking(move || {
+                        artist_library_tracks(&artist_id, &artist_name)
+                    })
+                    .await
+                    .unwrap_or_default()
+                };
+                resp.send(WorkerResponse::ArtistOpened {
+                    id,
+                    name: p.name,
+                    image_url: p.image_url,
+                    followers: p.followers,
+                    top_tracks,
+                    albums,
+                    library_tracks,
+                })
+            }
             Err(e) => {
                 warn!("get_artist({id}) failed: {e}");
                 resp.send(WorkerResponse::ArtistFailed {
@@ -1932,6 +1934,85 @@ fn proto_track_to_row(
     })
 }
 
+/// Aggregate the user's saved tracks by `artist_id` across the library:
+/// Liked Songs + every playlist in the membership index, each with the
+/// names of the sources that contain it. Source lists resolve through
+/// the index (complete even when a playlist's page cache is missing);
+/// track metadata joins from the available page caches. Blocking (fs
+/// reads) — call from `spawn_blocking`.
+fn artist_library_tracks(
+    artist_id: &str,
+    artist_name: &str,
+) -> Vec<(api::PlaylistTrack, Vec<String>)> {
+    use crate::model::membership::MembershipSnapshot;
+    let by_artist = |t: &api::PlaylistTrack| {
+        // Cache rows written before the per-artist ids existed deserialize
+        // with empty id fields — fall back to a display-name match so the
+        // section works until those caches naturally rewrite.
+        t.artist_id == artist_id
+            || t.artists.iter().any(|a| a.id == artist_id)
+            || (t.artist_id.is_empty()
+                && t.artists.is_empty()
+                && !artist_name.is_empty()
+                && t.artist
+                    .split(", ")
+                    .any(|n| n.eq_ignore_ascii_case(artist_name)))
+    };
+    let mut out: Vec<(api::PlaylistTrack, Vec<String>)> = Vec::new();
+    let mut add = |t: &api::PlaylistTrack, src: &str| {
+        match out.iter_mut().find(|(e, _)| e.uri == t.uri) {
+            Some((_, sources)) => {
+                if !sources.iter().any(|s| s == src) {
+                    sources.push(src.to_string());
+                }
+            }
+            None => out.push((t.clone(), vec![src.to_string()])),
+        }
+    };
+    if let Some(d) =
+        disk_cache::read_json::<api::PlaylistDetail>(&detail_cache_key(api::LIKED_SONGS_ID), PLAYLIST_DISK_TTL)
+    {
+        for t in d.tracks.iter().filter(|t| by_artist(t)) {
+            add(t, "Liked Songs");
+        }
+    }
+    let snap = disk_cache::read_json::<MembershipSnapshot>(
+        MEMBERSHIP_KEY,
+        std::time::Duration::MAX,
+    );
+    if let Some(snap) = &snap {
+        for p in &snap.playlists {
+            if let Some(d) = disk_cache::read_json::<api::PlaylistDetail>(&detail_cache_key(&p.id), PLAYLIST_DISK_TTL)
+            {
+                for t in d.tracks.iter().filter(|t| by_artist(t)) {
+                    add(t, &p.name);
+                }
+            }
+        }
+    }
+    // Complete each track's source list from the index — a playlist whose
+    // page cache is missing still names its membership here.
+    if let Some(snap) = &snap {
+        let name_of: std::collections::HashMap<&str, &str> = snap
+            .playlists
+            .iter()
+            .map(|p| (p.id.as_str(), p.name.as_str()))
+            .collect();
+        for (track, sources) in out.iter_mut() {
+            if let Some(ids) = snap.index.get(&track.uri) {
+                for pid in ids {
+                    if let Some(name) = name_of.get(pid.as_str())
+                        && !sources.iter().any(|s| s == name)
+                    {
+                        sources.push((*name).to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The user's Liked Songs collection context uri
 /// (`spotify:user:{id}:collection`) — `get_me` is disk-cached (SLOW), so
 /// this is free after the first call. `None` if the profile can't resolve
@@ -1948,7 +2029,7 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
     tokio::spawn(async move {
         // 1. Disk cache first — a fresh hit delivers the whole listing in
         //    one `complete` response (no re-paging the CDN/API).
-        let key = id.clone();
+        let key = detail_cache_key(&id);
         let cached = tokio::task::spawn_blocking(move || {
             disk_cache::read_json::<api::PlaylistDetail>(&key, PLAYLIST_DISK_TTL)
         })
@@ -2096,7 +2177,7 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
                 tracks: accumulated,
                 total,
             };
-            let key = id.clone();
+            let key = detail_cache_key(&id);
             tokio::task::spawn_blocking(move || disk_cache::write_json(&key, &detail));
         }
     });
@@ -2472,9 +2553,10 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
         .flatten();
         if let Some(snap) = fresh {
             let playlists = snap.playlists.clone();
+            let index = snap.index.clone();
             info!("membership: {} playlists from disk cache", playlists.len());
             *membership.lock().await = snap;
-            resp.send(WorkerResponse::MembershipLoaded { playlists });
+            resp.send(WorkerResponse::MembershipLoaded { playlists, index });
             return;
         }
         // 2. Stale-but-present cache — show it *immediately* (so the heart +
@@ -2488,12 +2570,13 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
         .flatten();
         if let Some(snap) = stale {
             let playlists = snap.playlists.clone();
+            let index = snap.index.clone();
             info!(
                 "membership: {} playlists from stale cache — revalidating",
                 playlists.len()
             );
             *membership.lock().await = snap;
-            resp.send(WorkerResponse::MembershipLoaded { playlists });
+            resp.send(WorkerResponse::MembershipLoaded { playlists, index });
         }
         // 3. Scan. Editable = owned or collaborative (only those take writes).
         let me = api::get_me(&access_token)
@@ -2539,12 +2622,16 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
             index.len(),
             playlists.len()
         );
+        let index_for_ui = index.clone();
         *membership.lock().await = MembershipSnapshot {
             playlists: playlists.clone(),
             index,
         };
         persist_membership(&membership).await;
-        resp.send(WorkerResponse::MembershipLoaded { playlists });
+        resp.send(WorkerResponse::MembershipLoaded {
+            playlists,
+            index: index_for_ui,
+        });
     });
 }
 

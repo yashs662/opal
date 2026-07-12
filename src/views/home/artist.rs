@@ -1,20 +1,29 @@
 //! Artist page rendered into the centre pane — a hero (circular artist
-//! image + name) over a horizontally-scrolling discography of album tiles.
+//! image + name) over "Popular", the user's own "In your library" saves,
+//! and a horizontally-scrolling discography of album tiles.
 //!
 //! Lighter than the playlist/album pages: artists have a bounded album
 //! count, so this is a plain `scroll_y` column (no virtualised list) and
-//! no collapsing header. Each album tile opens its [`MainNav::Album`] page,
-//! reusing [`crate::views::home::main_pane::tile`].
+//! no collapsing header. Track rows are the shared
+//! [`crate::widgets::track_row`] (play / right-click menu / heart), so
+//! the affordances match every other flat list. Each album tile opens
+//! its [`MainNav::Album`] page, reusing
+//! [`crate::views::home::main_pane::tile`].
 
 use std::rc::Rc;
 
-use opal_gfx::{Align, ImageHandle, Justify, Len, Overflow, Scene, Signal};
+use opal_gfx::{Align, ImageHandle, Justify, Len, Scene, Signal};
 
 use crate::api::PlayTarget;
 use crate::views::MainNav;
 use crate::views::home::{NavFn, PlayFn};
-use crate::widgets::icon::{Icon, IconSet};
+use crate::widgets::icon::IconSet;
 use crate::widgets::tokens as t;
+use crate::widgets::track_row::{TrackRow, TrackRowActions, track_row};
+
+/// How many "In your library" rows the page previews before deferring to
+/// the "Show all" synthetic playlist page.
+const LIBRARY_PREVIEW: usize = 5;
 
 /// One discography tile — title, year, resolved cover, album id.
 pub struct ArtistAlbumTile {
@@ -24,12 +33,15 @@ pub struct ArtistAlbumTile {
     pub id: String,
 }
 
-/// One "Popular" track row — title, resolved cover, run time, playback URI.
-pub struct ArtistTrack {
-    pub title: String,
+/// One track row on the page — the shared row widget's inputs plus the
+/// page-level extras (sources, membership).
+pub struct ArtistTrackRow {
+    pub track: crate::api::PlaylistTrack,
     pub cover: Option<Signal<Option<ImageHandle>>>,
     pub duration: String,
-    pub uri: String,
+    /// "Liked Songs • Chill" — which library sources hold this track.
+    pub sources: Option<String>,
+    pub in_library: bool,
 }
 
 /// Everything the artist page needs for one render. Built per rebuild from
@@ -39,20 +51,17 @@ pub struct ArtistViewData {
     pub image: Option<Signal<Option<ImageHandle>>>,
     pub followers: u64,
     pub loading: bool,
-    pub popular: Vec<ArtistTrack>,
-    /// The user's liked songs by this artist (capped) — rendered before
-    /// the discography; rows play within the Liked Songs collection
-    /// context when one resolved.
-    pub liked: Vec<ArtistTrack>,
-    /// `spotify:user:{id}:collection` when the profile is known — the
-    /// liked rows' playing context.
-    pub liked_context: Option<String>,
+    pub popular: Vec<ArtistTrackRow>,
+    /// The user's saved songs by this artist across the whole library
+    /// (full list — the view previews [`LIBRARY_PREVIEW`]).
+    pub library: Vec<ArtistTrackRow>,
     pub albums: Vec<ArtistAlbumTile>,
 }
 
 /// Render the artist page into `s` (the caller's transition wrapper).
 /// `scroll_node` is the content-scoped scroller name (rebuilds preserve
 /// scroll by identity; a different artist ⇒ different name ⇒ fresh top).
+#[allow(clippy::too_many_arguments)]
 pub fn view(
     s: &mut Scene,
     icons: &Rc<IconSet>,
@@ -60,29 +69,20 @@ pub fn view(
     scroll_node: &str,
     on_play: PlayFn,
     on_navigate: NavFn,
+    actions: &TrackRowActions,
+    on_show_all_library: Rc<dyn Fn()>,
 ) {
-    let nav_back = on_navigate.clone();
     s.col(scroll_node)
         .w(Len::Fill)
         .h(Len::Fill)
-        // Bottom inset matches the sides — see the queue scroller.
-        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
+        // Top/bottom insets match the sides so content breathes instead
+        // of hugging the pane edges. (Back = the top-bar history arrows.)
+        .pad(t::SP_6)
         .gap(t::SP_5)
         .scroll_y()
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
-            // Back chevron.
-            c.row(())
-                .w_px(t::TOPBAR_BTN)
-                .h_px(t::TOPBAR_BTN)
-                .rgba(0.0, 0.0, 0.0, 0.30)
-                .hover_color(t::PANEL_HI)
-                .radius(t::R_FULL)
-                .center()
-                .on_click(move |ctx| nav_back(ctx, MainNav::Home))
-                .child(|b| icons.render(b, Icon::ChevronLeft, t::ICON_MD, t::TEXT));
-
             // Hero: circular artist image + name.
             c.row(())
                 .w(Len::Fill)
@@ -127,57 +127,71 @@ pub fn view(
 
             // Popular tracks.
             if !data.popular.is_empty() {
-                c.row(())
-                    .w(Len::Fill)
-                    .h_px(t::SP_7)
-                    .align(Align::Center)
-                    .child(|h| {
-                        h.text((), "Popular", 18.0).color(t::TEXT);
-                    });
-                for (i, track) in data.popular.iter().enumerate() {
-                    let target = PlayTarget::Uris {
-                        uris: vec![track.uri.clone()],
-                        offset: 0,
-                    };
-                    track_row(c, i as u32, track, target, &on_play);
+                section_header(c, "Popular", None);
+                for (i, row) in data.popular.iter().enumerate() {
+                    let uri = row.track.uri.clone();
+                    let play = on_play.clone();
+                    track_row(
+                        c,
+                        TrackRow {
+                            index: Some(i as u32 + 1),
+                            track: row.track.clone(),
+                            cover: row.cover.clone(),
+                            duration: row.duration.clone(),
+                            activate: Rc::new(move || {
+                                play(PlayTarget::Uris {
+                                    uris: vec![uri.clone()],
+                                    offset: 0,
+                                })
+                            }),
+                            sources: row.sources.clone(),
+                            in_library: row.in_library,
+                        },
+                        actions,
+                    );
                 }
             }
 
-            // The user's liked songs by this artist — the membership
+            // The user's saved songs by this artist — the membership
             // graph's view of them, ahead of the discography. Rows play
-            // within the Liked Songs collection when its context is
-            // known (continuation stays inside the user's library).
-            if !data.liked.is_empty() {
-                c.row(())
-                    .w(Len::Fill)
-                    .h_px(t::SP_7)
-                    .align(Align::Center)
-                    .child(|h| {
-                        h.text((), "Liked songs", 18.0).color(t::TEXT);
-                    });
-                for (i, track) in data.liked.iter().enumerate() {
-                    let target = match &data.liked_context {
-                        Some(ctx) => PlayTarget::ContextAt {
-                            context_uri: ctx.clone(),
-                            track_uri: track.uri.clone(),
+            // the library set from the clicked row; the full list opens
+            // as a synthetic playlist page.
+            if !data.library.is_empty() {
+                let show_all = (data.library.len() > LIBRARY_PREVIEW)
+                    .then(|| on_show_all_library.clone());
+                section_header(c, "In your library", show_all);
+                let uris: Vec<String> = data
+                    .library
+                    .iter()
+                    .filter(|r| r.track.playable)
+                    .map(|r| r.track.uri.clone())
+                    .collect();
+                for (i, row) in data.library.iter().take(LIBRARY_PREVIEW).enumerate() {
+                    let play = on_play.clone();
+                    let uris = uris.clone();
+                    track_row(
+                        c,
+                        TrackRow {
+                            index: Some(i as u32 + 1),
+                            track: row.track.clone(),
+                            cover: row.cover.clone(),
+                            duration: row.duration.clone(),
+                            activate: Rc::new(move || {
+                                play(PlayTarget::Uris {
+                                    uris: uris.clone(),
+                                    offset: i as u32,
+                                })
+                            }),
+                            sources: row.sources.clone(),
+                            in_library: row.in_library,
                         },
-                        None => PlayTarget::Uris {
-                            uris: vec![track.uri.clone()],
-                            offset: 0,
-                        },
-                    };
-                    track_row(c, i as u32, track, target, &on_play);
+                        actions,
+                    );
                 }
             }
 
             // Discography.
-            c.row(())
-                .w(Len::Fill)
-                .h_px(t::SP_7)
-                .align(Align::Center)
-                .child(|h| {
-                    h.text((), "Discography", 18.0).color(t::TEXT);
-                });
+            section_header(c, "Discography", None);
             if data.albums.is_empty() {
                 if !data.loading {
                     c.text((), "No releases", 14.0).color(t::TEXT_DIM);
@@ -207,59 +221,24 @@ pub fn view(
         });
 }
 
-/// One track row (Popular / Liked songs): rank + thumb + title + run
-/// time; clicking plays `target`.
-fn track_row(s: &mut Scene, index: u32, track: &ArtistTrack, target: PlayTarget, on_play: &PlayFn) {
-    let on_play = on_play.clone();
+/// A section heading with an optional trailing "Show all" action —
+/// mirrors the home feed's section headers.
+fn section_header(s: &mut Scene, title: &str, show_all: Option<Rc<dyn Fn()>>) {
+    let title = title.to_string();
     s.row(())
         .w(Len::Fill)
-        .h_px(t::SP_12)
-        .pad_xy(t::SP_2, t::SP_1)
-        .gap(t::SP_3)
+        .h_px(t::SP_7)
         .align(Align::Center)
-        .radius(t::R_MD)
-        .hover_color(t::HOVER_LIFT_SUBTLE)
-        .on_click(move |_| on_play(target.clone()))
-        .child(|r| {
-            r.row(()).w_px(t::SP_6).center().child(|c| {
-                c.text((), format!("{}", index + 1), 13.0)
-                    .color(t::TEXT_DIM);
-            });
-            r.col(()).w_px(t::THUMB_SM).h_px(t::THUMB_SM).child(|b| {
-                if let Some(sig) = track.cover.clone() {
-                    b.image_bound((), sig)
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .radius(t::R_SM)
-                        .placeholder_fill(t::PLACEHOLDER);
-                } else {
-                    b.rect(())
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                        .radius(t::R_SM);
-                }
-            });
-            r.col(())
-                .w(Len::Fill)
-                .h(Len::Fill)
-                .justify(Justify::Center)
-                .overflow_x(Overflow::Hidden)
-                .child(|m| {
-                    m.text((), &track.title, 14.0)
-                        .color(t::TEXT)
-                        .max_width_px(420.0);
-                });
-            // Run time, right-aligned.
-            r.row(())
-                .push_end()
-                .w_px(t::SP_12)
-                .justify(Justify::End)
-                .child(|c| {
-                    c.text((), &track.duration, 12.0).color(t::TEXT_DIM);
-                });
+        .justify(Justify::SpaceBetween)
+        .child(move |h| {
+            h.text((), &title, 18.0).color(t::TEXT);
+            if let Some(open) = show_all {
+                h.text((), "Show all", 12.0)
+                    .color(t::TEXT_DIM)
+                    .hover_color(t::TEXT)
+                    .cursor(opal_gfx::CursorIcon::Pointer)
+                    .on_click(move |_| open());
+            }
         });
 }
 

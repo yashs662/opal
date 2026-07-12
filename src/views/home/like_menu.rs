@@ -23,13 +23,11 @@ const LIST_H: f32 = 300.0;
 
 pub struct LikeMenu<'a> {
     pub membership: &'a MembershipModel,
-    /// Liked-Songs state — reactive so its checkbox tracks save/unsave.
-    pub liked: &'a Signal<bool>,
     pub accent: &'a Signal<[f32; 4]>,
     pub icons: &'a Rc<IconSet>,
-    /// Add/remove the current track from playlist `id` (`add` = check on).
+    /// Add/remove the target track from playlist `id` (`add` = check on).
     pub on_toggle_playlist: Rc<dyn Fn(String, bool)>,
-    /// Save/unsave the current track to Liked Songs (`add` = check on).
+    /// Save/unsave the target track to Liked Songs (`add` = check on).
     pub on_toggle_liked: Rc<dyn Fn(bool)>,
 }
 
@@ -38,14 +36,17 @@ impl Component for LikeMenu<'_> {
         let icons = self.icons;
         let accent = self.accent.clone();
         let playlists = self.membership.playlists.clone();
-        let ready = self.membership.ready;
+        // Rows need both the playlist list AND the target's membership
+        // answer (async for row-heart targets — instant once the worker
+        // index is warm).
+        let ready = self.membership.ready && self.membership.target_ready;
         let target = self.membership.target.clone();
-        let liked_now = self.liked.get();
+        let liked_now = self.membership.target_liked;
         // Pre-read membership for each playlist row (static read + rebuild on
         // toggle keeps the checkbox honest without a per-row signal).
         let in_set: Vec<bool> = playlists
             .iter()
-            .map(|p| self.membership.contains(&p.id))
+            .map(|p| self.membership.target_contains(&p.id))
             .collect();
         let on_toggle_playlist = self.on_toggle_playlist.clone();
         let on_toggle_liked = self.on_toggle_liked.clone();
@@ -60,9 +61,13 @@ impl Component for LikeMenu<'_> {
                 .child(move |panel| {
                     // Header: "Add to playlist" + the track it acts on.
                     panel.text((), "Add to playlist", 18.0).color(t::TEXT);
-                    if !target.name.is_empty() {
+                    if !target.track.name.is_empty() {
                         panel
-                            .text((), format!("{} \u{2022} {}", target.name, target.artist), 12.0)
+                            .text(
+                                (),
+                                format!("{} \u{2022} {}", target.track.name, target.track.artist),
+                                12.0,
+                            )
                             .color(t::TEXT_DIM)
                             .max_width_px(t::SP_80 - t::SP_10);
                     }

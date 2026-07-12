@@ -184,8 +184,8 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             }
         }
         WorkerResponse::SavedState { track_id, saved } => {
-            // Only the current track's heart — a late echo for a track
-            // we've skipped past must not flip the new track's state.
+            // The playing track's heart — a late echo for a track we've
+            // skipped past must not flip the new track's state.
             let current = state
                 .player_ui
                 .with_snapshot(|p| track_id_from_uri(&p.track_id).map(|s| s.to_string()))
@@ -195,9 +195,13 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 // Liked is one of the heart's "in library" inputs — refresh
                 // the tooltip (which lists Liked Songs + playlists).
                 state.membership.rebuild_hint(saved);
-                if state.membership.overlay.is_open() {
-                    cx.rebuild();
-                }
+            }
+            // The picker's target (any track) resolves independently.
+            if state.membership.target.id() == track_id {
+                state.membership.target_liked = saved;
+            }
+            if state.membership.overlay.is_open() {
+                cx.rebuild();
             }
         }
         WorkerResponse::QueueLoaded { tracks } => {
@@ -253,12 +257,23 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 }
             }
         }
-        WorkerResponse::MembershipLoaded { playlists } => {
+        WorkerResponse::MembershipLoaded { playlists, index } => {
             log::info!("playlist-membership ready: {} playlists", playlists.len());
-            state.membership.set_playlists(playlists);
+            state.membership.set_playlists(playlists, index.clone());
             // Resolve the current track's membership now that the index is up.
             if let Some(uri) = state.player_ui.current_track_uri() {
                 worker.query_membership(uri);
+            }
+            if let Some(open) = state.library.open_playlist.as_ref() {
+                let rows = open.rows.clone();
+                let saved_index = &state.membership.index;
+                let mut rows = rows.borrow_mut();
+                for row in rows.iter_mut() {
+                    row.in_library = open.liked || saved_index.contains_key(&row.uri);
+                }
+            }
+            if state.library.open_playlist.is_some() {
+                cx.rebuild();
             }
             // The picker may already be open waiting on its rows.
             if state.membership.overlay.is_open() {
@@ -269,15 +284,21 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             track_uri,
             playlist_ids,
         } => {
-            // Ignore a late answer for a track we've skipped past.
+            // The playing track's heart (late answers for skipped tracks
+            // are ignored) …
             let current = state.player_ui.current_track_uri();
             if current.as_deref() == Some(track_uri.as_str()) {
                 state
                     .membership
-                    .set_current(playlist_ids, state.player_ui.liked.get());
-                if state.membership.overlay.is_open() {
-                    cx.rebuild();
-                }
+                    .set_current(playlist_ids.clone(), state.player_ui.liked.get());
+            }
+            // … and the picker's target (any track), independently.
+            if state.membership.target.uri() == track_uri {
+                state.membership.target_ids = playlist_ids.into_iter().collect();
+                state.membership.target_ready = true;
+            }
+            if state.membership.overlay.is_open() {
+                cx.rebuild();
             }
         }
         WorkerResponse::MembershipEditFailed {
@@ -285,16 +306,30 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             playlist_id,
             was_add,
         } => {
-            // Undo the optimistic checkbox flip (re-toggle the opposite way),
-            // but only if we're still on that track.
+            // Undo the optimistic checkbox flip (re-toggle the opposite
+            // way) on whichever states hold this track.
+            if state.membership.target.uri() == track_uri {
+                state.membership.toggle_target_local(&playlist_id, !was_add);
+            }
             let current = state.player_ui.current_track_uri();
             if current.as_deref() == Some(track_uri.as_str()) {
-                state
-                    .membership
-                    .toggle_local(&playlist_id, !was_add, state.player_ui.liked.get());
-                if state.membership.overlay.is_open() {
-                    cx.rebuild();
+                state.membership.toggle_current_local(
+                    &playlist_id,
+                    !was_add,
+                    state.player_ui.liked.get(),
+                );
+            }
+            let entry = state.membership.index.entry(track_uri.clone()).or_default();
+            if was_add {
+                entry.retain(|p| p != &playlist_id);
+                if entry.is_empty() {
+                    state.membership.index.remove(&track_uri);
                 }
+            } else if !entry.contains(&playlist_id) {
+                entry.push(playlist_id.clone());
+            }
+            if state.membership.overlay.is_open() {
+                cx.rebuild();
             }
             // Undo the optimistic live-patch of the open page (an added row
             // can be dropped by uri; a failed remove can't be cheaply re-added,
@@ -680,8 +715,17 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     o.rows.clone()
                 });
                 if let Some(buf) = buf {
+                    let liked = state.library.open_playlist.as_ref().map(|o| o.liked).unwrap_or(false);
                     buf.borrow_mut().clear();
-                    state.library.build_rows(&mut state.art, &buf, &detail.tracks);
+                    state
+                        .library
+                        .build_rows(
+                            &mut state.art,
+                            &buf,
+                            &detail.tracks,
+                            liked,
+                            &state.membership.index,
+                        );
                     cx.rebuild();
                 }
             }
@@ -705,7 +749,10 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     .as_ref()
                     .map(|o| o.rows.clone());
                 if let Some(buf) = buf {
-                    state.library.build_rows(&mut state.art, &buf, &tracks);
+                    let liked = state.library.open_playlist.as_ref().map(|o| o.liked).unwrap_or(false);
+                    state
+                        .library
+                        .build_rows(&mut state.art, &buf, &tracks, liked, &state.membership.index);
                     // Tell the frame tick to re-materialize the lazy list:
                     // rows the user scrolled past while this page was in
                     // flight are on screen as skeletons and won't re-render
@@ -731,7 +778,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             followers,
             top_tracks,
             albums,
-            liked_tracks,
+            library_tracks,
         } => {
             state.library.clear_inflight(&id);
             if state.router.nav_is_artist(&id) {
@@ -748,9 +795,9 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     .filter_map(|al| al.image_url.as_ref())
                     .chain(top_tracks.iter().filter_map(|t| t.album_image_url.as_ref()))
                     .chain(
-                        liked_tracks
+                        library_tracks
                             .iter()
-                            .filter_map(|t| t.album_image_url.as_ref()),
+                            .filter_map(|(t, _)| t.album_image_url.as_ref()),
                     );
                 for u in covers {
                     state.art.or_signal(album_art::cache_key(u));
@@ -762,7 +809,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     a.followers = followers;
                     a.top_tracks = top_tracks;
                     a.albums = albums;
-                    a.liked_tracks = liked_tracks;
+                    a.library_tracks = library_tracks;
                     a.loading = false;
                 }
                 cx.rebuild();

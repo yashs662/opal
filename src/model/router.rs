@@ -48,6 +48,14 @@ pub struct RouterModel {
     /// scroll offset (see `app::frame::tick`); the view slides + fades the
     /// sticky bar from it. Reset to 0 on every nav.
     pub detail_collapse: Signal<f32>,
+    /// Nav history behind the top-bar back/forward arrows. [`Self::go`]
+    /// pushes the outgoing nav onto `back` and clears `forward`;
+    /// [`Self::pop_back`]/[`Self::pop_forward`] walk them.
+    back: Vec<MainNav>,
+    forward: Vec<MainNav>,
+    /// Reactive can-go flags — the arrows' tints ride these (no rebuild).
+    pub can_back: Signal<bool>,
+    pub can_forward: Signal<bool>,
 }
 
 impl RouterModel {
@@ -61,6 +69,10 @@ impl RouterModel {
             nav_scroll_node: None,
             main_t: Signal::new(1.0),
             detail_collapse: Signal::new(0.0),
+            back: Vec::new(),
+            forward: Vec::new(),
+            can_back: Signal::new(false),
+            can_forward: Signal::new(false),
         }
     }
 
@@ -101,10 +113,57 @@ impl RouterModel {
         matches!(&self.nav, MainNav::Artist { id: nid } if nid == id)
     }
 
-    /// Flip nav to `nav` and restart the entrance transition from 0 — the
-    /// scene rebuild mounts the new content; the tween fades + slides it in
-    /// over ~260 ms (timeline-pumped, no manual rebuild cadence).
+    /// Flip nav to `nav`, record the outgoing page in the back history
+    /// (a forward-branch is discarded, browser-style), and restart the
+    /// entrance transition — the scene rebuild mounts the new content;
+    /// the tween fades + slides it in over ~260 ms.
     pub fn go(&mut self, nav: MainNav, tl: &mut Timeline, now: Instant) {
+        if nav == self.nav {
+            return;
+        }
+        self.push_back_entry();
+        self.forward.clear();
+        self.apply(nav, tl, now);
+    }
+
+    /// Step back through the history (the top-bar back arrow). Returns the
+    /// nav to re-prepare (fetches re-run caller-side), `None` when empty.
+    pub fn pop_back(&mut self, tl: &mut Timeline, now: Instant) -> Option<MainNav> {
+        let target = self.back.pop()?;
+        // Ephemeral pages (synthetic listings whose data lives only while
+        // open) can't be revisited via "forward" — drop them instead of
+        // stranding the arrow on an empty page.
+        if !Self::is_ephemeral(&self.nav) {
+            self.forward.push(self.nav.clone());
+        }
+        self.apply(target.clone(), tl, now);
+        Some(target)
+    }
+
+    /// Step forward again (the top-bar forward arrow).
+    pub fn pop_forward(&mut self, tl: &mut Timeline, now: Instant) -> Option<MainNav> {
+        let target = self.forward.pop()?;
+        self.push_back_entry();
+        self.apply(target.clone(), tl, now);
+        Some(target)
+    }
+
+    fn push_back_entry(&mut self) {
+        if !Self::is_ephemeral(&self.nav) {
+            self.back.push(self.nav.clone());
+        }
+    }
+
+    /// Synthetic pages built from in-memory state (the artist "in your
+    /// library" listing) — valid to leave, not to return to via history.
+    fn is_ephemeral(nav: &MainNav) -> bool {
+        matches!(nav, MainNav::Playlist { id, .. } if id.starts_with("__library__"))
+    }
+
+    /// The shared tail of every nav change: cache the scroller name, swap
+    /// the nav, reset the collapse, restart the entrance tween, refresh
+    /// the arrow flags.
+    fn apply(&mut self, nav: MainNav, tl: &mut Timeline, now: Instant) {
         // Recompute the cached scroller name once, here — the frame tick then
         // reads it every active frame without allocating.
         self.nav_scroll_node = nav.detail_scroll_node();
@@ -113,6 +172,8 @@ impl RouterModel {
         self.detail_collapse.set(0.0);
         self.main_t.set(0.0);
         tl.animate(&self.main_t, 1.0, NAV_CURVE, MAIN_NAV_DURATION, now);
+        self.can_back.set(!self.back.is_empty());
+        self.can_forward.set(!self.forward.is_empty());
     }
 }
 

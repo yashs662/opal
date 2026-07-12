@@ -37,7 +37,7 @@ const ROW_H: f32 = t::SP_14;
 // are read there too — keep them `pub`.
 
 /// Fixed hero (cover + title + Play) block height.
-pub const HERO_H: f32 = t::SP_64 + t::SP_8;
+pub const HERO_H: f32 = t::SP_64 - t::SP_1;
 /// Column-header strip height (`# Title Album Time`).
 pub const COLHEADER_H: f32 = t::SP_8;
 /// Pinned compact-bar height (mini Play + title). Roomy in Y so the bar
@@ -59,6 +59,10 @@ pub struct PlaylistRow {
     pub artist: String,
     pub album: String,
     pub duration: String,
+    /// Raw milliseconds behind `duration` — kept so the row can rebuild a
+    /// full [`crate::api::PlaylistTrack`] (context menu / like picker
+    /// targets, live page patches) without lossy re-parsing.
+    pub duration_ms: u64,
     pub uri: String,
     /// Reactive cover handle (bound via `image_bound`). `None` if the
     /// track has no cover URL; the inner `Signal` stays `None` until the
@@ -76,6 +80,32 @@ pub struct PlaylistRow {
     /// False for local files / region-unavailable tracks — the row still
     /// renders (faded) but takes no clicks and never enters a play queue.
     pub playable: bool,
+    /// Whether the track is already in the user's library (Liked Songs or
+    /// any editable playlist the worker indexed).
+    pub in_library: bool,
+}
+
+impl PlaylistRow {
+    /// Rebuild the full API row — the context menu / like picker target
+    /// (and live page patches) need the whole thing, not the display
+    /// projection.
+    pub fn to_track(&self) -> crate::api::PlaylistTrack {
+        crate::api::PlaylistTrack {
+            id: crate::api::track_id_from_uri(&self.uri)
+                .unwrap_or_default()
+                .to_string(),
+            uri: self.uri.clone(),
+            name: self.title.clone(),
+            artist: self.artist.clone(),
+            album: self.album.clone(),
+            album_image_url: self.cover_url.clone(),
+            duration_ms: self.duration_ms,
+            artists: self.artists.clone(),
+            album_id: self.album_id.clone(),
+            artist_id: self.artist_id.clone(),
+            playable: self.playable,
+        }
+    }
 }
 
 /// Request a track cover be fetched (called when a row materializes).
@@ -112,6 +142,9 @@ pub struct PlaylistViewData {
     pub pulse: Signal<f32>,
     /// Right-click a track row → context menu.
     pub on_context_menu: crate::views::home::CtxMenuFn,
+    /// Row heart → the like picker targeted at that row (same affordance
+    /// as every other flat list).
+    pub on_like: crate::views::home::LikeForFn,
 }
 
 /// Render the centre-pane content for the open playlist. Children are
@@ -157,16 +190,19 @@ pub fn view(
     let icons_h = icons.clone();
     let accent_h = accent.clone();
     let on_play_h = on_play.clone();
-    let nav_h = on_navigate.clone();
     let hero = HeroData::new(data);
     let empty_loading = data.loading;
     let collapse_rows = collapse.clone();
     let pulse = data.pulse.clone();
     let on_ctx_menu = data.on_context_menu.clone();
     let nav_rows = on_navigate.clone();
-
+    let on_like_rows = data.on_like.clone();
+    let icons_rows = icons.clone();
+    let accent_rows = accent.clone();
+    // Liked Songs: every row is by definition saved, so hearts render
+    // filled. Other pages resolve per-track state in the picker itself.
     s.lazy_list(scroll_node, track_n + 2, ROW_H, move |sc, i| match i {
-        0 => hero_block(sc, &icons_h, &hero, &accent_h, &on_play_h, &nav_h),
+        0 => hero_block(sc, &icons_h, &hero, &accent_h, &on_play_h),
         1 => column_header(sc, &collapse_rows),
         _ => {
             let ti = i - 2;
@@ -183,6 +219,9 @@ pub fn view(
                     &request_cover,
                     &on_ctx_menu,
                     &nav_rows,
+                    &icons_rows,
+                    &accent_rows,
+                    &on_like_rows,
                 );
             } else if count > 0 || empty_loading {
                 skeleton_row(sc, ti, &pulse);
@@ -193,7 +232,7 @@ pub fn view(
     })
     .w(Len::Fill)
     .h(Len::Fill)
-    .pad_ltrb(t::SP_3, t::SP_0, t::SP_3, t::SP_4)
+    .pad_ltrb(t::SP_2, t::SP_0, t::SP_2, t::SP_2)
     // Hero is a tall first row; the rest stay at ROW_H.
     .lazy_list_row_height(0, HERO_H)
     .lazy_list_row_height(1, COLHEADER_H)
@@ -208,7 +247,7 @@ pub fn view(
 
     // Pinned compact bar — slides + fades down from above the pane as the
     // hero collapses (off-screen while expanded, so no stray hit-tests).
-    sticky_bar(s, icons, data, accent, collapse, &on_play, &on_navigate);
+    sticky_bar(s, icons, data, accent, collapse, &on_play);
 }
 
 /// Build the playback target for the track at `index`. Real playlists
@@ -284,36 +323,24 @@ impl HeroData {
     }
 }
 
-/// Row 0 of the list: back chevron + big cover/title + the big Play pill.
-/// A fixed `HERO_H` block that scrolls away with the content.
+/// Row 0 of the list: big cover/title + the big Play pill. A fixed
+/// `HERO_H` block that scrolls away with the content.
 fn hero_block(
     s: &mut Scene,
     icons: &Rc<IconSet>,
     d: &HeroData,
     accent: &Signal<[f32; 4]>,
     on_play: &PlayFn,
-    on_navigate: &NavFn,
 ) {
     s.col(())
         .w(Len::Fill)
         .h_px(HERO_H)
-        .pad_ltrb(t::SP_3, t::SP_3, t::SP_3, t::SP_0)
+        .pad_ltrb(t::SP_3, t::SP_0, t::SP_3, t::SP_0)
         .gap(t::SP_2)
         .justify(Justify::End)
         .child(|hero| {
-            // Back chevron pinned top-left of the hero (abs so the justified
-            // cover/title sink to the bottom); scrolls away with the hero.
-            let nav = on_navigate.clone();
-            hero.row(())
-                .abs(0.0, 0.0)
-                .w_px(t::TOPBAR_BTN)
-                .h_px(t::TOPBAR_BTN)
-                .rgba(0.0, 0.0, 0.0, 0.30)
-                .hover_color(t::PANEL_HI)
-                .radius(t::R_FULL)
-                .center()
-                .on_click(move |ctx| nav(ctx, MainNav::Home))
-                .child(|c| icons.render(c, Icon::ChevronLeft, t::ICON_MD, t::TEXT));
+            // (No in-page back chevron — the top-bar history arrows are
+            // the one navigation affordance, consistent across pages.)
             // Cover + title block.
             hero.row(())
                 .w(Len::Fill)
@@ -421,9 +448,9 @@ fn empty_row(s: &mut Scene) {
     });
 }
 
-/// Pinned compact bar (back + mini Play + title) over a repeat of the
-/// column labels. Absolutely positioned and slid down from above the pane
-/// by `collapse`: at 0 it sits fully off the top edge (no paint, no hit
+/// Pinned compact bar (mini Play + title) over a repeat of the column
+/// labels. Absolutely positioned and slid down from above the pane by
+/// `collapse`: at 0 it sits fully off the top edge (no paint, no hit
 /// over the hero); at 1 it rests flush at the top. Opacity tracks the same
 /// signal so it dissolves in as it arrives.
 fn sticky_bar(
@@ -433,14 +460,12 @@ fn sticky_bar(
     accent: &Signal<[f32; 4]>,
     collapse: &Signal<f32>,
     on_play: &PlayFn,
-    on_navigate: &NavFn,
 ) {
     let title = data.name.clone();
     let has_tracks = data.total > 0 || !data.rows.borrow().is_empty();
     let rows = data.rows.clone();
     let ctx = data.context_uri.clone();
     let on_play = on_play.clone();
-    let nav = on_navigate.clone();
     let acc = accent.clone();
     let total_h = BAR_H + COLHEADER_H;
     let touch = header_touch_c();
@@ -459,11 +484,6 @@ fn sticky_bar(
         .h_px(total_h)
         .blur(10.0)
         .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 0.72)
-        // Round only the TOP corners to match the centre pane (`main_area`,
-        // R_LG); bottom stays square (it meets the list + hairline). Needed
-        // because this is its own `.layer()` — composited separately, so the
-        // pane's rounded clip doesn't apply to it.
-        .radii(t::R_LG, t::R_LG, 0.0, 0.0)
         .opacity_bind(collapse.clone())
         // Promote to its own composite layer ABOVE the track-list layer so
         // the per-glass backdrop pass frosts the list scrolling beneath it
@@ -477,15 +497,6 @@ fn sticky_bar(
                 .gap(t::SP_3)
                 .align(Align::Center)
                 .child(move |bar| {
-                    bar.row(())
-                        .w_px(t::TOPBAR_BTN)
-                        .h_px(t::TOPBAR_BTN)
-                        .rgba(0.0, 0.0, 0.0, 0.30)
-                        .hover_color(t::PANEL_HI)
-                        .radius(t::R_FULL)
-                        .center()
-                        .on_click(move |ctx| nav(ctx, MainNav::Home))
-                        .child(|c| icons.render(c, Icon::ChevronLeft, t::ICON_MD, t::TEXT));
                     let fg = accent_fg(&acc);
                     let mut pill = bar.row(());
                     pill.w_px(t::SP_10)
@@ -605,6 +616,9 @@ fn track_row(
     request_cover: &CoverFn,
     on_context_menu: &crate::views::home::CtxMenuFn,
     on_navigate: &NavFn,
+    icons: &Rc<IconSet>,
+    accent: &Signal<[f32; 4]>,
+    on_like: &crate::views::home::LikeForFn,
 ) {
     // Lazily fetch this row's cover the first time it materializes (and
     // isn't resolved yet). The consumer gates on inflight/resolved, so
@@ -632,7 +646,8 @@ fn track_row(
         // complete, but faded and inert — no hover lift, no click.
         row.opacity(0.4);
     }
-    // Right-click → context menu (Add to queue / Go to album / artist).
+    // Right-click → the shared context menu, with the full row so "Add
+    // to playlist…" shows too.
     crate::views::home::attach_context_menu(
         &mut row,
         on_context_menu,
@@ -640,6 +655,7 @@ fn track_row(
             uri: r.uri.clone(),
             album_id: r.album_id.clone(),
             artist_id: r.artist_id.clone(),
+            track: Some(Box::new(r.to_track())),
         },
     );
     row.child(|row| {
@@ -676,7 +692,7 @@ fn track_row(
                     m.text((), &r.title, 14.0)
                         .color(t::TEXT)
                         .max_width_px(360.0);
-                    artist_line(m, &r.artists, &r.artist, on_navigate, 360.0);
+                    artist_line(m, &r.artists, &r.artist, &r.artist_id, on_navigate, 360.0);
                 });
             // Album.
             row.col(())
@@ -685,10 +701,30 @@ fn track_row(
                 .justify(Justify::Center)
                 .overflow_x(Overflow::Hidden)
                 .child(|m| {
-                    m.text((), &r.album, 12.0)
-                        .color(t::TEXT_DIM)
-                        .max_width_px(t::SP_48);
+                    if r.album_id.is_empty() {
+                        m.text((), &r.album, 12.0)
+                            .color(t::TEXT_DIM)
+                            .max_width_px(t::SP_48);
+                    } else {
+                        let nav = on_navigate.clone();
+                        let id = r.album_id.clone();
+                        m.text((), &r.album, 12.0)
+                            .color(t::TEXT_DIM)
+                            .max_width_px(t::SP_48)
+                            .cursor(opal_gfx::CursorIcon::Pointer)
+                            .hover_color(t::TEXT)
+                            .on_click(move |ctx| nav(ctx, MainNav::Album { id: id.clone() }));
+                    }
                 });
+            // Heart — opens the like picker targeted at this row.
+            crate::widgets::track_row::like_heart(
+                row,
+                icons,
+                accent,
+                r.to_track(),
+                r.in_library,
+                on_like.clone(),
+            );
             // Duration.
             row.row(()).w_px(t::SP_12).justify(Justify::End).child(|c| {
                 c.text((), &r.duration, 12.0).color(t::TEXT_DIM);
@@ -704,11 +740,23 @@ pub(crate) fn artist_line(
     s: &mut Scene,
     artists: &[crate::api::TrackArtist],
     fallback: &str,
+    fallback_id: &str,
     on_navigate: &NavFn,
     max_w: f32,
 ) {
     if artists.is_empty() {
-        s.text((), fallback, 12.0).color(t::TEXT_DIM).max_width_px(max_w);
+        if fallback_id.is_empty() {
+            s.text((), fallback, 12.0).color(t::TEXT_DIM).max_width_px(max_w);
+        } else {
+            let nav = on_navigate.clone();
+            let id = fallback_id.to_string();
+            s.text((), fallback, 12.0)
+                .color(t::TEXT_DIM)
+                .max_width_px(max_w)
+                .cursor(opal_gfx::CursorIcon::Pointer)
+                .hover_color(t::TEXT)
+                .on_click(move |ctx| nav(ctx, MainNav::Artist { id: id.clone() }));
+        }
         return;
     }
     s.row(())

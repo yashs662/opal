@@ -59,7 +59,7 @@ pub struct OpenPlaylist {
     pub complete: bool,
 }
 
-/// The artist page open in the centre pane: profile + popular + liked +
+/// The artist page open in the centre pane: profile + popular + library +
 /// discography.
 pub struct OpenArtist {
     pub name: String,
@@ -67,9 +67,12 @@ pub struct OpenArtist {
     pub followers: u64,
     pub top_tracks: Vec<PlaylistTrack>,
     pub albums: Vec<AlbumRef>,
-    /// The user's liked songs by this artist (from the cached Liked
-    /// Songs collection) — the page's "Liked songs" section.
-    pub liked_tracks: Vec<PlaylistTrack>,
+    /// The user's saved songs by this artist across the whole library —
+    /// Liked Songs + every membership-indexed playlist — each with the
+    /// names of the sources containing it ("Liked Songs", "Chill"). The
+    /// page's "In your library" section (capped there; the full list
+    /// opens as a synthetic playlist page).
+    pub library_tracks: Vec<(PlaylistTrack, Vec<String>)>,
     /// Profile/discography not yet arrived.
     pub loading: bool,
 }
@@ -162,7 +165,14 @@ impl LibraryModel {
     /// handle repaints just that thumb), but the **fetch is not dispatched
     /// here** — the cover downloads lazily when the row scrolls into view,
     /// so opening a 989-track playlist doesn't kick off 989 downloads.
-    pub fn build_rows(&self, art: &mut ArtModel, buf: &RowBuf, tracks: &[PlaylistTrack]) {
+    pub fn build_rows(
+        &self,
+        art: &mut ArtModel,
+        buf: &RowBuf,
+        tracks: &[PlaylistTrack],
+        liked_page: bool,
+        saved_index: &std::collections::HashMap<String, Vec<String>>,
+    ) {
         let mut out = buf.borrow_mut();
         out.reserve(tracks.len());
         for t in tracks {
@@ -170,11 +180,13 @@ impl LibraryModel {
                 .album_image_url
                 .as_ref()
                 .map(|u| art.or_signal(album_art::cache_key(u)));
+            let in_library = liked_page || saved_index.contains_key(&t.uri);
             out.push(PlaylistRow {
                 title: t.name.clone(),
                 artist: t.artist.clone(),
                 album: t.album.clone(),
                 duration: playlist::fmt_duration(t.duration_ms),
+                duration_ms: t.duration_ms,
                 uri: t.uri.clone(),
                 art: cover,
                 cover_url: t.album_image_url.clone(),
@@ -182,6 +194,7 @@ impl LibraryModel {
                 album_id: t.album_id.clone(),
                 artist_id: t.artist_id.clone(),
                 playable: t.playable,
+                in_library,
             });
         }
     }
@@ -215,9 +228,9 @@ impl LibraryModel {
         liked: bool,
         id: &str,
         track: &PlaylistTrack,
+        saved_index: &std::collections::HashMap<String, Vec<String>>,
     ) -> bool {
         // Extract the shared row buffer (an `Rc` clone) under the
-        // `open_playlist` borrow, then drop it so `build_rows` can run.
         let rows = {
             let Some(open) = self.open_playlist.as_mut() else {
                 return false;
@@ -230,10 +243,9 @@ impl LibraryModel {
             open.total += 1;
             open.rows.clone()
         };
-        self.build_rows(art, &rows, std::slice::from_ref(track));
+        self.build_rows(art, &rows, std::slice::from_ref(track), liked, saved_index);
         if liked {
             // Liked Songs lists most-recent first — move the just-appended
-            // row to the front (rotate_right(1) sends the last to index 0).
             rows.borrow_mut().rotate_right(1);
         }
         self.rows_appended = true;
@@ -266,6 +278,29 @@ impl LibraryModel {
     /// hit populates the row buffer fully (instant). Otherwise a shell is
     /// built from the sidebar-known name/cover (header shows immediately)
     /// and a streaming fetch is dispatched.
+    /// Open a synthetic, fully-local playlist page (e.g. "artist X in
+    /// your library") — the whole playlist pipeline (view, scroll,
+    /// playback) with no fetch and no cache; complete from birth. The
+    /// caller routes to `MainNav::Playlist` with its own synthetic id
+    /// (which scopes the page's scroll identity); no context uri ⇒ rows
+    /// play via the uris-window fallback.
+    pub fn open_synthetic(&mut self, art: &mut ArtModel, name: String, tracks: Vec<PlaylistTrack>) {
+        let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
+        self.build_rows(art, &buf, &tracks, true, &std::collections::HashMap::new());
+        self.open_artist = None;
+        self.open_playlist = Some(OpenPlaylist {
+            liked: false,
+            name,
+            owner: String::new(),
+            image_url: None,
+            context_uri: None,
+            total: tracks.len() as u32,
+            rows: buf,
+            loading: false,
+            complete: true,
+        });
+    }
+
     pub fn open_for(
         &mut self,
         art: &mut ArtModel,
@@ -273,10 +308,11 @@ impl LibraryModel {
         token: Option<String>,
         id: &str,
         liked: bool,
+        saved_index: &std::collections::HashMap<String, Vec<String>>,
     ) {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-            self.build_rows(art, &buf, &detail.tracks);
+            self.build_rows(art, &buf, &detail.tracks, liked, saved_index);
             self.open_playlist = Some(OpenPlaylist {
                 liked,
                 name: detail.name,
@@ -327,10 +363,17 @@ impl LibraryModel {
     /// have a `context_uri` + a track list); a fresh cache hit populates the
     /// buffer instantly, otherwise a blank shell shows while the single-shot
     /// album fetch lands. Mirrors [`Self::open_for`].
-    pub fn open_album(&mut self, art: &mut ArtModel, worker: &Worker, token: Option<String>, id: &str) {
+    pub fn open_album(
+        &mut self,
+        art: &mut ArtModel,
+        worker: &Worker,
+        token: Option<String>,
+        id: &str,
+        saved_index: &std::collections::HashMap<String, Vec<String>>,
+    ) {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-            self.build_rows(art, &buf, &detail.tracks);
+            self.build_rows(art, &buf, &detail.tracks, false, saved_index);
             self.open_playlist = Some(OpenPlaylist {
                 liked: false,
                 name: detail.name,
@@ -368,7 +411,7 @@ impl LibraryModel {
             followers: 0,
             top_tracks: Vec::new(),
             albums: Vec::new(),
-            liked_tracks: Vec::new(),
+            library_tracks: Vec::new(),
             loading: true,
         });
         if self.is_inflight(id) {

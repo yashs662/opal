@@ -65,6 +65,11 @@ pub struct MainPane<'a> {
     pub detail_collapse: &'a Signal<f32>,
     pub on_play: PlayFn,
     pub on_navigate: NavFn,
+    /// Shared row affordances (context menu / like heart / artist spans)
+    /// for the flat track lists (artist page, queue).
+    pub row_actions: crate::widgets::track_row::TrackRowActions,
+    /// Open the full "in your library by this artist" synthetic page.
+    pub on_show_all_library: Rc<dyn Fn()>,
 }
 
 impl Component for MainPane<'_> {
@@ -117,6 +122,8 @@ impl Component for MainPane<'_> {
                                     &format!("artist_scroll:{id}"),
                                     self.on_play.clone(),
                                     self.on_navigate.clone(),
+                                    &self.row_actions,
+                                    self.on_show_all_library.clone(),
                                 );
                             }
                         }
@@ -143,6 +150,8 @@ impl Component for MainPane<'_> {
                                 self.on_navigate.clone(),
                                 self.on_skip.clone(),
                                 self.on_context_menu.clone(),
+                                self.row_actions.on_like.clone(),
+                                self.row_actions.accent.clone(),
                             );
                         }
                     });
@@ -233,6 +242,7 @@ impl MainPane<'_> {
                                 uri: format!("spotify:track:{}", t.id),
                                 album_id: t.album_id.clone(),
                                 artist_id: String::new(),
+                                track: None,
                             }),
                         )
                     },
@@ -293,6 +303,7 @@ impl MainPane<'_> {
                                 uri: format!("spotify:track:{}", t.id),
                                 album_id: t.album_id.clone(),
                                 artist_id: String::new(),
+                                track: None,
                             }),
                         )
                     },

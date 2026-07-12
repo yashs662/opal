@@ -15,6 +15,11 @@ pub struct MenuTarget {
     pub album_id: String,
     /// First-artist id — "Go to artist" (empty hides the item).
     pub artist_id: String,
+    /// The full row, when the surface has it — enables "Add to
+    /// playlist…" (the like picker needs title/cover/duration to
+    /// live-patch open pages). `None` hides that item. Boxed so the
+    /// target (which rides `Msg` by value) stays pointer-sized.
+    pub track: Option<Box<crate::api::PlaylistTrack>>,
 }
 
 pub struct MenuModel {

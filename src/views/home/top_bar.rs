@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use opal_gfx::{Align, Len, Overlay, Scene, WindowAction};
+use opal_gfx::{Align, Computed, Len, Overlay, Scene, Signal, WindowAction};
 
 use crate::widgets::chrome::chrome_btn;
 use crate::widgets::component::Component;
@@ -16,6 +16,12 @@ pub struct TopBar<'a> {
     pub settings: &'a Overlay,
     /// Measure cache usage + rebuild when the modal opens.
     pub on_settings_open: Rc<dyn Fn()>,
+    /// History arrows: whether each direction has anywhere to go (the
+    /// glyphs dim to inert when not) + the step emitters.
+    pub can_back: &'a Signal<bool>,
+    pub can_forward: &'a Signal<bool>,
+    pub on_back: Rc<dyn Fn()>,
+    pub on_forward: Rc<dyn Fn()>,
     pub icons: &'a Rc<IconSet>,
 }
 
@@ -32,8 +38,20 @@ impl Component for TopBar<'_> {
             .window_action(WindowAction::DragMove)
             .child(|t_row| {
                 topbar_icon_btn(t_row, icons, Icon::Menu);
-                topbar_icon_btn(t_row, icons, Icon::ChevronLeft);
-                topbar_icon_btn(t_row, icons, Icon::ChevronRight);
+                nav_arrow(
+                    t_row,
+                    icons,
+                    Icon::ChevronLeft,
+                    self.can_back,
+                    self.on_back.clone(),
+                );
+                nav_arrow(
+                    t_row,
+                    icons,
+                    Icon::ChevronRight,
+                    self.can_forward,
+                    self.on_forward.clone(),
+                );
 
                 t_row
                     .row(())
@@ -98,6 +116,25 @@ fn topbar_icon_btn_click(
         .on_click(on_click)
         .child(|c| {
             icons.render(c, icon, t::ICON_MD, t::TEXT);
+        });
+}
+
+/// A history arrow — the glyph dims to inert when its direction is
+/// empty; clicks always emit (the handler no-ops on empty history).
+fn nav_arrow(s: &mut Scene, icons: &IconSet, icon: Icon, can: &Signal<bool>, go: Rc<dyn Fn()>) {
+    let tint = Computed::new((can.clone(),), |(c,)| {
+        if c { t::TEXT } else { [1.0, 1.0, 1.0, 0.25] }
+    });
+    s.row(())
+        .w_px(t::TOPBAR_BTN)
+        .h_px(t::TOPBAR_BTN)
+        .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)
+        .hover_color(t::PANEL_HI)
+        .radius(t::R_FULL)
+        .center()
+        .on_click(move |_| go())
+        .child(|c| {
+            icons.render(c, icon, t::ICON_MD, tint.clone());
         });
 }
 

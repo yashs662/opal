@@ -11,7 +11,6 @@ use crate::api::{self, PlayTarget, track_id_from_uri};
 use crate::app::AppState;
 use crate::app::cx::Cx;
 use crate::app::msg::{Msg, MsgQueue};
-use crate::model::MembershipTarget;
 use crate::views::View;
 use crate::views::home::{PlayerAction, navigate, target_track};
 use crate::worker::{PlaybackCmd, Worker};
@@ -33,6 +32,8 @@ pub fn drain(state: &mut AppState, worker: &Worker, msgs: &MsgQueue, cx: &mut Cx
 pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
     match msg {
         Msg::Navigate(nav) => navigate(state, cx, worker, nav),
+        Msg::NavBack => crate::views::home::navigate_back(state, cx, worker),
+        Msg::NavForward => crate::views::home::navigate_forward(state, cx, worker),
 
         Msg::Transport(action) => {
             // Ignore transport until the Connect session is ready — on cold
@@ -134,38 +135,90 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         }
 
         Msg::LikeOpen => {
-            // Point the picker at the current track (uri + bare id for the
-            // Liked-Songs row + header), then rebuild so the popup mounts.
-            if let Some(target) = state.player_ui.with_snapshot(|p| {
+            // Point the picker at the current track, seeding its checkbox
+            // state from the bar heart's already-resolved membership so the
+            // popup is correct on first paint.
+            if let Some(track) = state.player_ui.with_snapshot(|p| {
                 let id = track_id_from_uri(&p.track_id).unwrap_or_default().to_string();
-                MembershipTarget {
-                    uri: p.track_id.clone(),
+                api::PlaylistTrack {
                     id,
+                    uri: p.track_id.clone(),
                     name: p.name.clone(),
                     artist: p.artist.clone(),
+                    album: String::new(),
+                    album_image_url: p.album_image_url.clone(),
+                    duration_ms: p.duration_ms,
+                    artists: p.artists.clone(),
+                    album_id: String::new(),
+                    artist_id: p.artist_id.clone(),
+                    playable: true,
                 }
             }) {
-                state.membership.set_target(target);
+                let seed = (
+                    state.membership.current.clone(),
+                    state.player_ui.liked.get(),
+                );
+                state.membership.set_target(track, Some(seed));
+            }
+            cx.rebuild();
+        }
+
+        Msg::LikeOpenFor(track) => {
+            // Row hearts / the context menu's "Add to playlist…": target an
+            // arbitrary track. Membership + liked resolve async (instant
+            // when the worker index is warm); the rows grey until then.
+            // The overlay opens here (not at the emitter) so every surface
+            // gets identical behavior from the one message.
+            let uri = track.uri.clone();
+            let id = track.id.clone();
+            state.membership.set_target(*track, None);
+            state.membership.overlay.open(cx.tl, cx.now);
+            worker.query_membership(uri);
+            if !id.is_empty()
+                && let Some(token) = state.auth.token()
+            {
+                worker.check_saved(token, id);
             }
             cx.rebuild();
         }
 
         Msg::LikeTogglePlaylist { playlist_id, add } => {
             let Some(token) = state.auth.token() else { return };
-            let uri = state.membership.target.uri.clone();
+            let uri = state.membership.target.uri().to_string();
             if uri.is_empty() {
                 return;
             }
-            // Optimistic flip (heart + checkbox) — the worker confirms, and
-            // rolls back via MembershipEditFailed on error.
-            state
-                .membership
-                .toggle_local(&playlist_id, add, state.player_ui.liked.get());
+            // Optimistic flip (checkbox) — the worker confirms, and rolls
+            // back via MembershipEditFailed on error. The bar heart follows
+            // only when the target IS the playing track.
+            state.membership.toggle_target_local(&playlist_id, add);
+            if state.player_ui.current_track_uri().as_deref() == Some(uri.as_str()) {
+                state
+                    .membership
+                    .toggle_current_local(&playlist_id, add, state.player_ui.liked.get());
+            }
+            let entry = state.membership.index.entry(uri.clone()).or_default();
+            if add {
+                if !entry.contains(&playlist_id) {
+                    entry.push(playlist_id.clone());
+                }
+            } else {
+                entry.retain(|p| p != &playlist_id);
+                if entry.is_empty() {
+                    state.membership.index.remove(&uri);
+                }
+            }
             // Live-patch the open page if it's this playlist, and drop its
             // in-memory cache so a re-open also reflects the edit.
             if add {
                 if let Some(track) = target_track(state) {
-                    state.library.open_add_track(&mut state.art, false, &playlist_id, &track);
+                    state.library.open_add_track(
+                        &mut state.art,
+                        false,
+                        &playlist_id,
+                        &track,
+                        &state.membership.index,
+                    );
                 }
             } else {
                 state.library.open_remove_track(false, &playlist_id, &uri);
@@ -177,20 +230,30 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
 
         Msg::LikeToggleLiked(add) => {
             let Some(token) = state.auth.token() else { return };
-            let target_uri = state.membership.target.uri.clone();
-            let id = state.membership.target.id.clone();
+            let target_uri = state.membership.target.uri().to_string();
+            let id = state.membership.target.id().to_string();
             if id.is_empty() {
                 return;
             }
             // Optimistic flip; the worker's SavedState echo reconciles.
-            state.player_ui.liked.set(add);
-            state.membership.rebuild_hint(add);
+            // The playing track's heart follows only when it IS the target.
+            state.membership.target_liked = add;
+            if state.player_ui.current_track_uri().as_deref() == Some(target_uri.as_str()) {
+                state.player_ui.liked.set(add);
+                state.membership.rebuild_hint(add);
+            }
             // Live-patch the open Liked Songs page + drop its in-memory cache.
             if add {
                 if let Some(track) = target_track(state) {
                     state
                         .library
-                        .open_add_track(&mut state.art, true, api::LIKED_SONGS_ID, &track);
+                        .open_add_track(
+                            &mut state.art,
+                            true,
+                            api::LIKED_SONGS_ID,
+                            &track,
+                            &state.membership.index,
+                        );
                 }
             } else {
                 state
@@ -199,6 +262,35 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             }
             state.library.invalidate_cached(api::LIKED_SONGS_ID);
             worker.set_saved(token, id, add);
+            cx.rebuild();
+        }
+
+        Msg::OpenArtistLibrary => {
+            // Synthetic playlist page from the open artist's aggregated
+            // library rows — reuses the whole playlist pipeline (view,
+            // scroll, playback) with no fetch.
+            let Some((artist, rows)) = state.library.open_artist.as_ref().map(|a| {
+                (
+                    a.name.clone(),
+                    a.library_tracks
+                        .iter()
+                        .map(|(t, _)| t.clone())
+                        .collect::<Vec<_>>(),
+                )
+            }) else {
+                return;
+            };
+            if rows.is_empty() {
+                return;
+            }
+            let id = format!("__library__{artist}");
+            let name = format!("{artist} in your library");
+            state.library.open_synthetic(&mut state.art, name, rows);
+            state.router.go(
+                crate::views::MainNav::Playlist { id, liked: false },
+                cx.tl,
+                cx.now,
+            );
             cx.rebuild();
         }
 

@@ -414,9 +414,12 @@ impl NowPlaying<'_> {
                     });
                 if let Some(bio) = &self.player.np_bio {
                     txt.col(()).w(Len::Fill).pad_xy(t::SP_2, t::SP_0).child(|b| {
+                        // Fill-width + wrap → the paragraph flows to the
+                        // pane's live width and re-wraps on resize (the pane
+                        // width tracks window height via the 9:16 aspect).
                         b.text((), clamp_bio(bio), 12.0)
                             .color(t::TEXT_DIM)
-                            .max_width_px(CARD_TEXT_MAX)
+                            .w(Len::Fill)
                             .wrap();
                     });
                 }

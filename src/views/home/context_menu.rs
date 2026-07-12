@@ -19,13 +19,15 @@ use crate::widgets::tokens as t;
 const MENU_W: f32 = 200.0;
 
 /// Render the context menu if open. `on_add_queue(uri)` enqueues the
-/// track; `on_navigate` opens album/artist; `on_close` dismisses (both
-/// the scrim and every action close it).
+/// track; `on_navigate` opens album/artist; `on_add_playlist` opens the
+/// like picker targeted at the row (shown only when the surface supplied
+/// the full track); `on_close` dismisses (the scrim and every action).
 pub fn view(
     s: &mut Scene,
     menu: &MenuModel,
     on_add_queue: Rc<dyn Fn(String)>,
     on_navigate: NavFn,
+    on_add_playlist: crate::views::home::LikeForFn,
     on_close: Rc<dyn Fn()>,
 ) {
     if !menu.open {
@@ -82,6 +84,15 @@ pub fn view(
                 let close = on_close.clone();
                 item(m, "Go to artist", move |ctx| {
                     nav(ctx, MainNav::Artist { id: id.clone() });
+                    close();
+                });
+            }
+            // Add to playlist… (the like picker, targeted at this row).
+            if let Some(track) = target.track.clone() {
+                let open = on_add_playlist.clone();
+                let close = on_close.clone();
+                item(m, "Add to playlist\u{2026}", move |ctx| {
+                    open(ctx, (*track).clone());
                     close();
                 });
             }

@@ -46,6 +46,10 @@ pub type PlayFn = Rc<dyn Fn(PlayTarget)>;
 /// cursor position + display scale.
 pub type CtxMenuFn = Rc<dyn Fn(&mut EventCtx, crate::model::MenuTarget)>;
 
+/// Open the like picker targeted at an arbitrary track — row hearts +
+/// the context menu's "Add to playlist…" share it.
+pub type LikeForFn = Rc<dyn Fn(&mut EventCtx, crate::api::PlaylistTrack)>;
+
 /// Wire the right-click context menu (Add to queue / Go to album / artist)
 /// onto a row or tile builder. The single source of truth for the gesture —
 /// every track list and tile (playlist, queue, home feed, show-all, …) calls
@@ -111,6 +115,7 @@ struct Layout<'a> {
     pub menu: &'a crate::model::MenuModel,
     pub on_menu_add_queue: Rc<dyn Fn(String)>,
     pub on_menu_navigate: NavFn,
+    pub on_menu_add_playlist: LikeForFn,
     pub on_menu_close: Rc<dyn Fn()>,
 }
 
@@ -191,7 +196,7 @@ fn render(s: &mut Scene, v: &Layout) {
         root.row(())
             .w(Len::Fill)
             .h(Len::Fill)
-            .pad(t::SP_2)
+            .pad_ltrb(t::SP_2, t::SP_0, t::SP_2, t::SP_2)
             .gap(t::SP_0)
             .child(|b| {
                 v.sidebar.view(b);
@@ -224,6 +229,7 @@ fn render(s: &mut Scene, v: &Layout) {
             v.menu,
             v.on_menu_add_queue.clone(),
             v.on_menu_navigate.clone(),
+            v.on_menu_add_playlist.clone(),
             v.on_menu_close.clone(),
         );
     });
@@ -257,6 +263,14 @@ pub struct HomeView {
     on_add_queue: Rc<dyn Fn(String)>,
     on_menu_close: Rc<dyn Fn()>,
     on_np_toggle: Rc<dyn Fn()>,
+    /// Open the like picker targeted at an arbitrary track (row hearts +
+    /// the context menu's "Add to playlist…").
+    on_like_for: LikeForFn,
+    /// Open the full "in your library by this artist" synthetic page.
+    on_show_all_library: Rc<dyn Fn()>,
+    /// Top-bar history arrows.
+    on_nav_back: Rc<dyn Fn()>,
+    on_nav_forward: Rc<dyn Fn()>,
 }
 
 impl HomeView {
@@ -340,6 +354,22 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::NowPlayingToggle))
         };
+        let on_like_for: LikeForFn = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |_ctx, track| dispatch.send(Msg::LikeOpenFor(Box::new(track))))
+        };
+        let on_show_all_library: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::OpenArtistLibrary))
+        };
+        let on_nav_back: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::NavBack))
+        };
+        let on_nav_forward: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::NavForward))
+        };
         let on_clear_cache: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ClearCache))
@@ -392,6 +422,10 @@ impl HomeView {
             on_add_queue,
             on_menu_close,
             on_np_toggle,
+            on_like_for,
+            on_show_all_library,
+            on_nav_back,
+            on_nav_forward,
         }
     }
 
@@ -431,6 +465,7 @@ impl HomeView {
                         request_cover: self.request_cover.clone(),
                         pulse: state.library.skeleton_pulse.clone(),
                         on_context_menu: self.on_context_menu.clone(),
+                        on_like: self.on_like_for.clone(),
                     }
                 })
             }
@@ -465,36 +500,42 @@ impl HomeView {
                         }
                     })
                     .collect();
-                let track_rows = |tracks: &[crate::api::PlaylistTrack]| {
-                    tracks
-                        .iter()
-                        .map(|tk| {
-                            let cover = tk
-                                .album_image_url
-                                .as_ref()
-                                .and_then(|u| state.art.signal(&album_art::cache_key(u)));
-                            artist::ArtistTrack {
-                                title: tk.name.clone(),
-                                cover,
-                                duration: playlist::fmt_duration(tk.duration_ms),
-                                uri: tk.uri.clone(),
-                            }
-                        })
-                        .collect()
+                let row_of = |tk: &crate::api::PlaylistTrack,
+                              sources: Option<String>,
+                              in_library: bool| {
+                    let cover = tk
+                        .album_image_url
+                        .as_ref()
+                        .and_then(|u| state.art.signal(&album_art::cache_key(u)));
+                    artist::ArtistTrackRow {
+                        track: tk.clone(),
+                        cover,
+                        duration: playlist::fmt_duration(tk.duration_ms),
+                        sources,
+                        in_library,
+                    }
                 };
-                let liked_context = home_ref
-                    .profile
-                    .as_ref()
-                    .filter(|p| !p.id.is_empty())
-                    .map(|p| format!("spotify:user:{}:collection", p.id));
+                let library: Vec<artist::ArtistTrackRow> = a
+                    .library_tracks
+                    .iter()
+                    .map(|(tk, srcs)| row_of(tk, Some(srcs.join(" \u{2022} ")), true))
+                    .collect();
+                // Cross-mark popular rows the user already saved.
+                let popular = a
+                    .top_tracks
+                    .iter()
+                    .map(|tk| {
+                        let saved = a.library_tracks.iter().any(|(l, _)| l.uri == tk.uri);
+                        row_of(tk, None, saved)
+                    })
+                    .collect();
                 artist::ArtistViewData {
                     name: a.name.clone(),
                     image,
                     followers: a.followers,
                     loading: a.loading,
-                    popular: track_rows(&a.top_tracks),
-                    liked: track_rows(&a.liked_tracks),
-                    liked_context,
+                    popular,
+                    library,
                     albums,
                 }
             }),
@@ -540,6 +581,10 @@ impl HomeView {
         let top_bar = top_bar::TopBar {
             settings: &state.settings.overlay,
             on_settings_open: self.on_settings_open.clone(),
+            can_back: &state.router.can_back,
+            can_forward: &state.router.can_forward,
+            on_back: self.on_nav_back.clone(),
+            on_forward: self.on_nav_forward.clone(),
             icons,
         };
         let main_pane = main_pane::MainPane {
@@ -559,6 +604,14 @@ impl HomeView {
             detail_collapse: &state.router.detail_collapse,
             on_play: self.on_play.clone(),
             on_navigate: self.on_navigate.clone(),
+            row_actions: crate::widgets::track_row::TrackRowActions {
+                on_context_menu: self.on_context_menu.clone(),
+                on_like: self.on_like_for.clone(),
+                on_navigate: self.on_navigate.clone(),
+                icons: self.icons.clone(),
+                accent: state.backdrop.accent.clone(),
+            },
+            on_show_all_library: self.on_show_all_library.clone(),
         };
         let settings_panel = settings::SettingsPanel {
             settings: &state.settings,
@@ -582,7 +635,6 @@ impl HomeView {
         };
         let like_menu = like_menu::LikeMenu {
             membership: &state.membership,
-            liked: &state.player_ui.liked,
             accent: &state.backdrop.accent,
             icons,
             on_toggle_playlist: self.on_like_toggle_playlist.clone(),
@@ -606,41 +658,21 @@ impl HomeView {
             menu: &state.menu,
             on_menu_add_queue: self.on_add_queue.clone(),
             on_menu_navigate: self.on_navigate.clone(),
+            on_menu_add_playlist: self.on_like_for.clone(),
             on_menu_close: self.on_menu_close.clone(),
         };
         render(s, &layout);
     }
 }
 
-/// Build a track payload for the picker's current target, taking the cover
-/// and duration from the now-playing snapshot when it's still that track.
-/// Used to live-patch an open playlist / Liked Songs page when the user
-/// toggles membership, so the change shows without leaving the page.
+/// The picker's target as a full row payload — used to live-patch an
+/// open playlist / Liked Songs page when the user toggles membership, so
+/// the change shows without leaving the page. The target carries the
+/// whole [`crate::api::PlaylistTrack`] since any surface (bar heart, row
+/// hearts, context menu) can open the picker.
 pub(crate) fn target_track(state: &AppState) -> Option<crate::api::PlaylistTrack> {
-    let target = &state.membership.target;
-    if target.uri.is_empty() {
-        return None;
-    }
-    let (album_image_url, duration_ms) = state
-        .player_ui
-        .snapshot
-        .as_ref()
-        .filter(|p| p.track_id == target.uri)
-        .map(|p| (p.album_image_url.clone(), p.duration_ms))
-        .unwrap_or((None, 0));
-    Some(crate::api::PlaylistTrack {
-        id: target.id.clone(),
-        uri: target.uri.clone(),
-        name: target.name.clone(),
-        artist: target.artist.clone(),
-        album: String::new(),
-        album_image_url,
-        duration_ms,
-        artists: Vec::new(),
-        album_id: String::new(),
-        artist_id: String::new(),
-        playable: true,
-    })
+    let track = &state.membership.target.track;
+    (!track.uri.is_empty()).then(|| track.clone())
 }
 
 /// Assemble a [`show_all::ShowAllViewData`] for `section` from the loaded
@@ -680,7 +712,8 @@ fn build_show_all(
                         uri: format!("spotify:track:{}", t.id),
                         album_id: t.album_id.clone(),
                         artist_id: String::new(),
-                    }),
+                                track: None,
+                            }),
                 };
                 if groups.last().map(|g| g.header.as_deref()) == Some(Some(label.as_str())) {
                     groups.last_mut().unwrap().rows.push(row);
@@ -733,7 +766,8 @@ fn build_show_all(
                         uri: format!("spotify:track:{}", t.id),
                         album_id: t.album_id.clone(),
                         artist_id: String::new(),
-                    }),
+                                track: None,
+                            }),
                 })
                 .collect();
             ShowAllViewData {
@@ -767,19 +801,54 @@ fn build_show_all(
 
 /// Switch the centre pane to `nav`. Ensures the target playlist is loaded
 /// (TTL cache → fetch on miss/stale) via the library slice, flips the nav
-/// state + entrance transition via the router, and requests the one scene
-/// rebuild that swaps the pane content.
+/// state + entrance transition via the router (recording history for the
+/// top-bar arrows), and requests the one scene rebuild that swaps the
+/// pane content.
 pub(crate) fn navigate(state: &mut AppState, cx: &mut Cx, worker: &Worker, nav: MainNav) {
-    match &nav {
+    prepare_nav(state, worker, &nav);
+    state.router.go(nav, cx.tl, cx.now);
+    cx.rebuild();
+}
+
+/// Step the centre pane back/forward through the router history (the
+/// top-bar arrows) — the target page's fetches re-run like any nav.
+pub(crate) fn navigate_back(state: &mut AppState, cx: &mut Cx, worker: &Worker) {
+    if let Some(nav) = state.router.pop_back(cx.tl, cx.now) {
+        prepare_nav(state, worker, &nav);
+        cx.rebuild();
+    }
+}
+
+pub(crate) fn navigate_forward(state: &mut AppState, cx: &mut Cx, worker: &Worker) {
+    if let Some(nav) = state.router.pop_forward(cx.tl, cx.now) {
+        prepare_nav(state, worker, &nav);
+        cx.rebuild();
+    }
+}
+
+/// The per-destination side effects of a nav change (model swaps + fetch
+/// dispatches) — shared by direct navigation and history steps.
+fn prepare_nav(state: &mut AppState, worker: &Worker, nav: &MainNav) {
+    match nav {
         MainNav::Playlist { id, liked } => {
             state.library.open_artist = None;
+            // Ephemeral synthetic listings (the artist "in your library"
+            // page) are populated in-memory by their opener — nothing to
+            // fetch, and no cache to consult.
+            if id.starts_with("__library__") {
+                return;
+            }
             let token = state.auth.token();
-            state.library.open_for(&mut state.art, worker, token, id, *liked)
+            state
+                .library
+                .open_for(&mut state.art, worker, token, id, *liked, &state.membership.index)
         }
         MainNav::Album { id } => {
             state.library.open_artist = None;
             let token = state.auth.token();
-            state.library.open_album(&mut state.art, worker, token, id)
+            state
+                .library
+                .open_album(&mut state.art, worker, token, id, &state.membership.index)
         }
         MainNav::Artist { id } => {
             state.library.open_playlist = None;
@@ -809,6 +878,4 @@ pub(crate) fn navigate(state: &mut AppState, cx: &mut Cx, worker: &Worker, nav: 
             }
         }
     }
-    state.router.go(nav, cx.tl, cx.now);
-    cx.rebuild();
 }

@@ -18,3 +18,4 @@ pub mod icon;
 pub mod splitter;
 pub mod thumb;
 pub mod tokens;
+pub mod track_row;

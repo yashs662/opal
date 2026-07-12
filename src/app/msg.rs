@@ -63,6 +63,9 @@ pub enum Msg {
     /// Centre-pane navigation (feed ⇄ playlist / album / artist / queue /
     /// show-all).
     Navigate(MainNav),
+    /// Step back / forward through the nav history (top-bar arrows).
+    NavBack,
+    NavForward,
     /// A transport control from the player bar (play/pause, next, shuffle, …).
     Transport(PlayerAction),
     /// Start playback of a resolved context (tile / row click).
@@ -79,10 +82,16 @@ pub enum Msg {
     DevicesOpen,
     /// Like picker opened → point it at the current track.
     LikeOpen,
-    /// Add/remove the current track to/from a playlist (`add`).
+    /// Like picker opened for an arbitrary track (row hearts, the context
+    /// menu's "Add to playlist…") — membership + liked resolve async.
+    LikeOpenFor(Box<crate::api::PlaylistTrack>),
+    /// Add/remove the picker's target track to/from a playlist (`add`).
     LikeTogglePlaylist { playlist_id: String, add: bool },
-    /// Like/unlike the current track (Liked Songs).
+    /// Like/unlike the picker's target track (Liked Songs).
     LikeToggleLiked(bool),
+    /// Open the full "in your library by this artist" list — a synthetic
+    /// playlist page built from the open artist page's aggregated rows.
+    OpenArtistLibrary,
     /// Transfer playback to another Connect device.
     Transfer(String),
     /// Change the streaming-quality preference.

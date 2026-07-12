@@ -69,27 +69,17 @@ pub fn view(
     on_play: PlayFn,
     on_context_menu: CtxMenuFn,
 ) {
-    let nav_back = on_navigate.clone();
     s.col(scroll_node)
         .w(Len::Fill)
         .h(Len::Fill)
-        .pad_xy(t::SP_6, t::SP_2)
+        // Bottom inset matches the sides (see the queue scroller); back
+        // navigation lives in the top-bar history arrows.
+        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
         .gap(t::SP_3)
         .scroll_y()
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
-            // Top bar: back chevron.
-            c.row(())
-                .w_px(t::TOPBAR_BTN)
-                .h_px(t::TOPBAR_BTN)
-                .rgba(0.0, 0.0, 0.0, 0.30)
-                .hover_color(t::PANEL_HI)
-                .radius(t::R_FULL)
-                .center()
-                .on_click(move |ctx| nav_back(ctx, MainNav::Home))
-                .child(|b| icons.render(b, Icon::ChevronLeft, t::ICON_MD, t::TEXT));
-
             c.text((), &data.title, 28.0)
                 .color(t::TEXT)
                 .max_width_px(520.0);

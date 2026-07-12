@@ -41,7 +41,7 @@ pub use backdrop::BackdropModel;
 pub use canvas::CanvasModel;
 pub use devices::DevicesModel;
 pub use library::LibraryModel;
-pub use membership::{MembershipModel, MembershipTarget};
+pub use membership::MembershipModel;
 pub use menu::{MenuModel, MenuTarget};
 pub use player::PlayerModel;
 pub use prefs::PrefsModel;

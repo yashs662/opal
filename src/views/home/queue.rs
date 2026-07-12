@@ -13,9 +13,8 @@ use opal_gfx::{Align, CursorIcon, Justify, Len, Overflow, Scene, Signal};
 
 use crate::api::PlaylistTrack;
 use crate::model::ArtModel;
-use crate::views::MainNav;
 use crate::views::home::{CtxMenuFn, NavFn};
-use crate::widgets::icon::{Icon, IconSet};
+use crate::widgets::icon::IconSet;
 use crate::widgets::tokens as t;
 
 /// Full-width row height (matches the show-all rows).
@@ -35,8 +34,9 @@ pub fn view(
     on_navigate: NavFn,
     on_skip: Rc<dyn Fn(u32)>,
     on_context_menu: CtxMenuFn,
+    on_like: crate::views::home::LikeForFn,
+    accent: Signal<[f32; 4]>,
 ) {
-    let nav_back = on_navigate.clone();
     let nav_rows = on_navigate.clone();
     s.col("queue_scroll")
         .w(Len::Fill)
@@ -49,16 +49,7 @@ pub fn view(
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
-            // Top bar: back chevron + title.
-            c.row(())
-                .w_px(t::TOPBAR_BTN)
-                .h_px(t::TOPBAR_BTN)
-                .rgba(0.0, 0.0, 0.0, 0.30)
-                .hover_color(t::PANEL_HI)
-                .radius(t::R_FULL)
-                .center()
-                .on_click(move |ctx| nav_back(ctx, MainNav::Home))
-                .child(|b| icons.render(b, Icon::ChevronLeft, t::ICON_MD, t::TEXT));
+            // (Back = the top-bar history arrows.)
             c.text((), "Queue", 28.0).color(t::TEXT).max_width_px(520.0);
 
             match queue {
@@ -77,7 +68,17 @@ pub fn view(
                     let mut it = tracks.iter().enumerate();
                     if let Some((_, now)) = it.next() {
                         section_label(c, "Now playing");
-                        queue_row(c, now, art, None, &on_context_menu, &nav_rows);
+                        queue_row(
+                            c,
+                            icons,
+                            now,
+                            art,
+                            None,
+                            &on_context_menu,
+                            &nav_rows,
+                            &on_like,
+                            &accent,
+                        );
                     }
                     section_label(c, "Next up");
                     for (i, tr) in it {
@@ -87,11 +88,14 @@ pub fn view(
                         let n = i as u32;
                         queue_row(
                             c,
+                            icons,
                             tr,
                             art,
                             Some(Rc::new(move || on_skip(n))),
                             &on_context_menu,
                             &nav_rows,
+                            &on_like,
+                            &accent,
                         );
                     }
                 }
@@ -109,15 +113,20 @@ fn section_label(s: &mut Scene, label: &str) {
         });
 }
 
-/// One queue row: thumb + title/artist + duration. Up-next rows are
-/// clickable (`on_click` skips to them); all rows render at full opacity.
+/// One queue row: thumb + title/artist + heart + duration. Up-next rows
+/// are clickable (`on_click` skips to them); all rows render at full
+/// opacity.
+#[allow(clippy::too_many_arguments)]
 fn queue_row(
     s: &mut Scene,
+    icons: &Rc<IconSet>,
     tr: &PlaylistTrack,
     art: &ArtModel,
     on_click: Option<Rc<dyn Fn()>>,
     on_context_menu: &CtxMenuFn,
     on_navigate: &NavFn,
+    on_like: &crate::views::home::LikeForFn,
+    accent: &Signal<[f32; 4]>,
 ) {
     // Signals exist (created + dispatched in the reducer's `QueueLoaded`
     // arm — view builds stay pure reads); this just binds them.
@@ -137,7 +146,8 @@ fn queue_row(
             .hover_color(t::HOVER_LIFT_SUBTLE)
             .on_click(move |_| f());
     }
-    // Right-click → context menu (Add to queue / Go to album / artist).
+    // Right-click → the shared context menu, with the full row so "Add
+    // to playlist…" shows too.
     crate::views::home::attach_context_menu(
         &mut row,
         on_context_menu,
@@ -145,6 +155,7 @@ fn queue_row(
             uri: tr.uri.clone(),
             album_id: tr.album_id.clone(),
             artist_id: tr.artist_id.clone(),
+            track: Some(Box::new(tr.clone())),
         },
     );
     row.child(|r| {
@@ -177,14 +188,35 @@ fn queue_row(
                     m,
                     &tr.artists,
                     &tr.artist,
+                    &tr.artist_id,
                     on_navigate,
                     420.0,
                 );
             });
-        r.row(()).push_end().w_px(t::SP_12).justify(Justify::End).child(|d| {
-            d.text((), crate::views::home::playlist::fmt_duration(tr.duration_ms), 12.0)
-                .color(t::TEXT_DIM);
-        });
+        // Trailing group: heart (opens the like picker for this row) +
+        // duration — the shared affordance every flat list carries.
+        let heart_track = tr.clone();
+        let duration = crate::views::home::playlist::fmt_duration(tr.duration_ms);
+        let icons = icons.clone();
+        let accent = accent.clone();
+        let on_like = on_like.clone();
+        r.row(())
+            .push_end()
+            .gap(t::SP_3)
+            .align(Align::Center)
+            .child(move |end| {
+                crate::widgets::track_row::like_heart(
+                    end,
+                    &icons,
+                    &accent,
+                    heart_track,
+                    false,
+                    on_like,
+                );
+                end.row(()).w_px(t::SP_10).justify(Justify::End).child(|d| {
+                    d.text((), duration, 12.0).color(t::TEXT_DIM);
+                });
+            });
     });
 }
 

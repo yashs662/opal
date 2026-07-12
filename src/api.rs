@@ -128,7 +128,7 @@ pub struct TrackArtist {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlaylistTrack {
     pub id: String,
     pub uri: String,
@@ -755,7 +755,7 @@ pub async fn fetch_tracks_page(token: &str, url: &str) -> Result<TracksPage, Aut
 pub fn playlist_tracks_url(playlist_id: &str, offset: u32, limit: u32) -> String {
     // 2026 migration: contents moved to `/items` (the old `/tracks` now 403s
     // for Dev-Mode apps) and each row's wrapper is `item` (not `track`).
-    let fields = "total,items(item(id,uri,name,duration_ms,is_local,is_playable,artists(name),album(name,images)))";
+    let fields = "total,items(item(id,uri,name,duration_ms,is_local,is_playable,artists(id,name),album(id,name,images)))";
     format!(
         "{API}/playlists/{playlist_id}/items?market=from_token&limit={limit}&offset={offset}&fields={fields}"
     )
