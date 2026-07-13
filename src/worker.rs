@@ -2421,21 +2421,40 @@ fn spawn_connect_session(
             crate::local_player::run(
                 player_events,
                 move |player| {
-                    // Opal is emitting playback state ⇒ it is now the
-                    // active Connect device (a transfer-to-self the cluster
-                    // can't report). Announce it once per activation so the
-                    // devices popup + chrome leave the previous remote's
-                    // "active" highlight, updating the shared dedup so a later
-                    // switch back to a remote still fires.
-                    if player.is_some() {
+                    let playing = player.as_ref().map(|p| p.is_playing).unwrap_or(false);
+                    let mut claim_self = false;
+                    {
                         let mut la = last_active_local.lock().unwrap();
-                        if la.as_deref() != Some(self_id_for_local.as_str()) {
-                            *la = Some(self_id_for_local.clone());
-                            resp_for_local.send(WorkerResponse::ActiveDeviceChanged {
-                                is_self: true,
-                                device_id: self_id_for_local.clone(),
-                            });
+                        let remote_active = la
+                            .as_deref()
+                            .map(|a| !a.is_empty() && a != self_id_for_local)
+                            .unwrap_or(false);
+                        // Playback moved to a REMOTE device: our Spirc winds
+                        // down and emits a stray pause/stop. The cluster is
+                        // authoritative for the remote, so ignore these local
+                        // events — otherwise they flip the UI to "paused" (and
+                        // re-claim Opal as active) over the remote's real
+                        // playing state. A local *playing* event still means
+                        // Opal is genuinely active (transfer-to-self, which the
+                        // dealer never echoes), so it's always honoured.
+                        if remote_active && !playing {
+                            return;
                         }
+                        // Opal is emitting live playback ⇒ it is the active
+                        // Connect device. Announce once per activation so the
+                        // chrome leaves the previous remote's highlight,
+                        // updating the shared dedup so a later switch back to a
+                        // remote still fires.
+                        if player.is_some() && la.as_deref() != Some(self_id_for_local.as_str()) {
+                            *la = Some(self_id_for_local.clone());
+                            claim_self = true;
+                        }
+                    }
+                    if claim_self {
+                        resp_for_local.send(WorkerResponse::ActiveDeviceChanged {
+                            is_self: true,
+                            device_id: self_id_for_local.clone(),
+                        });
                     }
                     resp_for_local.send(WorkerResponse::PlayerState { player });
                 },
