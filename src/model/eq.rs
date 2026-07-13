@@ -8,6 +8,7 @@
 //! and the shared surface (so the audio thread hears it), and marks the
 //! selection custom.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -35,9 +36,9 @@ fn builtin_presets() -> Vec<EqPreset> {
     };
     vec![
         p("Flat", [0.0; NUM_BANDS]),
-        // Spotify's "Small speakers": lift the lows, roll off the highs to
-        // compensate for tiny drivers.
-        p("Small speakers", [4.0, 4.0, 3.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0, -5.0]),
+        // "Small speakers": a gentle low lift rolling off to the highs —
+        // tuned by ear to match the official client's preset.
+        p("Small speakers", [3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, -2.0, -3.0]),
         p("Bass boost", [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         p("Treble boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.5, 4.0, 5.0, 6.0]),
         p("Vocal", [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0]),
@@ -62,6 +63,11 @@ pub struct EqModel {
     pub selected: Signal<i32>,
     /// Whether the presets dropdown is expanded (UI-only, not persisted).
     pub preset_open: Signal<bool>,
+    /// Index of the custom preset being renamed inline, or `-1` (UI-only).
+    pub rename_index: Signal<i32>,
+    /// In-progress rename text — the text field writes it live, the commit
+    /// reads it. Shared so the `on_change` closure can own a clone.
+    pub rename_buf: Rc<RefCell<String>>,
     /// Built-ins followed by the user's saved custom presets.
     presets: Vec<EqPreset>,
 }
@@ -86,8 +92,31 @@ impl EqModel {
             bands,
             selected,
             preset_open: Signal::new(false),
+            rename_index: Signal::new(-1),
+            rename_buf: Rc::new(RefCell::new(String::new())),
             presets,
         }
+    }
+
+    /// Begin renaming the custom preset at `index` — seeds the edit buffer
+    /// with its current name. No-op on a built-in.
+    pub fn start_rename(&self, index: usize) {
+        if self.presets.get(index).map(|p| p.custom) == Some(true) {
+            *self.rename_buf.borrow_mut() = self.presets[index].name.to_string();
+            self.rename_index.set(index as i32);
+        }
+    }
+
+    /// Commit the in-progress rename to the preset at `index` (ignores an
+    /// all-whitespace name) and leave rename mode.
+    pub fn commit_rename(&mut self, index: usize) {
+        let name = self.rename_buf.borrow().trim().to_string();
+        if !name.is_empty()
+            && self.presets.get(index).map(|p| p.custom) == Some(true)
+        {
+            self.presets[index].name = Rc::from(name.as_str());
+        }
+        self.rename_index.set(-1);
     }
 
 
@@ -158,6 +187,23 @@ impl EqModel {
         let idx = self.presets.len() - 1;
         self.selected.set(idx as i32);
         idx
+    }
+
+    /// Delete a **custom** preset by index (built-ins are undeletable — a
+    /// no-op). Keeps `selected` pointing at the same preset: if the deleted
+    /// one was selected the shape becomes "Custom" (-1); presets after it
+    /// shift down by one.
+    pub fn delete_custom(&mut self, index: usize) {
+        if self.presets.get(index).map(|p| p.custom) != Some(true) {
+            return;
+        }
+        self.presets.remove(index);
+        let sel = self.selected.get();
+        if sel == index as i32 {
+            self.selected.set(-1);
+        } else if sel > index as i32 {
+            self.selected.set(sel - 1);
+        }
     }
 
     /// Persist-ready snapshot from the current sliders.

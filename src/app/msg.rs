@@ -109,6 +109,12 @@ pub enum Msg {
     EqSaveCustom,
     /// Expand/collapse the EQ presets dropdown.
     EqTogglePresetOpen,
+    /// Delete the custom EQ preset at this index.
+    EqDeleteCustom(usize),
+    /// Begin inline-renaming the custom EQ preset at this index.
+    EqStartRename(usize),
+    /// Commit the inline rename of the custom EQ preset at this index.
+    EqCommitRename(usize),
     /// Skip forward `count` tracks (queue "play this next-N").
     Skip(u32),
     /// Open the track-row right-click menu at `pos` (logical px).

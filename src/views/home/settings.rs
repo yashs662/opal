@@ -10,7 +10,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use opal_gfx::{Align, Computed, Curve, Justify, Len, Overlay, Scene, Signal, TextBind};
+use opal_gfx::{Align, Computed, Curve, Justify, Len, Overlay, Scene, Signal, TextBind, animated};
 
 use crate::api::Profile;
 use crate::audio_eq::GAIN_DB_MAX;
@@ -101,6 +101,12 @@ pub struct SettingsPanel<'a> {
     pub on_eq_save: Rc<dyn Fn()>,
     /// Expand/collapse the presets dropdown.
     pub on_eq_toggle_preset: Rc<dyn Fn()>,
+    /// Delete the custom preset at an index.
+    pub on_eq_delete: Rc<dyn Fn(usize)>,
+    /// Begin inline-renaming the custom preset at an index.
+    pub on_eq_rename_start: Rc<dyn Fn(usize)>,
+    /// Commit the inline rename of the custom preset at an index.
+    pub on_eq_rename_commit: Rc<dyn Fn(usize)>,
 }
 
 impl Component for SettingsPanel<'_> {
@@ -128,7 +134,11 @@ impl Component for SettingsPanel<'_> {
                 .radius(t::R_XL)
                 .border(1.0, t::BORDER)
                 .layer()
-                .pad_ltrb(t::SP_6, t::SP_6, t::SP_6, t::SP_0)
+                // Right pad is trimmed (SP_6 → SP_2) so the scrolling body
+                // extends into a right gutter; the scrollbar rides that gutter
+                // instead of hugging the content. The header + body add their
+                // own right pad back so nothing visible actually shifts.
+                .pad_ltrb(t::SP_6, t::SP_6, t::SP_2, t::SP_4)
                 .gap(t::SP_4)
                 .child(|panel| {
                     // Pinned header.
@@ -140,7 +150,7 @@ impl Component for SettingsPanel<'_> {
                         .w(Len::Fill)
                         .h(Len::Fill)
                         .gap(t::SP_5)
-                        .pad_ltrb(t::SP_0, t::SP_1, t::SP_2, t::SP_6)
+                        .pad_ltrb(t::SP_0, t::SP_1, t::SP_6, t::SP_6)
                         .scroll_y()
                         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
                         .child(|body| {
@@ -174,10 +184,15 @@ impl Component for SettingsPanel<'_> {
                                 icons,
                                 &self.backdrop.accent,
                                 self.on_eq_toggle.clone(),
-                                self.on_eq_preset.clone(),
-                                self.on_eq_save.clone(),
                                 self.on_eq_commit.clone(),
-                                self.on_eq_toggle_preset.clone(),
+                                PresetActions {
+                                    apply: self.on_eq_preset.clone(),
+                                    save: self.on_eq_save.clone(),
+                                    toggle: self.on_eq_toggle_preset.clone(),
+                                    delete: self.on_eq_delete.clone(),
+                                    rename_start: self.on_eq_rename_start.clone(),
+                                    rename_commit: self.on_eq_rename_commit.clone(),
+                                },
                             );
                             divider(body);
                             cache_section(
@@ -200,26 +215,38 @@ fn divider(s: &mut Scene) {
     s.rect(()).w(Len::Fill).h_px(t::SP_PX).rgba(1.0, 1.0, 1.0, 0.06);
 }
 
+/// The preset-dropdown emitter bundle — clone-cheap.
+#[derive(Clone)]
+pub struct PresetActions {
+    pub apply: Rc<dyn Fn(usize)>,
+    pub save: Rc<dyn Fn()>,
+    pub toggle: Rc<dyn Fn()>,
+    pub delete: Rc<dyn Fn(usize)>,
+    pub rename_start: Rc<dyn Fn(usize)>,
+    pub rename_commit: Rc<dyn Fn(usize)>,
+}
+
 /// The 10-band equaliser, Spotify-style: an enable toggle, a presets
 /// dropdown, a filled response graph with a draggable handle per band
 /// (over a dB axis and frequency labels), and a Reset. The body dims when
 /// the EQ is off so it reads as inactive without disappearing.
-#[allow(clippy::too_many_arguments)]
 fn eq_section(
     s: &mut Scene,
     eq: &EqModel,
     icons: &Rc<IconSet>,
     accent: &Signal<[f32; 4]>,
     on_toggle: Rc<dyn Fn()>,
-    on_preset: Rc<dyn Fn(usize)>,
-    on_save: Rc<dyn Fn()>,
     on_commit: Rc<dyn Fn()>,
-    on_toggle_preset: Rc<dyn Fn()>,
+    presets: PresetActions,
 ) {
     let enabled = eq.enabled.clone();
     let selected = eq.selected.clone();
     let open = eq.preset_open.get();
-    let names: Vec<Rc<str>> = eq.presets().iter().map(|p| p.name.clone()).collect();
+    let rename_idx = eq.rename_index.get();
+    let rename_buf = eq.rename_buf.clone();
+    // (name, custom) per preset — the dropdown shows delete/rename on customs.
+    let entries: Vec<(Rc<str>, bool)> =
+        eq.presets().iter().map(|p| (p.name.clone(), p.custom)).collect();
     let bands = eq.bands.clone();
     let shared = eq.shared();
     let icons = icons.clone();
@@ -245,10 +272,10 @@ fn eq_section(
             .gap(t::SP_4)
             .opacity_bind(dim)
             .child(move |body| {
-                let reset = on_preset.clone();
+                let reset = presets.apply.clone();
                 preset_dropdown(
-                    body, &icons, accent, &selected, &names, open, on_preset, on_save,
-                    on_toggle_preset,
+                    body, &icons, accent, &selected, &entries, open, rename_idx, rename_buf,
+                    &presets,
                 );
                 eq_graph(body, &bands, shared, accent, on_commit);
                 // Reset to flat (preset 0), right-aligned like Spotify's.
@@ -274,23 +301,26 @@ fn eq_section(
 /// the active preset (reactive off `selected`) and, when `open`, expands
 /// an inline list of every preset plus "Save current…". Inline (accordion)
 /// rather than a floating popup so it needs no portal/scrim: the toggle
-/// rebuilds, and picking an item both applies and closes it.
+/// rebuilds, and picking an item both applies and closes it. Custom presets
+/// reveal rename (pen) + delete (trash) affordances on hover, and rename
+/// swaps the row for an inline text field.
 #[allow(clippy::too_many_arguments)]
 fn preset_dropdown(
     s: &mut Scene,
     icons: &Rc<IconSet>,
     accent: &Signal<[f32; 4]>,
     selected: &Signal<i32>,
-    names: &[Rc<str>],
+    entries: &[(Rc<str>, bool)],
     open: bool,
-    on_preset: Rc<dyn Fn(usize)>,
-    on_save: Rc<dyn Fn()>,
-    on_toggle: Rc<dyn Fn()>,
+    rename_idx: i32,
+    rename_buf: Rc<std::cell::RefCell<String>>,
+    actions: &PresetActions,
 ) {
-    let names = names.to_vec();
-    let label_names = names.clone();
+    let entries = entries.to_vec();
+    let label_names: Vec<Rc<str>> = entries.iter().map(|(n, _)| n.clone()).collect();
     let sel_now = selected.get();
     let icons = icons.clone();
+    let actions = actions.clone();
     s.row(())
         .w(Len::Fill)
         .align(Align::Start)
@@ -312,6 +342,7 @@ fn preset_dropdown(
                         .unwrap_or_else(|| "Custom".to_string())
                 });
                 let ic = icons.clone();
+                let toggle = actions.toggle.clone();
                 dd.row(())
                     .w(Len::Fill)
                     .h_px(t::SP_9)
@@ -321,7 +352,7 @@ fn preset_dropdown(
                     .rgba(t::PANEL_HI[0], t::PANEL_HI[1], t::PANEL_HI[2], 1.0)
                     .border(1.0, t::BORDER)
                     .hover_color(t::BTN_HOVER)
-                    .on_click(move |_| on_toggle())
+                    .on_click(move |_| toggle())
                     .child(move |b| {
                         b.text_bound((), label, t::TEXT_BASE).color(t::TEXT);
                         b.row(()).push_end().w_px(t::SP_5).center().child(|c| {
@@ -337,48 +368,192 @@ fn preset_dropdown(
                         .border(1.0, t::BORDER)
                         .pad_xy(t::SP_0, t::SP_1)
                         .child(move |list| {
-                            for (i, name) in names.iter().enumerate() {
-                                let is_sel = sel_now == i as i32;
-                                let on_preset = on_preset.clone();
-                                let name = name.to_string();
-                                let mut item = list.row(());
-                                item.w(Len::Fill)
-                                    .h_px(t::SP_8)
-                                    .pad_xy(t::SP_3, t::SP_0)
-                                    .align(Align::Center)
-                                    .hover_color(t::HOVER_LIFT_SUBTLE)
-                                    .on_click(move |_| on_preset(i));
-                                let text_col: opal_gfx::Bind<[f32; 4]> = if is_sel {
-                                    crate::widgets::color::accent_fg(accent).into()
+                            for (i, (name, custom)) in entries.iter().enumerate() {
+                                if rename_idx == i as i32 {
+                                    preset_rename_row(list, i, name, &icons, &rename_buf, &actions);
                                 } else {
-                                    t::TEXT.into()
-                                };
-                                // Selected row wears the accent so it stands
-                                // out (text uses the accent's contrast fg).
-                                if is_sel {
-                                    item.color(accent.clone());
+                                    preset_item_row(
+                                        list,
+                                        i,
+                                        name,
+                                        *custom,
+                                        sel_now == i as i32,
+                                        accent,
+                                        &icons,
+                                        &actions,
+                                    );
                                 }
-                                item.child(move |r| {
-                                    r.text((), &name, t::TEXT_SM).color(text_col);
-                                });
                             }
                             list.rect(())
                                 .w(Len::Fill)
                                 .h_px(t::SP_PX)
                                 .rgba(1.0, 1.0, 1.0, 0.08);
-                            list.row(())
-                                .w(Len::Fill)
-                                .h_px(t::SP_8)
-                                .pad_xy(t::SP_3, t::SP_0)
-                                .align(Align::Center)
-                                .hover_color(t::HOVER_LIFT_SUBTLE)
-                                .on_click(move |_| on_save())
-                                .child(|r| {
-                                    r.text((), "Save current\u{2026}", t::TEXT_SM).color(t::TEXT_DIM);
-                                });
+                            // "Save current" only makes sense when the shape
+                            // differs from every built-in — snapshotting a
+                            // built-in would just duplicate it. Disable it
+                            // (dim, no hover, no click) while the selection is
+                            // a built-in preset.
+                            let on_builtin = sel_now >= 0
+                                && entries
+                                    .get(sel_now as usize)
+                                    .map(|(_, custom)| !custom)
+                                    .unwrap_or(false);
+                            if on_builtin {
+                                list.row(())
+                                    .w(Len::Fill)
+                                    .h_px(t::SP_8)
+                                    .pad_xy(t::SP_3, t::SP_0)
+                                    .align(Align::Center)
+                                    .child(|r| {
+                                        r.text((), "Save current\u{2026}", t::TEXT_SM).color([
+                                            t::TEXT_DIM[0],
+                                            t::TEXT_DIM[1],
+                                            t::TEXT_DIM[2],
+                                            0.4,
+                                        ]);
+                                    });
+                            } else {
+                                let save = actions.save.clone();
+                                list.row(())
+                                    .w(Len::Fill)
+                                    .h_px(t::SP_8)
+                                    .pad_xy(t::SP_3, t::SP_0)
+                                    .align(Align::Center)
+                                    .hover_color(t::HOVER_LIFT_SUBTLE)
+                                    .on_click(move |_| save())
+                                    .child(|r| {
+                                        r.text((), "Save current\u{2026}", t::TEXT_SM)
+                                            .color(t::TEXT_DIM);
+                                    });
+                            }
                         });
                 }
             });
+        });
+}
+
+/// One preset row: name + (for customs) hover-revealed rename/delete icons.
+/// Clicking the row applies the preset; the icons sit on top so their
+/// clicks don't fall through to it.
+#[allow(clippy::too_many_arguments)]
+fn preset_item_row(
+    s: &mut Scene,
+    i: usize,
+    name: &str,
+    custom: bool,
+    is_sel: bool,
+    accent: &Signal<[f32; 4]>,
+    icons: &Rc<IconSet>,
+    actions: &PresetActions,
+) {
+    let apply = actions.apply.clone();
+    let hovered = Signal::new(false);
+    let mut item = s.row(());
+    item.w(Len::Fill)
+        .h_px(t::SP_9)
+        .pad_xy(t::SP_3, t::SP_0)
+        .align(Align::Center)
+        .hover_color(t::HOVER_LIFT_SUBTLE)
+        .on_hover(hovered.clone())
+        .on_click(move |_| apply(i));
+    if is_sel {
+        item.color(accent.clone());
+    }
+    let text_col: opal_gfx::Bind<[f32; 4]> = if is_sel {
+        crate::widgets::color::accent_fg(accent).into()
+    } else {
+        t::TEXT.into()
+    };
+    let name = name.to_string();
+    let icons = icons.clone();
+    let del = actions.delete.clone();
+    let ren = actions.rename_start.clone();
+    item.child(move |r| {
+        r.text((), &name, t::TEXT_SM).color(text_col);
+        if custom {
+            // Rename + delete, faded in on row hover (animated).
+            let vis = animated(
+                Computed::new((hovered.clone(),), |(h,)| if h { 1.0 } else { 0.0 }),
+                Curve::EaseInOut,
+                Duration::from_millis(120),
+            );
+            r.row(())
+                .push_end()
+                .gap(t::SP_1)
+                .align(Align::Center)
+                .opacity_bind(vis)
+                .child(move |g| {
+                    let ren = ren.clone();
+                    g.row(())
+                        .w_px(t::SP_6)
+                        .h_px(t::SP_6)
+                        .center()
+                        .radius(t::R_SM)
+                        .cursor(opal_gfx::CursorIcon::Pointer)
+                        .hover_color(t::BTN_HOVER)
+                        .on_click(move |_| ren(i))
+                        .child(|c| icons.render(c, Icon::Pen, t::ICON_SM, t::TEXT_DIM));
+                    let del = del.clone();
+                    g.row(())
+                        .w_px(t::SP_6)
+                        .h_px(t::SP_6)
+                        .center()
+                        .radius(t::R_SM)
+                        .cursor(opal_gfx::CursorIcon::Pointer)
+                        .hover_color(t::BTN_HOVER)
+                        .on_click(move |_| del(i))
+                        .child(|c| icons.render(c, Icon::Trash, t::ICON_SM, [0.92, 0.4, 0.4, 1.0]));
+                });
+        }
+    });
+}
+
+/// The rename variant of a preset row: an inline text field seeded with the
+/// current name (commit on Enter or the check button).
+fn preset_rename_row(
+    s: &mut Scene,
+    i: usize,
+    name: &str,
+    icons: &Rc<IconSet>,
+    rename_buf: &Rc<std::cell::RefCell<String>>,
+    actions: &PresetActions,
+) {
+    let commit = actions.rename_commit.clone();
+    let commit_btn = commit.clone();
+    let buf = rename_buf.clone();
+    let name = name.to_string();
+    let icons = icons.clone();
+    s.row(())
+        .w(Len::Fill)
+        .h_px(t::SP_9)
+        .pad_xy(t::SP_2, t::SP_0)
+        .gap(t::SP_1)
+        .align(Align::Center)
+        .child(move |r| {
+            let mut field = r.text_field((), name.as_str(), t::TEXT_SM);
+            field
+                .w(Len::Fill)
+                .h_px(t::SP_7)
+                .pad_xy(t::SP_2, t::SP_0)
+                .align(Align::Center)
+                .justify(Justify::Start)
+                .rgba(0.0, 0.0, 0.0, 0.30)
+                .radius(t::R_SM)
+                .border(1.0, t::BORDER)
+                .text_color(t::TEXT)
+                .placeholder_color(t::TEXT_DIM)
+                .on_change(move |s| *buf.borrow_mut() = s.to_string())
+                .on_submit(move |_| commit(i));
+            r.row(())
+                .push_end()
+                .w_px(t::SP_7)
+                .h_px(t::SP_7)
+                .center()
+                .radius(t::R_SM)
+                .cursor(opal_gfx::CursorIcon::Pointer)
+                .hover_color(t::BTN_HOVER)
+                .on_click(move |_| commit_btn(i))
+                .child(|c| icons.render(c, Icon::Check, t::ICON_SM, t::TEXT));
         });
 }
 
@@ -500,15 +675,32 @@ fn band_handle(
         let y = (1.0 - response_frac(lo, hi, freq)) * GRAPH_H;
         (y - DOT / 2.0).clamp(0.0, GRAPH_H - DOT)
     });
+    let band_for_label = band.clone();
     let sig = band;
     let sh = shared;
     let commit = on_commit;
     let acc = accent.clone();
+    // Hover-revealed dB readout so the exact gain isn't opaque. Fades in as
+    // the cursor enters the band's column.
+    let hovered = Signal::new(false);
+    let label_vis = animated(
+        Computed::new((hovered.clone(),), |(h,)| if h { 1.0 } else { 0.0 }),
+        Curve::EaseInOut,
+        Duration::from_millis(120),
+    );
+    let db_label = TextBind::derived(band_for_label, |db: f32| {
+        if db.abs() < 0.5 {
+            "0 dB".to_string()
+        } else {
+            format!("{:+.0} dB", db.round())
+        }
+    });
     s.col(())
         .w(Len::Fill)
         .h_px(GRAPH_H)
         .align(Align::Center)
         .cursor(opal_gfx::CursorIcon::Pointer)
+        .on_hover(hovered)
         .on_drag(move |ctx| {
             // Top = +MAX, bottom = −MAX; fraction physical/physical so scale
             // cancels. Snap to whole dB.
@@ -522,6 +714,22 @@ fn band_handle(
             // Transparent spacer pushes the dot down to the curve.
             col.rect(()).w_px(1.0).height_px_bind(dot_top.clone()).rgba(0.0, 0.0, 0.0, 0.0);
             col.rect(()).w_px(DOT).h_px(DOT).radius(t::R_FULL).color(acc.clone());
+            // dB readout pinned at the top of the column, revealed on hover.
+            col.row(())
+                .abs(0.0, t::SP_0_5)
+                .w(Len::Fill)
+                .center()
+                .opacity_bind(label_vis.clone())
+                .child(move |lbl| {
+                    lbl.row(())
+                        .pad_xy(t::SP_1, t::SP_0_5)
+                        .radius(t::R_SM)
+                        .rgba(0.0, 0.0, 0.0, 0.55)
+                        .center()
+                        .child(move |p| {
+                            p.text_bound((), db_label, t::TEXT_XS).color(t::TEXT);
+                        });
+                });
         });
 }
 
@@ -735,6 +943,10 @@ fn legend_dot(s: &mut Scene, color: [f32; 4], label: &str) {
 fn header(s: &mut Scene, icons: &IconSet, overlay: Overlay) {
     s.row(())
         .w(Len::Fill)
+        // Match the body's extra right pad so the close button keeps its
+        // original position after the panel's right pad was trimmed for the
+        // scrollbar gutter.
+        .pad_ltrb(t::SP_0, t::SP_0, t::SP_4, t::SP_0)
         .align(Align::Center)
         .child(|h| {
             h.text((), "Settings", t::TEXT_XL).color(t::TEXT);

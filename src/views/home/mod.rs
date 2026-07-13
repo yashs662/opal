@@ -265,6 +265,9 @@ pub struct HomeView {
     on_eq_preset: Rc<dyn Fn(usize)>,
     on_eq_save: Rc<dyn Fn()>,
     on_eq_toggle_preset: Rc<dyn Fn()>,
+    on_eq_delete: Rc<dyn Fn(usize)>,
+    on_eq_rename_start: Rc<dyn Fn(usize)>,
+    on_eq_rename_commit: Rc<dyn Fn(usize)>,
     on_skip: Rc<dyn Fn(u32)>,
     on_context_menu: CtxMenuFn,
     on_add_queue: Rc<dyn Fn(String)>,
@@ -354,6 +357,18 @@ impl HomeView {
         let on_eq_toggle_preset: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::EqTogglePresetOpen))
+        };
+        let on_eq_delete: Rc<dyn Fn(usize)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |i| dispatch.send(Msg::EqDeleteCustom(i)))
+        };
+        let on_eq_rename_start: Rc<dyn Fn(usize)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |i| dispatch.send(Msg::EqStartRename(i)))
+        };
+        let on_eq_rename_commit: Rc<dyn Fn(usize)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |i| dispatch.send(Msg::EqCommitRename(i)))
         };
         let on_skip: Rc<dyn Fn(u32)> = {
             let dispatch = dispatch.clone();
@@ -449,6 +464,9 @@ impl HomeView {
             on_eq_preset,
             on_eq_save,
             on_eq_toggle_preset,
+            on_eq_delete,
+            on_eq_rename_start,
+            on_eq_rename_commit,
             on_skip,
             on_context_menu,
             on_add_queue,
@@ -664,6 +682,9 @@ impl HomeView {
             on_eq_preset: self.on_eq_preset.clone(),
             on_eq_save: self.on_eq_save.clone(),
             on_eq_toggle_preset: self.on_eq_toggle_preset.clone(),
+            on_eq_delete: self.on_eq_delete.clone(),
+            on_eq_rename_start: self.on_eq_rename_start.clone(),
+            on_eq_rename_commit: self.on_eq_rename_commit.clone(),
         };
         let devices_panel = devices::DevicesPanel {
             devices: &state.devices,

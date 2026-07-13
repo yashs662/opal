@@ -365,6 +365,25 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             }
         }
 
+        Msg::EqDeleteCustom(index) => {
+            state.eq.delete_custom(index);
+            state.prefs.data.audio.eq = state.eq.to_prefs();
+            state.prefs.mark_dirty(cx.now);
+            cx.rebuild();
+        }
+
+        Msg::EqStartRename(index) => {
+            state.eq.start_rename(index);
+            cx.rebuild();
+        }
+
+        Msg::EqCommitRename(index) => {
+            state.eq.commit_rename(index);
+            state.prefs.data.audio.eq = state.eq.to_prefs();
+            state.prefs.mark_dirty(cx.now);
+            cx.rebuild();
+        }
+
         Msg::EqSaveCustom => {
             state.eq.preset_open.set(false);
             let name = state.eq.next_custom_name();
