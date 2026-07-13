@@ -57,10 +57,6 @@ const SIGN_OUT_W: f32 = 116.0;
 // definite value→pixel scale to map gains onto, and the handle/fill binds
 // are computed in px against it.
 const GRAPH_H: f32 = t::SP_32;
-/// Sample count for the response fill (its top edge traces the combined
-/// magnitude response); denser = smoother curve. Sized so the bars are
-/// ~1–2 px wide across the plot, dissolving the staircase.
-const CURVE_N: usize = 190;
 /// Sample rate the response preview is evaluated at (matches the sink).
 const CURVE_FS: f64 = 44_100.0;
 /// Draggable band-handle diameter (a small UI token, like an icon size).
@@ -400,11 +396,18 @@ fn eq_graph(
     accent: &Signal<[f32; 4]>,
     on_commit: Rc<dyn Fn()>,
 ) {
-    use crate::audio_eq::BAND_LABELS;
+    use crate::audio_eq::{BAND_FREQS, BAND_LABELS, NUM_BANDS};
     let g_lo = band_group(bands, 0);
     let g_hi = band_group(bands, 5);
-    // Translucent accent fill under the curve (Spotify-style).
-    let fill_col = Computed::new((accent.clone(),), |(a,)| [a[0], a[1], a[2], 0.30]);
+    // Accent tint for the curve effect: the shader fills below it at this
+    // alpha and strokes the curve itself at full alpha.
+    let fill_col = Computed::new((accent.clone(),), |(a,)| [a[0], a[1], a[2], 0.28]);
+    // The curve's control points: the response fraction (0..1 from the
+    // bottom) at each band's centre frequency, so the spline passes through
+    // the handles. Reactive → the shader re-strokes as bands tween/drag.
+    let points = Computed::new((g_lo.clone(), g_hi.clone()), |(lo, hi)| {
+        std::array::from_fn::<f32, NUM_BANDS, _>(|i| response_frac(lo, hi, BAND_FREQS[i] as f64))
+    });
     let bands = bands.clone();
     let accent = accent.clone();
 
@@ -422,8 +425,6 @@ fn eq_graph(
             });
         // Plot + frequency labels fill the remaining width.
         gr.col(()).w(Len::Fill).gap(t::SP_1).child(move |right| {
-            let g_lo_bars = g_lo.clone();
-            let g_hi_bars = g_hi.clone();
             right
                 .col(())
                 .w(Len::Fill)
@@ -432,29 +433,15 @@ fn eq_graph(
                 .rgba(GRAPH_BG[0], GRAPH_BG[1], GRAPH_BG[2], GRAPH_BG[3])
                 .overflow(opal_gfx::Overflow::Hidden, opal_gfx::Overflow::Hidden)
                 .child(move |plot| {
-                    // Filled response area (CURVE_N bottom-anchored bars).
-                    plot.row(())
+                    // The response curve — a GPU-shaded, anti-aliased filled
+                    // spline through the band points (one `curve` effect node,
+                    // reactive off `points`), replacing the old bar fill.
+                    plot.curve(())
                         .abs(0.0, 0.0)
                         .w(Len::Fill)
                         .h_px(GRAPH_H)
-                        .child(move |bars| {
-                            for i in 0..CURVE_N {
-                                let freq = curve_bar_freq(i);
-                                let h = Computed::new(
-                                    (g_lo_bars.clone(), g_hi_bars.clone()),
-                                    move |(lo, hi)| response_frac(lo, hi, freq) * GRAPH_H,
-                                );
-                                let fc = fill_col.clone();
-                                bars.col(()).w(Len::Fill).h_px(GRAPH_H).justify(Justify::End).child(
-                                    move |cell| {
-                                        cell.rect(())
-                                            .w(Len::Fill)
-                                            .height_px_bind(h.clone())
-                                            .color(fc.clone());
-                                    },
-                                );
-                            }
-                        });
+                        .color(fill_col)
+                        .effect_data_bind(points);
                     // 0 dB gridline across the vertical centre.
                     plot.rect(())
                         .abs(0.0, GRAPH_H / 2.0 - 0.5)
@@ -562,20 +549,6 @@ fn response_frac(lo: [f32; 5], hi: [f32; 5], freq: f64) -> f32 {
     ];
     let db = crate::audio_eq::response_db(&gains, freq, CURVE_FS) as f32;
     ((db + GAIN_DB_MAX) / (2.0 * GAIN_DB_MAX)).clamp(0.0, 1.0)
-}
-
-/// Frequency (Hz) for response sample `i`, log-interpolated so band `k`'s
-/// peak lands at handle-column centre `(k + 0.5) / NUM_BANDS` — aligning
-/// the curve with the handles and frequency labels.
-fn curve_bar_freq(i: usize) -> f64 {
-    use crate::audio_eq::{BAND_FREQS, NUM_BANDS};
-    let p = (i as f64 + 0.5) / CURVE_N as f64;
-    let bi = (p * NUM_BANDS as f64 - 0.5).clamp(0.0, (NUM_BANDS - 1) as f64);
-    let lo = (bi.floor() as usize).min(NUM_BANDS - 2);
-    let frac = bi - lo as f64;
-    let a = (BAND_FREQS[lo] as f64).ln();
-    let b = (BAND_FREQS[lo + 1] as f64).ln();
-    (a + (b - a) * frac).exp()
 }
 
 /// Streaming-quality picker: three chips (96 / 160 / 320 kbps), the
