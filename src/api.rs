@@ -1461,6 +1461,18 @@ pub enum PlayTarget {
 }
 
 impl PlayTarget {
+    /// The queue-context uri this intent loads, if any (`Uris` is an ad-hoc
+    /// list with no context). Used to stamp the source pill while Opal is the
+    /// active local device — librespot `PlayerEvent`s don't carry it.
+    pub fn context_uri(&self) -> Option<&str> {
+        match self {
+            PlayTarget::Context { context_uri, .. }
+            | PlayTarget::ContextAt { context_uri, .. } => Some(context_uri),
+            PlayTarget::Resume { context_uri, .. } => context_uri.as_deref(),
+            PlayTarget::Uris { .. } => None,
+        }
+    }
+
     /// The bare track URI this intent centres on, if any — the anchor used to
     /// recover when Spotify rejects the context (algorithmic playlists 400
     /// "Non supported context uri"): we look up the track's album and replay

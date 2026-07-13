@@ -471,6 +471,15 @@ impl Worker {
             // Spirc handle — dropping this disconnects the Connect device.
             // Held on the worker for lifetime parity with `session`.
             let spirc: Arc<AsyncMutex<Option<Spirc>>> = Arc::new(AsyncMutex::new(None));
+            // The queue-context uri Opal last loaded as the active local
+            // device. librespot `PlayerEvent`s don't carry the context, and the
+            // dealer never echoes our own state — so without this the source
+            // pill is blank while Opal is the player. Written on a local
+            // `PlayContext`, stamped onto local player states, cleared when a
+            // remote device takes over. A plain std mutex: the critical
+            // sections are a single clone/store.
+            let local_ctx: Arc<std::sync::Mutex<Option<String>>> =
+                Arc::new(std::sync::Mutex::new(None));
             // Canonical playlist-membership index (track→playlists). Lives
             // here so the heavy map never crosses to the UI; the UI gets the
             // playlist list + per-track lookups + edit confirmations.
@@ -549,6 +558,7 @@ impl Worker {
                             resp.clone(),
                             session.clone(),
                             spirc.clone(),
+                            local_ctx.clone(),
                             access_token,
                             initial_volume,
                             quality,
@@ -563,6 +573,7 @@ impl Worker {
                             resp.clone(),
                             session.clone(),
                             spirc.clone(),
+                            local_ctx.clone(),
                             access_token,
                             cmd,
                             local,
@@ -1248,6 +1259,7 @@ fn spawn_playback(
     resp: Responder,
     session_slot: Arc<AsyncMutex<Option<Session>>>,
     spirc_slot: Arc<AsyncMutex<Option<Spirc>>>,
+    local_ctx: Arc<std::sync::Mutex<Option<String>>>,
     access_token: String,
     cmd: PlaybackCmd,
     local: bool,
@@ -1291,6 +1303,15 @@ fn spawn_playback(
             }
             other => other,
         };
+        // Remember the context Opal is about to load so the contextless local
+        // player states can wear the right source pill. Stored for every
+        // `PlayContext` (not just `local`): it's only ever *read* by the local
+        // stamp, which fires only when Opal is genuinely the player, and a
+        // remote takeover clears it — so this also covers a cold start with no
+        // active device where the load lands on Opal.
+        if let PlaybackCmd::PlayContext(target) = &cmd {
+            *local_ctx.lock().unwrap() = target.context_uri().map(str::to_string);
+        }
         // When Opal is the active device, drive our own Spirc directly.
         // The Web API round-trip (Spotify → dealer relay → our Spirc) can
         // silently no-op after a long uptime if the relay path goes stale —
@@ -2317,6 +2338,7 @@ fn spawn_connect_session(
     resp: Responder,
     session_slot: Arc<AsyncMutex<Option<Session>>>,
     spirc_slot: Arc<AsyncMutex<Option<Spirc>>>,
+    local_ctx: Arc<std::sync::Mutex<Option<String>>>,
     access_token: String,
     initial_volume: f32,
     quality: crate::prefs::AudioQuality,
@@ -2380,6 +2402,7 @@ fn spawn_connect_session(
         // swallow the *next* remote switch, leaving the devices UI stuck.
         let last_active = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let last_active_cluster = last_active.clone();
+        let local_ctx_cluster = local_ctx.clone();
         tokio::spawn(async move {
             cluster_listener::run(cluster_sub, move |player, volume, active_device, queue, vanished| {
                 if let Some(v) = volume {
@@ -2396,8 +2419,16 @@ fn spawn_connect_session(
                     if *la != active_device {
                         *la = active_device.clone();
                         let id = active_device.unwrap_or_default();
+                        let is_self = !id.is_empty() && id == self_device_id;
+                        // A remote took over: the context we stored for local
+                        // playback no longer describes what's playing, so drop
+                        // it — otherwise a later transfer back to Opal could
+                        // stamp a stale source pill before a fresh load.
+                        if !id.is_empty() && !is_self {
+                            *local_ctx_cluster.lock().unwrap() = None;
+                        }
                         resp_for_cluster.send(WorkerResponse::ActiveDeviceChanged {
-                            is_self: !id.is_empty() && id == self_device_id,
+                            is_self,
                             device_id: id,
                         });
                     }
@@ -2417,10 +2448,11 @@ fn spawn_connect_session(
         let resp_for_local = resp.clone();
         let resp_for_local_vol = resp.clone();
         let last_active_local = last_active;
+        let local_ctx_local = local_ctx;
         tokio::spawn(async move {
             crate::local_player::run(
                 player_events,
-                move |player| {
+                move |mut player| {
                     let playing = player.as_ref().map(|p| p.is_playing).unwrap_or(false);
                     let mut claim_self = false;
                     {
@@ -2455,6 +2487,17 @@ fn spawn_connect_session(
                             is_self: true,
                             device_id: self_id_for_local.clone(),
                         });
+                    }
+                    // Stamp the context Opal loaded onto this state — librespot
+                    // events carry none, so the source pill would otherwise be
+                    // blank. Clearing the name forces the reducer's Web-API
+                    // resolver to name the (possibly changed) context.
+                    if let Some(p) = player.as_mut()
+                        && let Some(ctx) = local_ctx_local.lock().unwrap().clone()
+                        && p.context_uri.as_deref() != Some(ctx.as_str())
+                    {
+                        p.context_uri = Some(ctx);
+                        p.context_name = None;
                     }
                     resp_for_local.send(WorkerResponse::PlayerState { player });
                 },
