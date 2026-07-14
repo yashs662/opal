@@ -42,9 +42,14 @@ impl Component for DevicesPanel<'_> {
                 .child(move |panel| {
                     panel.text((), "Connect to a device", 18.0).color(t::TEXT);
                     if list.is_empty() {
-                        panel.row(()).w(Len::Fill).h_px(t::SP_12).center().child(|e| {
-                            e.text((), "No devices found", 13.0).color(t::TEXT_DIM);
-                        });
+                        panel
+                            .row(())
+                            .w(Len::Fill)
+                            .h_px(t::SP_12)
+                            .center()
+                            .child(|e| {
+                                e.text((), "No devices found", 13.0).color(t::TEXT_DIM);
+                            });
                     }
                     for d in &list {
                         // REST `is_active` can lag the cluster push — the
@@ -114,17 +119,14 @@ fn device_row(
                 icons.render(c, Icon::Devices, t::ICON_MD, t::TEXT_DIM);
             }
         });
-        r.col(())
-            .w(Len::Fill)
-            .gap(t::SP_0_5)
-            .child(|m| {
-                m.text((), &name, 14.0).color(t::TEXT).max_width_px(260.0);
-                let sub = match (active, is_self) {
-                    (true, _) => "Playing".to_string(),
-                    (false, true) => format!("{kind} \u{2022} This device"),
-                    (false, false) => kind.clone(),
-                };
-                m.text((), &sub, 12.0).color(t::TEXT_DIM);
-            });
+        r.col(()).w(Len::Fill).gap(t::SP_0_5).child(|m| {
+            m.text((), &name, 14.0).color(t::TEXT).max_width_px(260.0);
+            let sub = match (active, is_self) {
+                (true, _) => "Playing".to_string(),
+                (false, true) => format!("{kind} \u{2022} This device"),
+                (false, false) => kind.clone(),
+            };
+            m.text((), &sub, 12.0).color(t::TEXT_DIM);
+        });
     });
 }

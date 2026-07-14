@@ -78,7 +78,15 @@ pub struct SplitterProps {
 }
 
 pub fn splitter(s: &mut Scene, props: SplitterProps) {
-    let SplitterProps { name, width, side, min, max, collapsed, on_change } = props;
+    let SplitterProps {
+        name,
+        width,
+        side,
+        min,
+        max,
+        collapsed,
+        on_change,
+    } = props;
     // Captured per-drag: width at press, refreshed on the press fire
     // (`DragCtx::delta == [0,0]`). All subsequent move fires read the
     // cursor offset from `DragCtx::start` and compute the new width
@@ -94,7 +102,13 @@ pub fn splitter(s: &mut Scene, props: SplitterProps) {
     let hover_for_color = hover.clone();
     let pressed_for_color = pressed.clone();
     let pill_color = Computed::new(deps!(hover_for_color, pressed_for_color), |(h, p)| {
-        let a = if p { 0.95 } else if h { 0.55 } else { 0.0 };
+        let a = if p {
+            0.95
+        } else if h {
+            0.55
+        } else {
+            0.0
+        };
         [1.0, 1.0, 1.0, a]
     });
     s.col(name)

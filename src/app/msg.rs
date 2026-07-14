@@ -86,7 +86,10 @@ pub enum Msg {
     /// menu's "Add to playlist…") — membership + liked resolve async.
     LikeOpenFor(Box<crate::api::PlaylistTrack>),
     /// Add/remove the picker's target track to/from a playlist (`add`).
-    LikeTogglePlaylist { playlist_id: String, add: bool },
+    LikeTogglePlaylist {
+        playlist_id: String,
+        add: bool,
+    },
     /// Like/unlike the picker's target track (Liked Songs).
     LikeToggleLiked(bool),
     /// Open the full "in your library by this artist" list — a synthetic
@@ -115,10 +118,15 @@ pub enum Msg {
     EqStartRename(usize),
     /// Commit the inline rename of the custom EQ preset at this index.
     EqCommitRename(usize),
+    /// Expand/collapse a Recents session group (by its stable key).
+    ToggleRecentSession(String),
     /// Skip forward `count` tracks (queue "play this next-N").
     Skip(u32),
     /// Open the track-row right-click menu at `pos` (logical px).
-    OpenContextMenu { pos: [f32; 2], target: MenuTarget },
+    OpenContextMenu {
+        pos: [f32; 2],
+        target: MenuTarget,
+    },
     /// Add a track to the play queue.
     AddQueue(String),
     /// Close the right-click menu.

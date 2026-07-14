@@ -7,13 +7,13 @@ use crate::errors::AuthError;
 use crate::extracted_color;
 use crate::widgets::{color, tokens};
 use crate::{cluster_listener, spirc_bootstrap, spotify_session};
-use opal_gfx::{ImageHandle, Uploader, WakeHandle};
 use librespot_connect::{LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::Session;
 use librespot_core::authentication::Credentials;
 use librespot_protocol::extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery};
 use librespot_protocol::extension_kind::ExtensionKind;
 use log::{debug, error, info, warn};
+use opal_gfx::{ImageHandle, Uploader, WakeHandle};
 use protobuf::EnumOrUnknown;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -87,6 +87,12 @@ pub enum WorkerCommand {
     FetchContextName {
         access_token: String,
         uri: String,
+    },
+    /// Resolve a batch of Recents session contexts (name + owner + cover).
+    /// Result: `ContextsResolved`.
+    ResolveContexts {
+        access_token: String,
+        uris: Vec<String>,
     },
     /// Track credits (performers / writers / producers) via the spclient
     /// track-credits endpoint — the now-playing card's "Credits" section.
@@ -184,10 +190,13 @@ pub enum WorkerCommand {
         access_token: String,
         track_id: String,
     },
-    /// Like / unlike a track.
+    /// Like / unlike a track. `artist_ids` keep the membership snapshot's
+    /// reverse index current so the artist page reflects the change on its
+    /// next open (no full re-scan).
     SetSaved {
         access_token: String,
         track_id: String,
+        artist_ids: Vec<String>,
         saved: bool,
     },
     /// The active device's play queue, for the queue page.
@@ -217,6 +226,7 @@ pub enum WorkerCommand {
         access_token: String,
         playlist_id: String,
         track_uri: String,
+        artist_ids: Vec<String>,
         add: bool,
     },
 }
@@ -361,6 +371,11 @@ pub enum WorkerResponse {
         uri: String,
         name: Option<String>,
     },
+    /// Recents session contexts resolved (uri → name/owner/cover). Missing
+    /// uris (unresolvable) are simply absent from the map.
+    ContextsResolved {
+        map: std::collections::HashMap<String, api::RecentContextInfo>,
+    },
     /// A track's credits resolved (possibly empty — endpoint had none).
     TrackCreditsReady {
         track_id: String,
@@ -418,6 +433,8 @@ pub enum WorkerResponse {
     MembershipLoaded {
         playlists: Vec<crate::model::membership::MembershipPlaylist>,
         index: std::collections::HashMap<String, Vec<String>>,
+        artist_index: std::collections::HashMap<String, Vec<String>>,
+        liked: std::collections::HashSet<String>,
     },
     /// Which playlists the given track is in (answer to `QueryMembership`).
     TrackMembership {
@@ -525,13 +542,16 @@ impl Worker {
                             spawn_fetch_album(resp.clone(), access_token, id)
                         }
                         WorkerCommand::FetchArtist { access_token, id } => {
-                            spawn_fetch_artist(resp.clone(), access_token, id)
+                            spawn_fetch_artist(resp.clone(), session.clone(), access_token, id)
                         }
                         WorkerCommand::FetchArtistCard { access_token, id } => {
                             spawn_fetch_artist_card(resp.clone(), session.clone(), access_token, id)
                         }
                         WorkerCommand::FetchContextName { access_token, uri } => {
                             spawn_fetch_context_name(resp.clone(), access_token, uri)
+                        }
+                        WorkerCommand::ResolveContexts { access_token, uris } => {
+                            spawn_resolve_contexts(resp.clone(), access_token, uris)
                         }
                         WorkerCommand::FetchTrackCredits { track_id } => {
                             spawn_fetch_track_credits(resp.clone(), session.clone(), track_id)
@@ -582,20 +602,16 @@ impl Worker {
                             context_uri,
                             track_uri,
                             position_ms,
-                        } => spawn_claim_paused(
-                            spirc.clone(),
-                            context_uri,
-                            track_uri,
-                            position_ms,
-                        ),
+                        } => spawn_claim_paused(spirc.clone(), context_uri, track_uri, position_ms),
                         WorkerCommand::SkipForward {
                             access_token,
                             count,
                             local,
                         } => spawn_skip_forward(spirc.clone(), access_token, count, local),
-                        WorkerCommand::RefreshTokens { refresh_token, client_id } => {
-                            spawn_refresh_tokens(resp.clone(), refresh_token, client_id)
-                        }
+                        WorkerCommand::RefreshTokens {
+                            refresh_token,
+                            client_id,
+                        } => spawn_refresh_tokens(resp.clone(), refresh_token, client_id),
                         WorkerCommand::FetchDevices { access_token } => {
                             spawn_fetch_devices(resp.clone(), access_token)
                         }
@@ -611,8 +627,16 @@ impl Worker {
                         WorkerCommand::SetSaved {
                             access_token,
                             track_id,
+                            artist_ids,
                             saved,
-                        } => spawn_set_saved(resp.clone(), access_token, track_id, saved),
+                        } => spawn_set_saved(
+                            resp.clone(),
+                            membership.clone(),
+                            access_token,
+                            track_id,
+                            artist_ids,
+                            saved,
+                        ),
                         WorkerCommand::FetchQueue { access_token } => {
                             spawn_fetch_queue(resp.clone(), access_token)
                         }
@@ -633,6 +657,7 @@ impl Worker {
                             access_token,
                             playlist_id,
                             track_uri,
+                            artist_ids,
                             add,
                         } => spawn_edit_membership(
                             resp.clone(),
@@ -640,6 +665,7 @@ impl Worker {
                             access_token,
                             playlist_id,
                             track_uri,
+                            artist_ids,
                             add,
                         ),
                     }
@@ -696,6 +722,11 @@ impl Worker {
         let _ = self
             .cmd_tx
             .send(WorkerCommand::FetchContextName { access_token, uri });
+    }
+    pub fn resolve_contexts(&self, access_token: String, uris: Vec<String>) {
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::ResolveContexts { access_token, uris });
     }
     pub fn fetch_track_credits(&self, track_id: String) {
         let _ = self
@@ -758,12 +789,15 @@ impl Worker {
         });
     }
     pub fn refresh_tokens(&self, refresh_token: String, client_id: String) {
-        let _ = self
-            .cmd_tx
-            .send(WorkerCommand::RefreshTokens { refresh_token, client_id });
+        let _ = self.cmd_tx.send(WorkerCommand::RefreshTokens {
+            refresh_token,
+            client_id,
+        });
     }
     pub fn fetch_devices(&self, access_token: String) {
-        let _ = self.cmd_tx.send(WorkerCommand::FetchDevices { access_token });
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::FetchDevices { access_token });
     }
     pub fn transfer_playback(
         &self,
@@ -783,10 +817,17 @@ impl Worker {
             track_id,
         });
     }
-    pub fn set_saved(&self, access_token: String, track_id: String, saved: bool) {
+    pub fn set_saved(
+        &self,
+        access_token: String,
+        track_id: String,
+        artist_ids: Vec<String>,
+        saved: bool,
+    ) {
         let _ = self.cmd_tx.send(WorkerCommand::SetSaved {
             access_token,
             track_id,
+            artist_ids,
             saved,
         });
     }
@@ -804,19 +845,23 @@ impl Worker {
             .send(WorkerCommand::LoadMembership { access_token });
     }
     pub fn query_membership(&self, track_uri: String) {
-        let _ = self.cmd_tx.send(WorkerCommand::QueryMembership { track_uri });
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::QueryMembership { track_uri });
     }
     pub fn edit_membership(
         &self,
         access_token: String,
         playlist_id: String,
         track_uri: String,
+        artist_ids: Vec<String>,
         add: bool,
     ) {
         let _ = self.cmd_tx.send(WorkerCommand::EditMembership {
             access_token,
             playlist_id,
             track_uri,
+            artist_ids,
             add,
         });
     }
@@ -847,6 +892,35 @@ fn spawn_oauth(resp: Responder, client_id: String) -> tokio::task::JoinHandle<()
     })
 }
 
+/// The persisted Recents archive key + cap. The Web API only exposes a
+/// rolling ~50-item window, so older days would vanish; since past plays
+/// never change we accumulate them here across sessions.
+const RECENTS_HISTORY_KEY: &str = "recents_history";
+const RECENTS_HISTORY_CAP: usize = 1000;
+
+/// Merge freshly-fetched plays into the persisted Recents archive: dedup by
+/// `played_at` (unique per play), keep newest-first, cap, persist. Returns
+/// the archive with consecutive repeat runs collapsed for display. Blocking
+/// fs — call from `spawn_blocking`.
+fn merge_recents_history(fresh: Vec<api::RecentTrack>) -> Vec<api::RecentTrack> {
+    let mut hist: Vec<api::RecentTrack> =
+        disk_cache::read_json(RECENTS_HISTORY_KEY, std::time::Duration::MAX).unwrap_or_default();
+    let seen: std::collections::HashSet<String> =
+        hist.iter().map(|t| t.played_at.clone()).collect();
+    for t in fresh {
+        if !t.played_at.is_empty() && !seen.contains(&t.played_at) {
+            hist.push(t);
+        }
+    }
+    hist.sort_by(|a, b| b.played_at.cmp(&a.played_at));
+    hist.truncate(RECENTS_HISTORY_CAP);
+    disk_cache::write_json(RECENTS_HISTORY_KEY, &hist);
+    // Collapse consecutive repeat plays (the archive keeps them raw).
+    let mut out = hist;
+    out.dedup_by(|a, b| a.id == b.id);
+    out
+}
+
 fn spawn_fetch_home(resp: Responder, access_token: String) {
     tokio::spawn(async move {
         let (profile, playlists, recent, top_artists, top_tracks) = tokio::join!(
@@ -865,10 +939,14 @@ fn spawn_fetch_home(resp: Responder, access_token: String) {
             Ok(ps) => data.playlists = ps,
             Err(e) => warn!("get_playlists failed: {e}"),
         }
-        match recent {
-            Ok(rs) => data.recent = rs,
-            Err(e) => warn!("get_recently_played failed: {e}"),
-        }
+        // Merge the fresh window into the persisted archive (empty on a
+        // fetch failure — the archive still surfaces past days).
+        let fresh = recent
+            .inspect_err(|e| warn!("get_recently_played failed: {e}"))
+            .unwrap_or_default();
+        data.recent = tokio::task::spawn_blocking(move || merge_recents_history(fresh))
+            .await
+            .unwrap_or_default();
         match top_artists {
             Ok(a) => data.top_artists = a,
             Err(e) => warn!("get_top_artists failed: {e}"),
@@ -938,7 +1016,9 @@ fn spawn_fetch_accent(
         // Cache hit → apply immediately, no session needed.
         if let Some(colors) = tokio::task::spawn_blocking({
             let cache_key = cache_key.clone();
-            move || disk_cache::read_json::<extracted_color::ExtractedColors>(&cache_key, ACCENT_TTL)
+            move || {
+                disk_cache::read_json::<extracted_color::ExtractedColors>(&cache_key, ACCENT_TTL)
+            }
         })
         .await
         .ok()
@@ -1282,8 +1362,7 @@ fn spawn_playback(
                 // playback; handing it back 400s "Invalid context uri") and
                 // fall back to the track's album so playback continues past
                 // the one track instead of ending dead.
-                let real_context = context_uri
-                    .filter(|c| !c.is_empty() && c != "spotify:web-api");
+                let real_context = context_uri.filter(|c| !c.is_empty() && c != "spotify:web-api");
                 let context_uri = match real_context {
                     Some(c) => Some(c),
                     None => match api::track_id_from_uri(&uri) {
@@ -1376,7 +1455,13 @@ fn spawn_playback(
         // simply starts here instead of dead-ending on a 404.
         let result = match result {
             Err(ref e) if is_no_active_device(e) => {
-                let device_id = { session_slot.lock().await.as_ref().map(|s| s.device_id().to_string()) };
+                let device_id = {
+                    session_slot
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|s| s.device_id().to_string())
+                };
                 match (device_id, cmd.clone()) {
                     (Some(id), PlaybackCmd::Play) => {
                         info!("no active device — resuming on Opal ({id})");
@@ -1555,11 +1640,10 @@ async fn fetch_artist_bio(
         let mut arr = res.extended_metadata.pop()?;
         let mut data = arr.extension_data.pop()?;
         let any = data.extension_data.take()?;
-        let artist =
-            <librespot_protocol::metadata::Artist as protobuf::Message>::parse_from_bytes(
-                &any.value,
-            )
-            .ok()?;
+        let artist = <librespot_protocol::metadata::Artist as protobuf::Message>::parse_from_bytes(
+            &any.value,
+        )
+        .ok()?;
         let bio = artist.biography.first()?;
         Some(strip_tags(bio.text()))
     })()
@@ -1600,6 +1684,28 @@ fn spawn_fetch_context_name(resp: Responder, access_token: String, uri: String) 
             }
         };
         resp.send(WorkerResponse::ContextNameReady { uri, name });
+    });
+}
+
+/// Resolve a batch of Recents session contexts (name + owner + cover),
+/// concurrently. Reuses the disk-cached meta fetches, so re-opening the
+/// Recents page is free. Unresolvable uris are absent from the result.
+fn spawn_resolve_contexts(resp: Responder, access_token: String, uris: Vec<String>) {
+    tokio::spawn(async move {
+        let futs = uris.into_iter().map(|uri| {
+            let token = access_token.clone();
+            async move {
+                api::resolve_context_meta(&token, &uri)
+                    .await
+                    .map(|info| (uri, info))
+            }
+        });
+        let map = futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+        resp.send(WorkerResponse::ContextsResolved { map });
     });
 }
 
@@ -1755,7 +1861,11 @@ fn parse_credits(body: &[u8]) -> TrackCredits {
         .collect();
     TrackCredits {
         groups,
-        sources: r.source_names.into_iter().filter(|s| !s.is_empty()).collect(),
+        sources: r
+            .source_names
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect(),
     }
 }
 
@@ -1775,7 +1885,12 @@ fn title_case(s: &str) -> String {
 
 /// Load an artist page: profile + discography (newest-first albums), in
 /// parallel. `get_json`'s disk cache makes re-opens cheap.
-fn spawn_fetch_artist(resp: Responder, access_token: String, id: String) {
+fn spawn_fetch_artist(
+    resp: Responder,
+    session_slot: Arc<AsyncMutex<Option<Session>>>,
+    access_token: String,
+    id: String,
+) {
     tokio::spawn(async move {
         // The user's country is the `market` for top-tracks; `get_me` is
         // disk-cached (SLOW), so this is near-free after the first call.
@@ -1799,21 +1914,38 @@ fn spawn_fetch_artist(resp: Responder, access_token: String, id: String) {
         match profile {
             Ok(p) => {
                 // The user's saved songs by this artist, across the whole
-                // library: membership index (uri → playlist ids) + Liked
-                // Songs, with track metadata joined from whichever page
-                // caches hold it (liked is always cached; playlists cache
-                // on first open — a track saved only in a never-opened
-                // playlist has no metadata to show yet and is skipped
-                // rather than fetched, this is a highlight strip).
-                let library_tracks = {
+                // library. The reverse index makes the set complete; page
+                // caches resolve most metadata for free, and the handful in
+                // never-opened playlists are hydrated over the network so the
+                // section matches what now-playing/the playlist pages know.
+                let mut library_tracks = {
                     let artist_id = id.clone();
                     let artist_name = p.name.clone();
-                    tokio::task::spawn_blocking(move || {
-                        artist_library_tracks(&artist_id, &artist_name)
+                    let (resolved, missing) = tokio::task::spawn_blocking(move || {
+                        artist_library_scan(&artist_id, &artist_name)
                     })
                     .await
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                    if !missing.is_empty()
+                        && let Some(session) = session_slot.lock().await.clone()
+                    {
+                        let uris: Vec<String> = missing.iter().map(|(u, _)| u.clone()).collect();
+                        let hydrated = fetch_tracks_v4(&session, &uris).await;
+                        let sources_of: std::collections::HashMap<String, Vec<String>> =
+                            missing.into_iter().collect();
+                        let mut out = resolved;
+                        for t in hydrated {
+                            let src = sources_of.get(&t.uri).cloned().unwrap_or_default();
+                            out.push((t, src));
+                        }
+                        out
+                    } else {
+                        resolved
+                    }
                 };
+                // Newest resolution order is arbitrary; keep saved-by-artist
+                // rows stable by title so the section doesn't reshuffle.
+                library_tracks.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
                 resp.send(WorkerResponse::ArtistOpened {
                     id,
                     name: p.name,
@@ -1851,54 +1983,70 @@ fn spawn_hydrate_tracks(
         }
         let session = { session_slot.lock().await.clone() };
         let Some(session) = session else {
-            debug!("track hydration skipped — no session yet ({} uris)", uris.len());
+            debug!(
+                "track hydration skipped — no session yet ({} uris)",
+                uris.len()
+            );
             return;
         };
-        let mut tracks: Vec<api::PlaylistTrack> = Vec::with_capacity(uris.len());
-        for chunk in uris.chunks(40) {
-            let req = BatchedEntityRequest {
-                entity_request: chunk
-                    .iter()
-                    .map(|uri| EntityRequest {
-                        entity_uri: uri.clone(),
-                        query: vec![ExtensionQuery {
-                            extension_kind: EnumOrUnknown::new(ExtensionKind::TRACK_V4),
-                            ..Default::default()
-                        }],
+        let tracks = fetch_tracks_v4(&session, &uris).await;
+        info!(
+            "track hydration resolved {}/{} uris",
+            tracks.len(),
+            uris.len()
+        );
+        resp.send(WorkerResponse::TracksHydrated { tracks });
+    });
+}
+
+/// Resolve `uris` to full track rows via batched `TRACK_V4` extended
+/// metadata (one request per ~40 uris). Unresolvable entries are simply
+/// absent from the result. Shared by the queue hydration + the artist
+/// page's "In your library" completion.
+async fn fetch_tracks_v4(session: &Session, uris: &[String]) -> Vec<api::PlaylistTrack> {
+    let mut tracks: Vec<api::PlaylistTrack> = Vec::with_capacity(uris.len());
+    for chunk in uris.chunks(40) {
+        let req = BatchedEntityRequest {
+            entity_request: chunk
+                .iter()
+                .map(|uri| EntityRequest {
+                    entity_uri: uri.clone(),
+                    query: vec![ExtensionQuery {
+                        extension_kind: EnumOrUnknown::new(ExtensionKind::TRACK_V4),
                         ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            let res = match session.spclient().get_extended_metadata(req).await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("track hydration batch failed: {e}");
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let res = match session.spclient().get_extended_metadata(req).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("track hydration batch failed: {e}");
+                continue;
+            }
+        };
+        for arr in res.extended_metadata {
+            for mut data in arr.extension_data {
+                let uri = data.entity_uri.clone();
+                let Some(any) = data.extension_data.take() else {
                     continue;
-                }
-            };
-            for arr in res.extended_metadata {
-                for mut data in arr.extension_data {
-                    let uri = data.entity_uri.clone();
-                    let Some(any) = data.extension_data.take() else {
-                        continue;
-                    };
-                    let Ok(t) =
-                        <librespot_protocol::metadata::Track as protobuf::Message>::parse_from_bytes(
-                            &any.value,
-                        )
-                    else {
-                        continue;
-                    };
-                    if let Some(row) = proto_track_to_row(uri, &t) {
-                        tracks.push(row);
-                    }
+                };
+                let Ok(t) =
+                    <librespot_protocol::metadata::Track as protobuf::Message>::parse_from_bytes(
+                        &any.value,
+                    )
+                else {
+                    continue;
+                };
+                if let Some(row) = proto_track_to_row(uri, &t) {
+                    tracks.push(row);
                 }
             }
         }
-        info!("track hydration resolved {}/{} uris", tracks.len(), uris.len());
-        resp.send(WorkerResponse::TracksHydrated { tracks });
-    });
+    }
+    tracks
 }
 
 /// Map a metadata-proto `Track` to our domain [`api::PlaylistTrack`].
@@ -1964,12 +2112,20 @@ fn proto_track_to_row(
 /// Liked Songs + every playlist in the membership index, each with the
 /// names of the sources that contain it. Source lists resolve through
 /// the index (complete even when a playlist's page cache is missing);
-/// track metadata joins from the available page caches. Blocking (fs
-/// reads) — call from `spawn_blocking`.
-fn artist_library_tracks(
-    artist_id: &str,
-    artist_name: &str,
-) -> Vec<(api::PlaylistTrack, Vec<String>)> {
+/// track metadata joins from the available page caches. Returns the
+/// resolved rows plus the uris of saved-by-this-artist tracks whose
+/// metadata *wasn't* in any page cache — the caller hydrates those over
+/// the network so a track in a never-opened playlist still shows.
+/// Blocking (fs reads) — call from `spawn_blocking`.
+/// A saved track paired with the names of the sources (playlists / Liked
+/// Songs) that contain it — one artist-library row.
+type ArtistLibraryRow = (api::PlaylistTrack, Vec<String>);
+/// `artist_library_scan`'s result: rows resolved from caches, plus
+/// `(uri, source_names)` for saved-by-this-artist tracks needing a
+/// metadata fetch.
+type ArtistLibraryScan = (Vec<ArtistLibraryRow>, Vec<(String, Vec<String>)>);
+
+fn artist_library_scan(artist_id: &str, artist_name: &str) -> ArtistLibraryScan {
     use crate::model::membership::MembershipSnapshot;
     let by_artist = |t: &api::PlaylistTrack| {
         // Cache rows written before the per-artist ids existed deserialize
@@ -1985,58 +2141,92 @@ fn artist_library_tracks(
                     .any(|n| n.eq_ignore_ascii_case(artist_name)))
     };
     let mut out: Vec<(api::PlaylistTrack, Vec<String>)> = Vec::new();
-    let mut add = |t: &api::PlaylistTrack, src: &str| {
-        match out.iter_mut().find(|(e, _)| e.uri == t.uri) {
+    let mut add =
+        |t: &api::PlaylistTrack, src: &str| match out.iter_mut().find(|(e, _)| e.uri == t.uri) {
             Some((_, sources)) => {
                 if !sources.iter().any(|s| s == src) {
                     sources.push(src.to_string());
                 }
             }
             None => out.push((t.clone(), vec![src.to_string()])),
-        }
-    };
-    if let Some(d) =
-        disk_cache::read_json::<api::PlaylistDetail>(&detail_cache_key(api::LIKED_SONGS_ID), PLAYLIST_DISK_TTL)
-    {
+        };
+    if let Some(d) = disk_cache::read_json::<api::PlaylistDetail>(
+        &detail_cache_key(api::LIKED_SONGS_ID),
+        PLAYLIST_DISK_TTL,
+    ) {
         for t in d.tracks.iter().filter(|t| by_artist(t)) {
             add(t, "Liked Songs");
         }
     }
-    let snap = disk_cache::read_json::<MembershipSnapshot>(
-        MEMBERSHIP_KEY,
-        std::time::Duration::MAX,
-    );
+    let snap =
+        disk_cache::read_json::<MembershipSnapshot>(MEMBERSHIP_KEY, std::time::Duration::MAX);
+    let name_of: std::collections::HashMap<&str, &str> = snap
+        .as_ref()
+        .map(|s| {
+            s.playlists
+                .iter()
+                .map(|p| (p.id.as_str(), p.name.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(snap) = &snap {
         for p in &snap.playlists {
-            if let Some(d) = disk_cache::read_json::<api::PlaylistDetail>(&detail_cache_key(&p.id), PLAYLIST_DISK_TTL)
-            {
+            if let Some(d) = disk_cache::read_json::<api::PlaylistDetail>(
+                &detail_cache_key(&p.id),
+                PLAYLIST_DISK_TTL,
+            ) {
                 for t in d.tracks.iter().filter(|t| by_artist(t)) {
                     add(t, &p.name);
                 }
             }
         }
     }
-    // Complete each track's source list from the index — a playlist whose
-    // page cache is missing still names its membership here.
-    if let Some(snap) = &snap {
-        let name_of: std::collections::HashMap<&str, &str> = snap
-            .playlists
-            .iter()
-            .map(|p| (p.id.as_str(), p.name.as_str()))
-            .collect();
-        for (track, sources) in out.iter_mut() {
-            if let Some(ids) = snap.index.get(&track.uri) {
-                for pid in ids {
-                    if let Some(name) = name_of.get(pid.as_str())
-                        && !sources.iter().any(|s| s == name)
-                    {
-                        sources.push((*name).to_string());
-                    }
-                }
+    // Complete each resolved track's source list — "Liked Songs" plus every
+    // playlist from the index (a playlist whose page cache is missing still
+    // names its membership here).
+    let sources_of = |uri: &str| -> Vec<String> {
+        let mut names = Vec::new();
+        if snap
+            .as_ref()
+            .map(|s| s.liked.contains(uri))
+            .unwrap_or(false)
+        {
+            names.push("Liked Songs".to_string());
+        }
+        if let Some(ids) = snap.as_ref().and_then(|s| s.index.get(uri)) {
+            names.extend(
+                ids.iter()
+                    .filter_map(|pid| name_of.get(pid.as_str()).map(|n| n.to_string())),
+            );
+        }
+        names
+    };
+    for (track, sources) in out.iter_mut() {
+        for name in sources_of(&track.uri) {
+            if !sources.iter().any(|s| s == &name) {
+                sources.push(name);
             }
         }
     }
-    out
+    // The reverse index answers "saved tracks by this artist" completely —
+    // including tracks in playlists whose page cache we never wrote, and
+    // liked-only tracks. Any not already resolved above needs a metadata
+    // fetch by the caller.
+    let mut missing: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(snap) = &snap
+        && let Some(uris) = snap.artist_index.get(artist_id)
+    {
+        for uri in uris {
+            // Still saved? (a remove prunes the forward index / liked set, so
+            // a stale reverse entry is filtered out here.) Already resolved?
+            let still_saved = snap.index.contains_key(uri) || snap.liked.contains(uri);
+            if !still_saved || out.iter().any(|(t, _)| &t.uri == uri) {
+                continue;
+            }
+            missing.push((uri.clone(), sources_of(uri)));
+        }
+    }
+    (out, missing)
 }
 
 /// The user's Liked Songs collection context uri
@@ -2352,15 +2542,15 @@ fn spawn_connect_session(
         let creds = Credentials::with_access_token(access_token);
         let boot =
             match spirc_bootstrap::start(s, creds, initial_volume, quality, normalize, eq).await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("spirc bootstrap failed: {e}");
-                resp.send(WorkerResponse::SpotifySessionFailed {
-                    error: e.to_string(),
-                });
-                return;
-            }
-        };
+                Ok(b) => b,
+                Err(e) => {
+                    error!("spirc bootstrap failed: {e}");
+                    resp.send(WorkerResponse::SpotifySessionFailed {
+                        error: e.to_string(),
+                    });
+                    return;
+                }
+            };
         info!("spirc connect device registered as 'Opal'");
         let spirc_bootstrap::SpircBootstrap {
             spirc,
@@ -2390,7 +2580,10 @@ fn spawn_connect_session(
         let resp_for_cluster = resp.clone();
         let self_device_id = {
             let guard = session_slot.lock().await;
-            guard.as_ref().map(|s| s.device_id().to_string()).unwrap_or_default()
+            guard
+                .as_ref()
+                .map(|s| s.device_id().to_string())
+                .unwrap_or_default()
         };
         let self_id_for_connected = self_device_id.clone();
         let self_id_for_local = self_device_id.clone();
@@ -2404,42 +2597,45 @@ fn spawn_connect_session(
         let last_active_cluster = last_active.clone();
         let local_ctx_cluster = local_ctx.clone();
         tokio::spawn(async move {
-            cluster_listener::run(cluster_sub, move |player, volume, active_device, queue, vanished| {
-                if let Some(v) = volume {
-                    resp_for_cluster.send(WorkerResponse::VolumeChanged { fraction: v });
-                }
-                // Emit BEFORE the PlayerState below: the reducer reads the
-                // still-live snapshot (correct track + position) to decide the
-                // takeover, before PlayerState wipes it to "stopped".
-                if vanished {
-                    resp_for_cluster.send(WorkerResponse::ActiveDeviceVanished);
-                }
-                {
-                    let mut la = last_active_cluster.lock().unwrap();
-                    if *la != active_device {
-                        *la = active_device.clone();
-                        let id = active_device.unwrap_or_default();
-                        let is_self = !id.is_empty() && id == self_device_id;
-                        // A remote took over: the context we stored for local
-                        // playback no longer describes what's playing, so drop
-                        // it — otherwise a later transfer back to Opal could
-                        // stamp a stale source pill before a fresh load.
-                        if !id.is_empty() && !is_self {
-                            *local_ctx_cluster.lock().unwrap() = None;
-                        }
-                        resp_for_cluster.send(WorkerResponse::ActiveDeviceChanged {
-                            is_self,
-                            device_id: id,
-                        });
+            cluster_listener::run(
+                cluster_sub,
+                move |player, volume, active_device, queue, vanished| {
+                    if let Some(v) = volume {
+                        resp_for_cluster.send(WorkerResponse::VolumeChanged { fraction: v });
                     }
-                }
-                // Full, live queue off connect-state — replaces the capped
-                // Web API list whenever a remote device is the active player.
-                if let Some(tracks) = queue {
-                    resp_for_cluster.send(WorkerResponse::QueueLoaded { tracks });
-                }
-                resp_for_cluster.send(WorkerResponse::PlayerState { player });
-            })
+                    // Emit BEFORE the PlayerState below: the reducer reads the
+                    // still-live snapshot (correct track + position) to decide the
+                    // takeover, before PlayerState wipes it to "stopped".
+                    if vanished {
+                        resp_for_cluster.send(WorkerResponse::ActiveDeviceVanished);
+                    }
+                    {
+                        let mut la = last_active_cluster.lock().unwrap();
+                        if *la != active_device {
+                            *la = active_device.clone();
+                            let id = active_device.unwrap_or_default();
+                            let is_self = !id.is_empty() && id == self_device_id;
+                            // A remote took over: the context we stored for local
+                            // playback no longer describes what's playing, so drop
+                            // it — otherwise a later transfer back to Opal could
+                            // stamp a stale source pill before a fresh load.
+                            if !id.is_empty() && !is_self {
+                                *local_ctx_cluster.lock().unwrap() = None;
+                            }
+                            resp_for_cluster.send(WorkerResponse::ActiveDeviceChanged {
+                                is_self,
+                                device_id: id,
+                            });
+                        }
+                    }
+                    // Full, live queue off connect-state — replaces the capped
+                    // Web API list whenever a remote device is the active player.
+                    if let Some(tracks) = queue {
+                        resp_for_cluster.send(WorkerResponse::QueueLoaded { tracks });
+                    }
+                    resp_for_cluster.send(WorkerResponse::PlayerState { player });
+                },
+            )
             .await;
         });
 
@@ -2563,7 +2759,14 @@ fn spawn_check_saved(resp: Responder, access_token: String, track_id: String) {
     });
 }
 
-fn spawn_set_saved(resp: Responder, access_token: String, track_id: String, saved: bool) {
+fn spawn_set_saved(
+    resp: Responder,
+    membership: MembershipArc,
+    access_token: String,
+    track_id: String,
+    artist_ids: Vec<String>,
+    saved: bool,
+) {
     tokio::spawn(async move {
         match api::set_track_saved(&access_token, &track_id, saved).await {
             // Echo the committed state (idempotent for the optimistic UI),
@@ -2571,6 +2774,26 @@ fn spawn_set_saved(resp: Responder, access_token: String, track_id: String, save
             // the change.
             Ok(()) => {
                 tokio::task::spawn_blocking(api::invalidate_liked_tracks);
+                // Keep the persisted membership snapshot current so the artist
+                // page's "In your library" reflects the like on its next open
+                // (a stale reverse-index entry after an unlike is filtered out
+                // by the scan's saved-state check, so only adds need patching).
+                let uri = format!("spotify:track:{track_id}");
+                {
+                    let mut guard = membership.lock().await;
+                    if saved {
+                        guard.liked.insert(uri.clone());
+                        for aid in &artist_ids {
+                            let v = guard.artist_index.entry(aid.clone()).or_default();
+                            if !v.contains(&uri) {
+                                v.push(uri.clone());
+                            }
+                        }
+                    } else {
+                        guard.liked.remove(&uri);
+                    }
+                }
+                persist_membership(&membership).await;
                 resp.send(WorkerResponse::SavedState { track_id, saved });
             }
             Err(e) => {
@@ -2595,7 +2818,10 @@ fn spawn_fetch_queue(resp: Responder, access_token: String) {
 }
 
 /// Disk-cache key for the playlist-membership index snapshot.
-const MEMBERSHIP_KEY: &str = "playlist_membership";
+// Bump the suffix to discard older snapshots and force one fresh scan:
+// `_v2` added `artist_index`; `_v3` re-scans after fixing a decode bug that
+// dropped tracks with a null `artists` field (leaving gaps in the index).
+const MEMBERSHIP_KEY: &str = "playlist_membership_v3";
 /// How many playlists to scan concurrently when (re)building the index.
 const MEMBERSHIP_SCAN_CONCURRENCY: usize = 5;
 
@@ -2624,9 +2850,16 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
         if let Some(snap) = fresh {
             let playlists = snap.playlists.clone();
             let index = snap.index.clone();
+            let artist_index = snap.artist_index.clone();
+            let liked = snap.liked.clone();
             info!("membership: {} playlists from disk cache", playlists.len());
             *membership.lock().await = snap;
-            resp.send(WorkerResponse::MembershipLoaded { playlists, index });
+            resp.send(WorkerResponse::MembershipLoaded {
+                playlists,
+                index,
+                artist_index,
+                liked,
+            });
             return;
         }
         // 2. Stale-but-present cache — show it *immediately* (so the heart +
@@ -2641,12 +2874,19 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
         if let Some(snap) = stale {
             let playlists = snap.playlists.clone();
             let index = snap.index.clone();
+            let artist_index = snap.artist_index.clone();
+            let liked = snap.liked.clone();
             info!(
                 "membership: {} playlists from stale cache — revalidating",
                 playlists.len()
             );
             *membership.lock().await = snap;
-            resp.send(WorkerResponse::MembershipLoaded { playlists, index });
+            resp.send(WorkerResponse::MembershipLoaded {
+                playlists,
+                index,
+                artist_index,
+                liked,
+            });
         }
         // 3. Scan. Editable = owned or collaborative (only those take writes).
         let me = api::get_me(&access_token)
@@ -2663,6 +2903,8 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
         info!("membership: scanning {} editable playlists", editable.len());
         let mut index: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
+        let mut artist_index: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for chunk in editable.chunks(MEMBERSHIP_SCAN_CONCURRENCY) {
             let futs = chunk.iter().map(|p| {
                 let token = access_token.clone();
@@ -2671,14 +2913,39 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
             });
             for (id, res) in futures::future::join_all(futs).await {
                 match res {
-                    Ok(uris) => {
-                        for uri in uris {
+                    Ok(rows) => {
+                        for (uri, artist_ids) in rows {
+                            for aid in artist_ids {
+                                let v = artist_index.entry(aid).or_default();
+                                if !v.contains(&uri) {
+                                    v.push(uri.clone());
+                                }
+                            }
                             index.entry(uri).or_default().push(id.clone());
                         }
                     }
                     Err(e) => warn!("membership: scan playlist {id} failed: {e}"),
                 }
             }
+        }
+        // Fold Liked Songs into the reverse index too — "saved" means liked
+        // OR in an editable playlist, and a liked-only track must still show
+        // on the artist page. (`/me/tracks` dodges the Dev-Mode `/items`
+        // 403s.) Kept out of the forward `index`, which is playlists only.
+        let mut liked: std::collections::HashSet<String> = std::collections::HashSet::new();
+        match api::liked_track_artist_uris(&access_token).await {
+            Ok(rows) => {
+                for (uri, artist_ids) in rows {
+                    for aid in artist_ids {
+                        let v = artist_index.entry(aid).or_default();
+                        if !v.contains(&uri) {
+                            v.push(uri.clone());
+                        }
+                    }
+                    liked.insert(uri);
+                }
+            }
+            Err(e) => warn!("membership: liked scan failed: {e}"),
         }
         let playlists: Vec<MembershipPlaylist> = editable
             .into_iter()
@@ -2688,19 +2955,27 @@ fn spawn_load_membership(resp: Responder, membership: MembershipArc, access_toke
             })
             .collect();
         info!(
-            "membership: index built — {} tracks across {} playlists",
+            "membership: index built — {} playlist tracks across {} playlists, {} liked, {} artists",
             index.len(),
-            playlists.len()
+            playlists.len(),
+            liked.len(),
+            artist_index.len(),
         );
         let index_for_ui = index.clone();
+        let artist_index_for_ui = artist_index.clone();
+        let liked_for_ui = liked.clone();
         *membership.lock().await = MembershipSnapshot {
             playlists: playlists.clone(),
             index,
+            artist_index,
+            liked,
         };
         persist_membership(&membership).await;
         resp.send(WorkerResponse::MembershipLoaded {
             playlists,
             index: index_for_ui,
+            artist_index: artist_index_for_ui,
+            liked: liked_for_ui,
         });
     });
 }
@@ -2730,6 +3005,7 @@ fn spawn_edit_membership(
     access_token: String,
     playlist_id: String,
     track_uri: String,
+    artist_ids: Vec<String>,
     add: bool,
 ) {
     tokio::spawn(async move {
@@ -2747,13 +3023,22 @@ fn spawn_edit_membership(
             });
             return;
         }
-        // Update the in-memory index for `track_uri`, then re-persist.
+        // Update the in-memory index for `track_uri`, then re-persist so the
+        // artist page's next open sees it. Only adds patch the reverse index
+        // — a stale entry after a remove is filtered by the scan's
+        // saved-state check.
         {
             let mut guard = membership.lock().await;
             let entry = guard.index.entry(track_uri.clone()).or_default();
             if add {
                 if !entry.contains(&playlist_id) {
                     entry.push(playlist_id.clone());
+                }
+                for aid in &artist_ids {
+                    let v = guard.artist_index.entry(aid.clone()).or_default();
+                    if !v.contains(&track_uri) {
+                        v.push(track_uri.clone());
+                    }
                 }
             } else {
                 entry.retain(|p| p != &playlist_id);
@@ -2816,8 +3101,7 @@ fn spawn_try_load(resp: Responder, client_id: String) {
                     info!("refreshing expired token");
                     match refresh_token(&tokens.refresh_token, &client_id).await {
                         Ok(auth) => {
-                            let stored =
-                                StoredTokens::from_refresh(auth.clone(), Some(&tokens));
+                            let stored = StoredTokens::from_refresh(auth.clone(), Some(&tokens));
                             let _ = token_manager::save_tokens(&stored);
                             resp.send(WorkerResponse::TokensLoaded { auth });
                         }

@@ -30,14 +30,22 @@ pub fn cache_key(url: &str) -> String {
 /// raw 640² Spotify cover would dominate; 256² is plenty for our 96px
 /// display + retina headroom and lets the atlas hold many tracks.
 pub fn decode_to_rgba(bytes: &[u8], max_dim: u32) -> Option<(u32, u32, Vec<u8>)> {
-    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
     let img = reader.decode().ok()?;
     let (w, h) = (img.width(), img.height());
     let img = if w.max(h) > max_dim {
         let (nw, nh) = if w >= h {
-            (max_dim, (h as f32 * max_dim as f32 / w as f32).round() as u32)
+            (
+                max_dim,
+                (h as f32 * max_dim as f32 / w as f32).round() as u32,
+            )
         } else {
-            ((w as f32 * max_dim as f32 / h as f32).round() as u32, max_dim)
+            (
+                (w as f32 * max_dim as f32 / h as f32).round() as u32,
+                max_dim,
+            )
         };
         img.resize_exact(nw, nh, image::imageops::FilterType::Triangle)
     } else {
@@ -112,7 +120,11 @@ mod tests {
             .collect();
         let rgba = make_rgba(&pixels);
         let accent = extract_accent(&rgba, 10, 1);
-        assert!((accent[0] - 1.0).abs() < 1e-3, "red channel ~1.0 got {}", accent[0]);
+        assert!(
+            (accent[0] - 1.0).abs() < 1e-3,
+            "red channel ~1.0 got {}",
+            accent[0]
+        );
         assert!(accent[1].abs() < 1e-3);
         assert!(accent[2].abs() < 1e-3);
     }

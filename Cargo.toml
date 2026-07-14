@@ -18,6 +18,7 @@ hotreload = ["dep:subsecond", "dep:dioxus-devtools"]
 opal-gfx = { path = "../opal-gfx" }
 log = "0.4.31"
 env_logger = "0.11"
+chrono = "0.4"
 
 # Auth + HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

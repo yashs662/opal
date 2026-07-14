@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use std::time::Duration;
 
-use opal_gfx::{Align, Computed, Curve, CursorIcon, Justify, Len, Scene, Signal};
+use opal_gfx::{Align, Computed, CursorIcon, Curve, Justify, Len, Scene, Signal};
 
 use crate::model::{BackdropModel, DevicesModel, MembershipModel, PlayerModel};
 use crate::views::MainNav;
@@ -115,11 +115,7 @@ impl Component for PlayerBar<'_> {
                                 self.backdrop.accent.clone(),
                             ),
                             |(liked, in_pl, acc)| {
-                                if liked || in_pl {
-                                    acc
-                                } else {
-                                    t::TEXT_DIM
-                                }
+                                if liked || in_pl { acc } else { t::TEXT_DIM }
                             },
                         );
                         let heart_h = icons.get(Icon::Heart);
@@ -130,7 +126,11 @@ impl Component for PlayerBar<'_> {
                                 self.membership.in_playlist.clone(),
                             ),
                             move |(liked, in_pl)| {
-                                Some(if liked || in_pl { heart_filled_h } else { heart_h })
+                                Some(if liked || in_pl {
+                                    heart_filled_h
+                                } else {
+                                    heart_h
+                                })
                             },
                         );
                         let like_overlay = self.membership.overlay.clone();
@@ -170,10 +170,17 @@ impl Component for PlayerBar<'_> {
                                     (self.player.shuffle.clone(), self.backdrop.accent.clone()),
                                     |(on, acc)| if on { acc } else { t::TEXT_DIM },
                                 );
-                                transport_btn(tr, icons, Icon::Shuffle, t::ICON_MD, shuffle_tint, {
-                                    let act = self.on_action.clone();
-                                    move || act(PlayerAction::ToggleShuffle)
-                                });
+                                transport_btn(
+                                    tr,
+                                    icons,
+                                    Icon::Shuffle,
+                                    t::ICON_MD,
+                                    shuffle_tint,
+                                    {
+                                        let act = self.on_action.clone();
+                                        move || act(PlayerAction::ToggleShuffle)
+                                    },
+                                );
                                 transport_btn(tr, icons, Icon::SkipBack, t::ICON_LG, t::TEXT, {
                                     let act = self.on_action.clone();
                                     move || act(PlayerAction::Prev)
@@ -181,10 +188,10 @@ impl Component for PlayerBar<'_> {
                                 let play_h = icons.get(Icon::Play);
                                 let pause_h = icons.get(Icon::Pause);
                                 let logo_h = icons.logo();
-                                let play_glyph =
-                                    Computed::new((self.player.is_playing.clone(),), move |(playing,)| {
-                                        Some(if playing { pause_h } else { play_h })
-                                    });
+                                let play_glyph = Computed::new(
+                                    (self.player.is_playing.clone(),),
+                                    move |(playing,)| Some(if playing { pause_h } else { play_h }),
+                                );
                                 let play_act = self.on_action.clone();
                                 // Loading overlay opacity (black disc + logo) and
                                 // the logo's own breathe pulse — driven by the
@@ -241,7 +248,9 @@ impl Component for PlayerBar<'_> {
                                 let repeat_one_h = icons.get(Icon::RepeatOne);
                                 let repeat_glyph = Computed::new(
                                     (self.player.repeat_track.clone(),),
-                                    move |(track,)| Some(if track { repeat_one_h } else { repeat_h }),
+                                    move |(track,)| {
+                                        Some(if track { repeat_one_h } else { repeat_h })
+                                    },
                                 );
                                 let repeat_act = self.on_action.clone();
                                 tr.row(())
@@ -292,14 +301,25 @@ impl Component for PlayerBar<'_> {
                             },
                         );
                         let on_np = self.on_np_toggle.clone();
-                        icon_btn(r, icons, Icon::PanelRight, np_tint.into(), np_hover, move |_| {
-                            on_np()
-                        });
+                        icon_btn(
+                            r,
+                            icons,
+                            Icon::PanelRight,
+                            np_tint.into(),
+                            np_hover,
+                            move |_| on_np(),
+                        );
                         // Queue page.
                         let q_hover = Signal::new(false);
                         let q_tint = Computed::new(
                             (q_hover.clone(), self.backdrop.accent.clone()),
-                            |(h, acc)| if h { accent_hover_color(&acc) } else { t::TEXT_DIM },
+                            |(h, acc)| {
+                                if h {
+                                    accent_hover_color(&acc)
+                                } else {
+                                    t::TEXT_DIM
+                                }
+                            },
                         );
                         let nav = self.on_navigate.clone();
                         icon_btn(r, icons, Icon::Queue, q_tint.into(), q_hover, move |ctx| {
@@ -328,10 +348,17 @@ impl Component for PlayerBar<'_> {
                         );
                         let dev_overlay = self.devices.overlay.clone();
                         let on_devices_open = self.on_devices_open.clone();
-                        icon_btn(r, icons, Icon::Devices, dev_tint.into(), dev_hover, move |ctx| {
-                            dev_overlay.open(ctx.timeline, ctx.now);
-                            on_devices_open();
-                        });
+                        icon_btn(
+                            r,
+                            icons,
+                            Icon::Devices,
+                            dev_tint.into(),
+                            dev_hover,
+                            move |ctx| {
+                                dev_overlay.open(ctx.timeline, ctx.now);
+                                on_devices_open();
+                            },
+                        );
                         // Wrapped in the same SP_7 box as the queue/devices
                         // buttons so the glyph-to-glyph spacing is even (a
                         // raw icon node is narrower than the button boxes).
@@ -368,13 +395,10 @@ impl PlayerBar<'_> {
             .gap(t::SP_2)
             .align(Align::Center)
             .child(|sl| {
-                sl.row(())
-                    .w_px(t::SP_10)
-                    .justify(Justify::End)
-                    .child(|c| {
-                        c.text_bound((), self.player.elapsed_label.clone(), 10.0)
-                            .color(t::TEXT_DIM);
-                    });
+                sl.row(()).w_px(t::SP_10).justify(Justify::End).child(|c| {
+                    c.text_bound((), self.player.elapsed_label.clone(), 10.0)
+                        .color(t::TEXT_DIM);
+                });
                 sl.row("seekbar")
                     .w(Len::Fill)
                     .h(Len::Fill)
@@ -518,8 +542,7 @@ impl PlayerBar<'_> {
                 // so the fill glides instead of snapping (the timeline
                 // writes interpolated values, which the width bind follows);
                 // commit the target. The pill rides the thumb to the new %.
-                let target =
-                    (wheel_vol.get() + ctx.delta[1] * VOLUME_WHEEL_STEP).clamp(0.0, 1.0);
+                let target = (wheel_vol.get() + ctx.delta[1] * VOLUME_WHEEL_STEP).clamp(0.0, 1.0);
                 ctx.timeline.animate(
                     &wheel_vol,
                     target,
@@ -536,7 +559,10 @@ impl PlayerBar<'_> {
                 // edge sits half-a-box left of the bar origin, shifted by
                 // `vol_preview_px` so `offset = cursor_px` centres it.
                 let tip_opacity = Computed::new(
-                    (self.player.vol_hovered.clone(), self.player.vol_dragging.clone()),
+                    (
+                        self.player.vol_hovered.clone(),
+                        self.player.vol_dragging.clone(),
+                    ),
                     |(h, d)| if h || d { 1.0 } else { 0.0 },
                 );
                 lane.row(())
@@ -578,7 +604,6 @@ impl PlayerBar<'_> {
 /// Fixed width (logical px) of the seek tooltip's centring box. The pill is
 /// centred inside it; must exceed the widest "M:SS"/"MM:SS" pill.
 const TIP_W: f32 = 96.0;
-
 
 /// Clickable bare icon (no background pill) for the player-bar utilities.
 /// `tint` is a reactive bind that should already fold `hover` in (the

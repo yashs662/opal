@@ -59,7 +59,13 @@ impl AppState {
                 } else {
                     0.0
                 };
-                (p.name.as_str(), p.artist.as_str(), frac, p.progress_ms, p.duration_ms)
+                (
+                    p.name.as_str(),
+                    p.artist.as_str(),
+                    frac,
+                    p.progress_ms,
+                    p.duration_ms,
+                )
             }
             None => ("\u{2014}", "", 0.0, 0, 0),
         };
@@ -71,22 +77,25 @@ impl AppState {
         // changes. The first live cluster push overwrites it. Built here and
         // handed to `PlayerModel::seed` so the field is set at construction
         // (no post-init `borrow_mut` on the live cell).
-        let restored = prefs.last_player.as_ref().map(|p| crate::api::CurrentlyPlaying {
-            track_id: p.track_id.clone(),
-            name: p.name.clone(),
-            artist: p.artist.clone(),
-            artist_id: p.artist_id.clone(),
-            artists: p.artists.clone(),
-            album_image_url: p.album_image_url.clone(),
-            is_playing: false,
-            progress_ms: p.progress_ms,
-            progress_anchor: std::time::Instant::now(),
-            duration_ms: p.duration_ms,
-            shuffle: false,
-            repeat: crate::api::RepeatMode::Off,
-            context_uri: p.context_uri.clone(),
-            context_name: p.context_name.clone(),
-        });
+        let restored = prefs
+            .last_player
+            .as_ref()
+            .map(|p| crate::api::CurrentlyPlaying {
+                track_id: p.track_id.clone(),
+                name: p.name.clone(),
+                artist: p.artist.clone(),
+                artist_id: p.artist_id.clone(),
+                artists: p.artists.clone(),
+                album_image_url: p.album_image_url.clone(),
+                is_playing: false,
+                progress_ms: p.progress_ms,
+                progress_anchor: std::time::Instant::now(),
+                duration_ms: p.duration_ms,
+                shuffle: false,
+                repeat: crate::api::RepeatMode::Off,
+                context_uri: p.context_uri.clone(),
+                context_name: p.context_name.clone(),
+            });
         Self {
             router: RouterModel::new(),
             auth: AuthModel::new(),

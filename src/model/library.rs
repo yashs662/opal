@@ -7,7 +7,7 @@
 //! virtualised list, and later pages stream into the shared buffer the
 //! `lazy_list` reads on scroll — no blocking "loading all 989 songs".
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -112,6 +112,19 @@ pub struct LibraryModel {
     /// Whether the pulse tween is currently running (mirror, so the frame
     /// tick can start/stop it on state edges instead of every frame).
     pub pulse_on: bool,
+    /// Last time-of-day bucket the home greeting was built for (0/1/2 =
+    /// morning/afternoon/evening; 255 = unset). The frame tick rebuilds when
+    /// it changes so the greeting stays current even if the app idles on the
+    /// feed across a boundary. A background timer wakes the loop at each one.
+    pub greeting_bucket: Cell<u8>,
+    /// Resolved Recents session contexts (uri → name/owner/cover). The
+    /// Recents page shows a generic "Playlist"/count label until these land.
+    pub recent_contexts: std::collections::HashMap<String, crate::api::RecentContextInfo>,
+    /// Context uris we've already dispatched a resolve for — so re-opening
+    /// Recents doesn't re-request (the fetch is disk-cached anyway).
+    pub recent_contexts_requested: HashSet<String>,
+    /// Recents session keys the user has expanded (survives rebuild).
+    pub expanded_recents: HashSet<String>,
 }
 
 impl LibraryModel {
@@ -126,6 +139,10 @@ impl LibraryModel {
             queue: None,
             skeleton_pulse: Signal::new(1.0),
             pulse_on: false,
+            greeting_bucket: Cell::new(u8::MAX),
+            recent_contexts: std::collections::HashMap::new(),
+            recent_contexts_requested: HashSet::new(),
+            expanded_recents: HashSet::new(),
         }
     }
 
@@ -171,7 +188,7 @@ impl LibraryModel {
         buf: &RowBuf,
         tracks: &[PlaylistTrack],
         liked_page: bool,
-        saved_index: &std::collections::HashMap<String, Vec<String>>,
+        membership: &crate::model::membership::MembershipModel,
     ) {
         let mut out = buf.borrow_mut();
         out.reserve(tracks.len());
@@ -180,7 +197,8 @@ impl LibraryModel {
                 .album_image_url
                 .as_ref()
                 .map(|u| art.or_signal(album_art::cache_key(u)));
-            let in_library = liked_page || saved_index.contains_key(&t.uri);
+            // Single saved-state source of truth — same check every heart uses.
+            let in_library = liked_page || membership.is_saved(&t.uri);
             out.push(PlaylistRow {
                 title: t.name.clone(),
                 artist: t.artist.clone(),
@@ -228,7 +246,7 @@ impl LibraryModel {
         liked: bool,
         id: &str,
         track: &PlaylistTrack,
-        saved_index: &std::collections::HashMap<String, Vec<String>>,
+        membership: &crate::model::membership::MembershipModel,
     ) -> bool {
         // Extract the shared row buffer (an `Rc` clone) under the
         let rows = {
@@ -243,7 +261,7 @@ impl LibraryModel {
             open.total += 1;
             open.rows.clone()
         };
-        self.build_rows(art, &rows, std::slice::from_ref(track), liked, saved_index);
+        self.build_rows(art, &rows, std::slice::from_ref(track), liked, membership);
         if liked {
             // Liked Songs lists most-recent first — move the just-appended
             rows.borrow_mut().rotate_right(1);
@@ -284,9 +302,15 @@ impl LibraryModel {
     /// caller routes to `MainNav::Playlist` with its own synthetic id
     /// (which scopes the page's scroll identity); no context uri ⇒ rows
     /// play via the uris-window fallback.
-    pub fn open_synthetic(&mut self, art: &mut ArtModel, name: String, tracks: Vec<PlaylistTrack>) {
+    pub fn open_synthetic(
+        &mut self,
+        art: &mut ArtModel,
+        name: String,
+        tracks: Vec<PlaylistTrack>,
+        membership: &crate::model::membership::MembershipModel,
+    ) {
         let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-        self.build_rows(art, &buf, &tracks, true, &std::collections::HashMap::new());
+        self.build_rows(art, &buf, &tracks, true, membership);
         self.open_artist = None;
         self.open_playlist = Some(OpenPlaylist {
             liked: false,
@@ -308,11 +332,11 @@ impl LibraryModel {
         token: Option<String>,
         id: &str,
         liked: bool,
-        saved_index: &std::collections::HashMap<String, Vec<String>>,
+        membership: &crate::model::membership::MembershipModel,
     ) {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-            self.build_rows(art, &buf, &detail.tracks, liked, saved_index);
+            self.build_rows(art, &buf, &detail.tracks, liked, membership);
             self.open_playlist = Some(OpenPlaylist {
                 liked,
                 name: detail.name,
@@ -369,11 +393,11 @@ impl LibraryModel {
         worker: &Worker,
         token: Option<String>,
         id: &str,
-        saved_index: &std::collections::HashMap<String, Vec<String>>,
+        membership: &crate::model::membership::MembershipModel,
     ) {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-            self.build_rows(art, &buf, &detail.tracks, false, saved_index);
+            self.build_rows(art, &buf, &detail.tracks, false, membership);
             self.open_playlist = Some(OpenPlaylist {
                 liked: false,
                 name: detail.name,

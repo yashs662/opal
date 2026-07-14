@@ -121,8 +121,7 @@ impl ArtModel {
     // --- track details ------------------------------------------------
 
     pub fn insert_track_detail(&mut self, details: TrackDetails) {
-        self.track_details
-            .insert(details.track_id.clone(), details);
+        self.track_details.insert(details.track_id.clone(), details);
     }
 
     /// Full cached `/v1/tracks/{id}` detail (name + artist + cover), if

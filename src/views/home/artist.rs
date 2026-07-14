@@ -106,7 +106,12 @@ pub fn view(
                                     .abs(0.0, 0.0)
                                     .w(Len::Fill)
                                     .h(Len::Fill)
-                                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
+                                    .rgba(
+                                        t::PLACEHOLDER[0],
+                                        t::PLACEHOLDER[1],
+                                        t::PLACEHOLDER[2],
+                                        1.0,
+                                    )
                                     .radius(t::R_FULL);
                             }
                         });
@@ -146,6 +151,7 @@ pub fn view(
                             }),
                             sources: row.sources.clone(),
                             in_library: row.in_library,
+                            playable: row.track.playable,
                         },
                         actions,
                     );
@@ -157,8 +163,8 @@ pub fn view(
             // the library set from the clicked row; the full list opens
             // as a synthetic playlist page.
             if !data.library.is_empty() {
-                let show_all = (data.library.len() > LIBRARY_PREVIEW)
-                    .then(|| on_show_all_library.clone());
+                let show_all =
+                    (data.library.len() > LIBRARY_PREVIEW).then(|| on_show_all_library.clone());
                 section_header(c, "In your library", show_all);
                 let uris: Vec<String> = data
                     .library
@@ -184,6 +190,7 @@ pub fn view(
                             }),
                             sources: row.sources.clone(),
                             in_library: row.in_library,
+                            playable: row.track.playable,
                         },
                         actions,
                     );

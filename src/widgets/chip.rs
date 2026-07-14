@@ -11,7 +11,10 @@ use crate::widgets::tokens as t;
 /// on the panel-highlight colour.
 pub fn chip(s: &mut Scene, label: &str, selected: bool, accent: &Signal<[f32; 4]>) {
     let mut row = s.row(());
-    row.h_px(t::CHIP_H).pad_xy(t::SP_3_5, t::SP_0).center().radius(t::R_FULL);
+    row.h_px(t::CHIP_H)
+        .pad_xy(t::SP_3_5, t::SP_0)
+        .center()
+        .radius(t::R_FULL);
     if selected {
         row.color(accent.clone()).hover_opacity(0.9).child(|c| {
             c.text((), label, 13.0).color(accent_fg(accent));

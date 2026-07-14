@@ -91,20 +91,50 @@ impl BackdropModel {
             self.prev.set(current);
             self.curr.set(Some(next));
             self.crossfade_t.set(0.0);
-            tl.animate(&self.crossfade_t, 1.0, Curve::EaseInOut, CROSSFADE_DURATION, now);
+            tl.animate(
+                &self.crossfade_t,
+                1.0,
+                Curve::EaseInOut,
+                CROSSFADE_DURATION,
+                now,
+            );
             self.panel_t.set(0.0);
-            tl.animate(&self.panel_t, 1.0, Curve::EaseInOut, PANEL_CROSSFADE_DURATION, now);
+            tl.animate(
+                &self.panel_t,
+                1.0,
+                Curve::EaseInOut,
+                PANEL_CROSSFADE_DURATION,
+                now,
+            );
         }
-        tl.animate(&self.art_luma, luma, Curve::EaseInOut, CROSSFADE_DURATION, now);
+        tl.animate(
+            &self.art_luma,
+            luma,
+            Curve::EaseInOut,
+            CROSSFADE_DURATION,
+            now,
+        );
         if let Some(c) = accent {
-            tl.animate(&self.accent, c, Curve::EaseInOut, PANEL_CROSSFADE_DURATION, now);
+            tl.animate(
+                &self.accent,
+                c,
+                Curve::EaseInOut,
+                PANEL_CROSSFADE_DURATION,
+                now,
+            );
         }
     }
 
     /// Tween only the accent — a late `AccentReady` overriding the
     /// provisional pixel-average with Spotify's exact colour.
     pub fn set_accent(&self, accent: [f32; 4], tl: &mut Timeline, now: Instant) {
-        tl.animate(&self.accent, accent, Curve::EaseInOut, PANEL_CROSSFADE_DURATION, now);
+        tl.animate(
+            &self.accent,
+            accent,
+            Curve::EaseInOut,
+            PANEL_CROSSFADE_DURATION,
+            now,
+        );
     }
 }
 

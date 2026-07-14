@@ -77,13 +77,11 @@ pub async fn listen_for_callback(
         .map_err(|e| AuthError::Server(e.to_string()))?;
     debug!("Listening on http://127.0.0.1:8888...");
 
-    let (mut socket, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        listener.accept(),
-    )
-    .await
-    .map_err(|_| AuthError::Timeout("waiting for callback".into()))?
-    .map_err(|e| AuthError::Server(e.to_string()))?;
+    let (mut socket, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
+            .await
+            .map_err(|_| AuthError::Timeout("waiting for callback".into()))?
+            .map_err(|e| AuthError::Server(e.to_string()))?;
 
     let mut buffer = vec![0u8; 4096];
     let mut filled = 0usize;
@@ -102,9 +100,7 @@ pub async fn listen_for_callback(
         .find("code=")
         .and_then(|s| {
             let after = &request[s + 5..];
-            let end = after
-                .find(['&', ' ', '\r', '\n'])
-                .unwrap_or(after.len());
+            let end = after.find(['&', ' ', '\r', '\n']).unwrap_or(after.len());
             (end > 0).then(|| &after[..end])
         })
         .ok_or_else(|| AuthError::Parse("no code in request".into()))?
@@ -132,7 +128,13 @@ pub async fn listen_for_callback(
     }
 
     let body = res.json::<serde_json::Value>().await?;
-    let required = ["access_token", "token_type", "expires_in", "refresh_token", "scope"];
+    let required = [
+        "access_token",
+        "token_type",
+        "expires_in",
+        "refresh_token",
+        "scope",
+    ];
     if required.iter().any(|k| body.get(k).is_none()) {
         write_html(&mut socket, LOGIN_ERR_HTML).await.ok();
         return Err(AuthError::Parse("bad spotify response".into()));
@@ -170,12 +172,18 @@ pub async fn refresh_token(
         return Err(AuthError::Api(body, Some(status)));
     }
     let body = res.json::<serde_json::Value>().await?;
-    let new_refresh = body["refresh_token"].as_str().unwrap_or(refresh).to_string();
+    let new_refresh = body["refresh_token"]
+        .as_str()
+        .unwrap_or(refresh)
+        .to_string();
     Ok(SpotifyAuthResponse {
         access_token: body["access_token"].as_str().unwrap().to_string(),
         token_type: body["token_type"].as_str().unwrap().to_string(),
         expires_in: body["expires_in"].as_u64().unwrap(),
         refresh_token: new_refresh,
-        scope: body["scope"].as_str().unwrap_or(SPOTIFY_ACCESS_SCOPES).to_string(),
+        scope: body["scope"]
+            .as_str()
+            .unwrap_or(SPOTIFY_ACCESS_SCOPES)
+            .to_string(),
     })
 }

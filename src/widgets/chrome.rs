@@ -15,9 +15,30 @@ pub fn title_bar(s: &mut Scene, icons: &IconSet, title: &str) {
         .child(|t| {
             t.text((), title, 13.0).color(tokens::TEXT_DIM);
 
-            chrome_btn(t, icons, Icon::Minimize, WindowAction::Minimize, tokens::BTN_HOVER, true);
-            chrome_btn(t, icons, Icon::Maximize, WindowAction::ToggleMaximize, tokens::BTN_HOVER, false);
-            chrome_btn(t, icons, Icon::Close, WindowAction::Close, tokens::CLOSE_HOVER, false);
+            chrome_btn(
+                t,
+                icons,
+                Icon::Minimize,
+                WindowAction::Minimize,
+                tokens::BTN_HOVER,
+                true,
+            );
+            chrome_btn(
+                t,
+                icons,
+                Icon::Maximize,
+                WindowAction::ToggleMaximize,
+                tokens::BTN_HOVER,
+                false,
+            );
+            chrome_btn(
+                t,
+                icons,
+                Icon::Close,
+                WindowAction::Close,
+                tokens::CLOSE_HOVER,
+                false,
+            );
         });
 }
 

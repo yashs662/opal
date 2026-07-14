@@ -25,9 +25,14 @@ const AUDIO_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// a TTL would only force pointless refetches.
 pub fn new_session() -> Session {
     let cache = crate::disk_cache::audio_dir().and_then(|dir| {
-        Cache::new(None::<PathBuf>, None, Some(dir), Some(AUDIO_CACHE_MAX_BYTES))
-            .inspect_err(|e| log::warn!("audio cache unavailable — streaming uncached: {e}"))
-            .ok()
+        Cache::new(
+            None::<PathBuf>,
+            None,
+            Some(dir),
+            Some(AUDIO_CACHE_MAX_BYTES),
+        )
+        .inspect_err(|e| log::warn!("audio cache unavailable — streaming uncached: {e}"))
+        .ok()
     });
     // Autoplay: when the current context/queue runs out, librespot resolves
     // a station of recommended tracks and keeps playing — matching the

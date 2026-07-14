@@ -22,6 +22,20 @@ pub struct MenuTarget {
     pub track: Option<Box<crate::api::PlaylistTrack>>,
 }
 
+impl MenuTarget {
+    /// The canonical builder — every track surface (rows, cards, recents)
+    /// routes through this so the menu offers the same items everywhere:
+    /// Add to queue, Go to album/artist (when known), Add to playlist….
+    pub fn for_track(t: &crate::api::PlaylistTrack) -> Self {
+        Self {
+            uri: t.uri.clone(),
+            album_id: t.album_id.clone(),
+            artist_id: t.artist_id.clone(),
+            track: Some(Box::new(t.clone())),
+        }
+    }
+}
+
 pub struct MenuModel {
     pub open: bool,
     /// Anchor position in **logical px** (cursor at right-click time).

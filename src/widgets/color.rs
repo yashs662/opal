@@ -14,7 +14,11 @@ use opal_gfx::{Computed, Signal};
 /// are linearized then weighted (Rec. 709). 0 = black, 1 = white.
 pub fn luminance(c: [f32; 4]) -> f32 {
     fn lin(u: f32) -> f32 {
-        if u <= 0.04045 { u / 12.92 } else { ((u + 0.055) / 1.055).powf(2.4) }
+        if u <= 0.04045 {
+            u / 12.92
+        } else {
+            ((u + 0.055) / 1.055).powf(2.4)
+        }
     }
     0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
 }
@@ -77,7 +81,11 @@ pub fn lift_for_chrome(c: [f32; 4]) -> [f32; 4] {
     let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
     for _ in 0..20 {
         let mid = (lo + hi) * 0.5;
-        if luminance(mix(mid)) < target { lo = mid } else { hi = mid }
+        if luminance(mix(mid)) < target {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     mix(hi)
 }
@@ -146,7 +154,7 @@ mod tests {
     #[test]
     fn chrome_accent_prefers_first_passing_variant() {
         let v = ExtractedColors {
-            raw: Some([0.9, 0.2, 0.2, 1.0]),   // bright red — passes
+            raw: Some([0.9, 0.2, 0.2, 1.0]), // bright red — passes
             light: Some([1.0, 0.8, 0.8, 1.0]),
             dark: Some([0.1, 0.02, 0.02, 1.0]),
         };

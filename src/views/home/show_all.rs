@@ -139,46 +139,46 @@ fn show_all_row(
         crate::views::home::attach_context_menu(&mut r, on_context_menu, target);
     }
     r.child(|r| {
-            // Thumb.
-            r.col(()).w_px(t::THUMB_MD).h_px(t::THUMB_MD).child(|b| {
-                if let Some(sig) = row.thumb.clone() {
-                    b.image_bound((), sig)
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .radius(radius)
-                        .placeholder_fill(t::PLACEHOLDER);
-                } else {
-                    b.rect(())
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                        .radius(radius);
-                }
-            });
-            // Title + subtitle.
-            r.col(())
-                .w(Len::Fill)
-                .h(Len::Fill)
-                .gap(t::SP_0_5)
-                .justify(Justify::Center)
-                .overflow_x(Overflow::Hidden)
-                .child(|m| {
-                    m.text((), &row.title, 14.0)
-                        .color(t::TEXT)
-                        .max_width_px(420.0);
-                    m.text((), &row.subtitle, 12.0)
-                        .color(t::TEXT_DIM)
-                        .max_width_px(420.0);
-                });
-            // Trailing chevron affordance (detail-page rows only).
-            if chevron {
-                r.row(()).push_end().w_px(t::SP_6).center().child(|c| {
-                    icons.render(c, Icon::ChevronRight, t::ICON_MD, t::TEXT_DIM);
-                });
+        // Thumb.
+        r.col(()).w_px(t::THUMB_MD).h_px(t::THUMB_MD).child(|b| {
+            if let Some(sig) = row.thumb.clone() {
+                b.image_bound((), sig)
+                    .abs(0.0, 0.0)
+                    .w(Len::Fill)
+                    .h(Len::Fill)
+                    .radius(radius)
+                    .placeholder_fill(t::PLACEHOLDER);
+            } else {
+                b.rect(())
+                    .abs(0.0, 0.0)
+                    .w(Len::Fill)
+                    .h(Len::Fill)
+                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
+                    .radius(radius);
             }
         });
+        // Title + subtitle.
+        r.col(())
+            .w(Len::Fill)
+            .h(Len::Fill)
+            .gap(t::SP_0_5)
+            .justify(Justify::Center)
+            .overflow_x(Overflow::Hidden)
+            .child(|m| {
+                m.text((), &row.title, 14.0)
+                    .color(t::TEXT)
+                    .max_width_px(420.0);
+                m.text((), &row.subtitle, 12.0)
+                    .color(t::TEXT_DIM)
+                    .max_width_px(420.0);
+            });
+        // Trailing chevron affordance (detail-page rows only).
+        if chevron {
+            r.row(()).push_end().w_px(t::SP_6).center().child(|c| {
+                icons.render(c, Icon::ChevronRight, t::ICON_MD, t::TEXT_DIM);
+            });
+        }
+    });
 }
 
 const MONTHS: [&str; 12] = [

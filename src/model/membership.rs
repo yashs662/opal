@@ -8,8 +8,8 @@
 //! list, the current track's membership (drives the heart + checkboxes),
 //! and the picker popup state. The heavy index stays in the worker.
 
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use opal_gfx::{Overlay, Signal, TextSignal};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,19 @@ pub struct MembershipSnapshot {
     pub playlists: Vec<MembershipPlaylist>,
     /// `spotify:track:… → [playlist_id]` — which playlists contain a track.
     pub index: std::collections::HashMap<String, Vec<String>>,
+    /// `artist_id → [track_uri]` — the reverse index that answers "which
+    /// saved tracks are by this artist", built from the same scan so the
+    /// artist page's library section is complete without opening each
+    /// containing playlist. `default` so pre-`artist_index` caches still
+    /// deserialize (a re-scan fills it).
+    #[serde(default)]
+    pub artist_index: std::collections::HashMap<String, Vec<String>>,
+    /// `spotify:track:…` uris in Liked Songs — the liked half of the
+    /// "saved by this artist" answer (the forward `index` is playlists
+    /// only). Used by the artist page's library scan, not the playlist
+    /// heart. `default` for older caches.
+    #[serde(default)]
+    pub liked: std::collections::HashSet<String>,
 }
 
 /// The track the picker popup acts on — a full row so an add can
@@ -58,6 +71,12 @@ pub struct MembershipModel {
     /// `spotify:track:… → [playlist_id]` — editable playlist membership
     /// loaded from the worker's index cache.
     pub index: HashMap<String, Vec<String>>,
+    /// `artist_id → [track_uri]` — reverse index for the artist page's
+    /// "In your library" section (mirrors the worker snapshot).
+    pub artist_index: HashMap<String, Vec<String>>,
+    /// Every liked-song uri. With [`index`](Self::index) this is the single
+    /// source of truth for "is this track saved" — see [`is_saved`].
+    pub liked: HashSet<String>,
     /// Index loaded/built this session (picker shows a spinner until then).
     pub ready: bool,
     /// The **playing** track's playlist ids — drives the player-bar heart
@@ -91,6 +110,8 @@ impl MembershipModel {
         Self {
             playlists: Vec::new(),
             index: HashMap::new(),
+            artist_index: HashMap::new(),
+            liked: HashSet::new(),
             ready: false,
             current: HashSet::new(),
             in_playlist: Signal::new(false),
@@ -132,10 +153,21 @@ impl MembershipModel {
         &mut self,
         playlists: Vec<MembershipPlaylist>,
         index: HashMap<String, Vec<String>>,
+        artist_index: HashMap<String, Vec<String>>,
+        liked: HashSet<String>,
     ) {
         self.playlists = playlists;
         self.index = index;
+        self.artist_index = artist_index;
+        self.liked = liked;
         self.ready = true;
+    }
+
+    /// **The** saved-state check every row heart queries: a track is saved
+    /// iff it's liked or in ≥1 editable playlist. One source of truth so the
+    /// heart reads identically on the playlist, album, and artist pages.
+    pub fn is_saved(&self, uri: &str) -> bool {
+        self.liked.contains(uri) || self.index.contains_key(uri)
     }
 
     /// Replace the current track's membership (from the worker's lookup) and

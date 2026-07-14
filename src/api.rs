@@ -77,17 +77,26 @@ pub struct PlaylistRef {
     pub image_url_small: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecentTrack {
     pub id: String,
     pub name: String,
     pub artist: String,
+    /// Every credited artist (id + name) — the clickable artist line + the
+    /// context menu's "Go to artist" / "Add to playlist…".
+    pub artists: Vec<TrackArtist>,
     /// Album id — the tile opens this album's detail page.
     pub album_id: String,
     pub album_image_url: Option<String>,
     /// ISO-8601 `played_at` timestamp (`YYYY-MM-DDT…Z`); the leading date
     /// drives the "Today/Yesterday/…" grouping on the Show-all page.
     pub played_at: String,
+    /// The context this play came from (playlist / album / artist / …), used
+    /// to session-group the Recents page. `None` when Spotify reports none.
+    pub context_uri: Option<String>,
+    /// The context's type string (`playlist` / `album` / `artist` /
+    /// `collection` / …), or empty when `context_uri` is `None`.
+    pub context_type: String,
 }
 
 #[derive(Debug, Clone)]
@@ -102,9 +111,60 @@ pub struct TrackRef {
     pub id: String,
     pub name: String,
     pub artist: String,
+    /// Every credited artist (id + name) — the context menu's "Go to
+    /// artist" / "Add to playlist…".
+    pub artists: Vec<TrackArtist>,
     /// Album id — the tile opens this album's detail page.
     pub album_id: String,
     pub album_image_url: Option<String>,
+}
+
+impl RecentTrack {
+    /// The full [`PlaylistTrack`] this row represents — for the context menu
+    /// + like picker (built once, so every surface's menu is identical).
+    pub fn to_track(&self) -> PlaylistTrack {
+        PlaylistTrack {
+            id: self.id.clone(),
+            uri: format!("spotify:track:{}", self.id),
+            name: self.name.clone(),
+            artist: self.artist.clone(),
+            album: String::new(),
+            album_image_url: self.album_image_url.clone(),
+            duration_ms: 0,
+            artists: self.artists.clone(),
+            album_id: self.album_id.clone(),
+            artist_id: self
+                .artists
+                .first()
+                .map(|a| a.id.clone())
+                .unwrap_or_default(),
+            playable: true,
+        }
+    }
+}
+
+impl TrackRef {
+    /// The full [`PlaylistTrack`] this row represents — for the context menu
+    /// + like picker (see [`RecentTrack::to_track`]).
+    pub fn to_track(&self) -> PlaylistTrack {
+        PlaylistTrack {
+            id: self.id.clone(),
+            uri: format!("spotify:track:{}", self.id),
+            name: self.name.clone(),
+            artist: self.artist.clone(),
+            album: String::new(),
+            album_image_url: self.album_image_url.clone(),
+            duration_ms: 0,
+            artists: self.artists.clone(),
+            album_id: self.album_id.clone(),
+            artist_id: self
+                .artists
+                .first()
+                .map(|a| a.id.clone())
+                .unwrap_or_default(),
+            playable: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -330,7 +390,11 @@ async fn http_get_json<T: serde::de::DeserializeOwned>(
     token: &str,
     url: &str,
 ) -> Result<T, AuthError> {
-    let res = reqwest::Client::new().get(url).bearer_auth(token).send().await?;
+    let res = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await?;
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
@@ -384,7 +448,15 @@ pub async fn get_my_playlists(token: &str) -> Result<Vec<LibraryPlaylist>, AuthE
 
 /// Every `spotify:track:…` URI in a playlist (paginated, uri-only fields).
 /// Local files and other non-track items are skipped.
-pub async fn playlist_track_uris(token: &str, playlist_id: &str) -> Result<Vec<String>, AuthError> {
+/// A membership-scan row: a track uri plus the ids of its credited artists
+/// (so the scan can build an `artist → saved tracks` reverse index without a
+/// second fetch).
+pub type TrackArtistUris = (String, Vec<String>);
+
+pub async fn playlist_track_uris(
+    token: &str,
+    playlist_id: &str,
+) -> Result<Vec<TrackArtistUris>, AuthError> {
     #[derive(Deserialize)]
     struct Page {
         items: Vec<Item>,
@@ -397,20 +469,39 @@ pub async fn playlist_track_uris(token: &str, playlist_id: &str) -> Result<Vec<S
     }
     #[derive(Deserialize)]
     struct Track {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "null_default")]
         uri: String,
+        // Explicit `"artists": null` shows up for some rows — `null_default`
+        // (not bare `default`, which only covers a *missing* key) keeps the
+        // whole page from failing to decode + dropping out of the index.
+        #[serde(default, deserialize_with = "null_default")]
+        artists: Vec<ArtistId>,
+    }
+    #[derive(Deserialize)]
+    struct ArtistId {
+        #[serde(default, deserialize_with = "null_default")]
+        id: String,
     }
     let mut out = Vec::new();
-    // `/items` (was `/tracks`, now 403 for Dev-Mode apps).
-    let mut url =
-        format!("{API}/playlists/{playlist_id}/items?fields=items(item(uri)),next&limit=100");
+    // `/items` (was `/tracks`, now 403 for Dev-Mode apps). Artist ids ride
+    // along (near-free payload) so the membership index can answer "saved
+    // tracks by this artist" without opening each playlist.
+    let mut url = format!(
+        "{API}/playlists/{playlist_id}/items?fields=items(item(uri,artists(id))),next&limit=100"
+    );
     loop {
         let page: Page = http_get_json(token, &url).await?;
         for it in page.items {
             if let Some(t) = it.item
                 && t.uri.starts_with("spotify:track:")
             {
-                out.push(t.uri);
+                let artists = t
+                    .artists
+                    .into_iter()
+                    .map(|a| a.id)
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                out.push((t.uri, artists));
             }
         }
         match page.next {
@@ -767,6 +858,61 @@ pub fn liked_tracks_url(offset: u32, limit: u32) -> String {
     format!("{API}/me/tracks?market=from_token&limit={limit}&offset={offset}")
 }
 
+/// Every Liked-Songs track as `(uri, [artist_id])` — the liked half of the
+/// membership scan's `artist → saved tracks` reverse index. `/me/tracks` is
+/// unaffected by the Dev-Mode `/items` 403s. Uncached (a background scan);
+/// paginates the whole collection.
+pub async fn liked_track_artist_uris(token: &str) -> Result<Vec<TrackArtistUris>, AuthError> {
+    #[derive(Deserialize)]
+    struct Page {
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        track: Option<Track>,
+    }
+    #[derive(Deserialize)]
+    struct Track {
+        #[serde(default, deserialize_with = "null_default")]
+        uri: String,
+        #[serde(default, deserialize_with = "null_default")]
+        artists: Vec<ArtistId>,
+    }
+    #[derive(Deserialize)]
+    struct ArtistId {
+        #[serde(default, deserialize_with = "null_default")]
+        id: String,
+    }
+    let limit = 50u32;
+    let mut offset = 0u32;
+    let mut out = Vec::new();
+    loop {
+        let url = format!(
+            "{API}/me/tracks?limit={limit}&offset={offset}&fields=items(track(uri,artists(id)))"
+        );
+        let page: Page = http_get_json(token, &url).await?;
+        let n = page.items.len() as u32;
+        for it in page.items {
+            if let Some(t) = it.track
+                && t.uri.starts_with("spotify:track:")
+            {
+                let artists = t
+                    .artists
+                    .into_iter()
+                    .map(|a| a.id)
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                out.push((t.uri, artists));
+            }
+        }
+        if n < limit {
+            break;
+        }
+        offset += limit;
+    }
+    Ok(out)
+}
+
 /// Drop every cached page of a track collection after we mutate it
 /// (add/remove/like), so the next open re-fetches live data. Pages are
 /// contiguous from offset 0; walk forward evicting each cached page and
@@ -787,7 +933,10 @@ fn evict_track_pages(mut url_at: impl FnMut(u32) -> String, page: u32) {
 /// Invalidate a playlist's cached track-list pages (after add/remove).
 pub fn invalidate_playlist_tracks(playlist_id: &str) {
     let id = playlist_id.to_string();
-    evict_track_pages(|off| playlist_tracks_url(&id, off, PLAYLIST_PAGE), PLAYLIST_PAGE);
+    evict_track_pages(
+        |off| playlist_tracks_url(&id, off, PLAYLIST_PAGE),
+        PLAYLIST_PAGE,
+    );
 }
 
 /// Invalidate the Liked Songs cached pages (after like/unlike).
@@ -805,6 +954,15 @@ pub async fn get_recently_played(token: &str) -> Result<Vec<RecentTrack>, AuthEr
         track: Track,
         #[serde(default)]
         played_at: String,
+        #[serde(default)]
+        context: Option<Context>,
+    }
+    #[derive(Deserialize)]
+    struct Context {
+        #[serde(default, deserialize_with = "null_default")]
+        uri: String,
+        #[serde(default, deserialize_with = "null_default", rename = "type")]
+        kind: String,
     }
     #[derive(Deserialize)]
     struct Track {
@@ -820,6 +978,8 @@ pub async fn get_recently_played(token: &str) -> Result<Vec<RecentTrack>, AuthEr
     #[derive(Deserialize, Default)]
     struct Artist {
         #[serde(default, deserialize_with = "null_default")]
+        id: String,
+        #[serde(default, deserialize_with = "null_default")]
         name: String,
     }
     #[derive(Deserialize, Default)]
@@ -833,34 +993,44 @@ pub async fn get_recently_played(token: &str) -> Result<Vec<RecentTrack>, AuthEr
     // good chunk of the raw page.
     let r: R = get_json(
         token,
-        &format!("{API}/me/player/recently-played?limit=30"),
+        &format!("{API}/me/player/recently-played?limit=50"),
         ttl::VOLATILE,
     )
     .await?;
-    let mut out: Vec<RecentTrack> = r
+    let out: Vec<RecentTrack> = r
         .items
         .into_iter()
-        .map(|i| RecentTrack {
-            id: i.track.id,
-            name: i.track.name,
-            artist: i
+        .map(|i| {
+            let artists: Vec<TrackArtist> = i
                 .track
                 .artists
                 .into_iter()
-                .next()
-                .map(|a| a.name)
-                .unwrap_or_default(),
-            album_id: i.track.album.id,
-            // Home "Recently played" tiles (TILE_THUMB ≈ 320 px physical).
-            album_image_url: pick_full(&i.track.album.images),
-            played_at: i.played_at,
+                .map(|a| TrackArtist {
+                    id: a.id,
+                    name: a.name,
+                })
+                .collect();
+            let artist = artists.first().map(|a| a.name.clone()).unwrap_or_default();
+            let (context_uri, context_type) = match i.context {
+                Some(c) if !c.uri.is_empty() => (Some(c.uri), c.kind),
+                _ => (None, String::new()),
+            };
+            RecentTrack {
+                id: i.track.id,
+                name: i.track.name,
+                artist,
+                artists,
+                album_id: i.track.album.id,
+                // Home "Recently played" tiles (TILE_THUMB ≈ 320 px physical).
+                album_image_url: pick_full(&i.track.album.images),
+                played_at: i.played_at,
+                context_uri,
+                context_type,
+            }
         })
         .collect();
-    // Spotify logs every play, so a song on repeat shows up as a run of
-    // identical consecutive entries. Collapse each run to its most recent
-    // play (items arrive newest-first) — a history of "X, X, X, X" tells
-    // the user nothing the first X doesn't.
-    out.dedup_by(|next, kept| next.id == kept.id);
+    // The worker merges this into the persisted archive + collapses repeat
+    // runs there (so the collapse spans the fetch boundary too).
     Ok(out)
 }
 
@@ -912,6 +1082,8 @@ pub async fn get_top_tracks(token: &str, limit: u32) -> Result<Vec<TrackRef>, Au
     #[derive(Deserialize)]
     struct Artist {
         #[serde(default)]
+        id: String,
+        #[serde(default)]
         name: String,
     }
     #[derive(Deserialize)]
@@ -925,18 +1097,25 @@ pub async fn get_top_tracks(token: &str, limit: u32) -> Result<Vec<TrackRef>, Au
     let r: R = get_json(token, &url, ttl::SLOW).await?;
     Ok(r.items
         .into_iter()
-        .map(|t| TrackRef {
-            id: t.id,
-            name: t.name,
-            artist: t
+        .map(|t| {
+            let artists: Vec<TrackArtist> = t
                 .artists
                 .into_iter()
-                .next()
-                .map(|a| a.name)
-                .unwrap_or_default(),
-            album_id: t.album.id,
-            // Home "Your top tracks" tiles.
-            album_image_url: pick_full(&t.album.images),
+                .map(|a| TrackArtist {
+                    id: a.id,
+                    name: a.name,
+                })
+                .collect();
+            let artist = artists.first().map(|a| a.name.clone()).unwrap_or_default();
+            TrackRef {
+                id: t.id,
+                name: t.name,
+                artist,
+                artists,
+                album_id: t.album.id,
+                // Home "Your top tracks" tiles.
+                album_image_url: pick_full(&t.album.images),
+            }
         })
         .collect())
 }
@@ -997,8 +1176,7 @@ pub async fn get_context_name(token: &str, uri: &str) -> Result<Option<String>, 
         name: String,
     }
     let mut parts = uri.split(':');
-    let (Some("spotify"), Some(kind), Some(id)) = (parts.next(), parts.next(), parts.next())
-    else {
+    let (Some("spotify"), Some(kind), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
         return Ok(None);
     };
     let url = match kind {
@@ -1010,6 +1188,53 @@ pub async fn get_context_name(token: &str, uri: &str) -> Result<Option<String>, 
     };
     let r: Named = get_json(token, &url, ttl::SLOW).await?;
     Ok((!r.name.is_empty()).then_some(r.name))
+}
+
+/// A playing context resolved for the Recents page — its display name, the
+/// owner line ("Yash Sharma" / "Spotify" / the album artist / ""), and a
+/// cover url.
+#[derive(Debug, Clone)]
+pub struct RecentContextInfo {
+    pub name: String,
+    pub owner: String,
+    pub cover_url: Option<String>,
+}
+
+/// Resolve a Recents session's context (playlist / album / artist) to its
+/// name + owner + cover, reusing the disk-cached meta fetches. `None` for
+/// the Liked-Songs collection (named locally) or unknown kinds.
+pub async fn resolve_context_meta(token: &str, uri: &str) -> Option<RecentContextInfo> {
+    let mut parts = uri.split(':');
+    let (Some("spotify"), Some(kind), Some(id)) = (parts.next(), parts.next(), parts.next()) else {
+        return None;
+    };
+    match kind {
+        "playlist" => {
+            let m = playlist_meta(token, id).await.ok()?;
+            Some(RecentContextInfo {
+                name: m.name,
+                owner: m.owner,
+                cover_url: m.image_url,
+            })
+        }
+        "album" => {
+            let d = get_album(token, id).await.ok()?;
+            Some(RecentContextInfo {
+                name: d.name,
+                owner: d.owner,
+                cover_url: d.image_url,
+            })
+        }
+        "artist" => {
+            let d = get_artist(token, id).await.ok()?;
+            Some(RecentContextInfo {
+                name: d.name,
+                owner: String::new(),
+                cover_url: d.image_url,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// An artist's most popular tracks (`/v1/artists/{id}/top-tracks`). Requires
@@ -1078,18 +1303,20 @@ pub async fn get_artist_albums(
         );
         let r: R = get_json(token, &url, ttl::SLOW).await?;
         let page_len = r.items.len() as u32;
-        albums.extend(r.items.into_iter().map(|a| AlbumRef {
-            id: a.id,
-            name: a.name,
-            artist: a
-                .artists
-                .into_iter()
-                .next()
-                .map(|a| a.name)
-                .unwrap_or_default(),
-            // "New release" spotlight card (THUMB_XL) — full res.
-            image_url: pick_full(&a.images),
-            release_date: a.release_date,
+        albums.extend(r.items.into_iter().map(|a| {
+            AlbumRef {
+                id: a.id,
+                name: a.name,
+                artist: a
+                    .artists
+                    .into_iter()
+                    .next()
+                    .map(|a| a.name)
+                    .unwrap_or_default(),
+                // "New release" spotlight card (THUMB_XL) — full res.
+                image_url: pick_full(&a.images),
+                release_date: a.release_date,
+            }
         }));
         if page_len < PAGE {
             break;
@@ -1385,10 +1612,7 @@ pub async fn get_currently_playing(token: &str) -> Result<Option<CurrentlyPlayin
         duration_ms: item.duration_ms,
         shuffle: r.shuffle_state,
         repeat,
-        context_uri: r
-            .context
-            .map(|c| c.uri)
-            .filter(|u| !u.is_empty()),
+        context_uri: r.context.map(|c| c.uri).filter(|u| !u.is_empty()),
         // `/me/player` has no context display name (only uri/type);
         // the UI falls back to the kind until a cluster push names it.
         context_name: None,
@@ -1444,9 +1668,18 @@ pub async fn play(token: &str, device_id: Option<&str>) -> Result<(), AuthError>
 /// position, like a recently-played row starting its album.
 #[derive(Debug, Clone)]
 pub enum PlayTarget {
-    Context { context_uri: String, offset: u32 },
-    ContextAt { context_uri: String, track_uri: String },
-    Uris { uris: Vec<String>, offset: u32 },
+    Context {
+        context_uri: String,
+        offset: u32,
+    },
+    ContextAt {
+        context_uri: String,
+        track_uri: String,
+    },
+    Uris {
+        uris: Vec<String>,
+        offset: u32,
+    },
     /// Resume the last track at an absolute position (ms) — the cold-start
     /// play button starting the last-played track exactly where the chrome
     /// shows the progress bar, so display and action stay coherent. When a
@@ -1466,8 +1699,9 @@ impl PlayTarget {
     /// active local device — librespot `PlayerEvent`s don't carry it.
     pub fn context_uri(&self) -> Option<&str> {
         match self {
-            PlayTarget::Context { context_uri, .. }
-            | PlayTarget::ContextAt { context_uri, .. } => Some(context_uri),
+            PlayTarget::Context { context_uri, .. } | PlayTarget::ContextAt { context_uri, .. } => {
+                Some(context_uri)
+            }
             PlayTarget::Resume { context_uri, .. } => context_uri.as_deref(),
             PlayTarget::Uris { .. } => None,
         }
@@ -1739,18 +1973,21 @@ pub async fn is_track_saved(token: &str, track_id: &str) -> Result<bool, AuthErr
 
 /// Save / unsave (like / unlike) a track for the current user.
 pub async fn set_track_saved(token: &str, track_id: &str, saved: bool) -> Result<(), AuthError> {
-    // 2026 migration: `PUT/DELETE /me/tracks?ids=` → `PUT/DELETE /me/library`
-    // with a JSON body of Spotify URIs (the `?ids=` form now 403s).
+    // Feb-2026 migration: `PUT/DELETE /me/tracks?ids=` → the generic
+    // `PUT/DELETE /me/library`, which takes the Spotify uris as a `uris=`
+    // **query** param (like `/me/library/contains`) AND requires a JSON body
+    // — a body-only request 400s "Missing required field: uris"; a bodyless
+    // one 411s "Length Required". So: uri in the query + an (empty) JSON body.
     let method = if saved {
         reqwest::Method::PUT
     } else {
         reqwest::Method::DELETE
     };
-    let body = serde_json::json!({ "uris": [format!("spotify:track:{track_id}")] });
+    let uri = format!("spotify:track:{track_id}");
     let res = reqwest::Client::new()
-        .request(method, format!("{API}/me/library"))
+        .request(method, format!("{API}/me/library?uris={uri}"))
         .bearer_auth(token)
-        .json(&body)
+        .json(&serde_json::json!({}))
         .send()
         .await?;
     let status = res.status();
@@ -1830,11 +2067,7 @@ pub async fn set_repeat(token: &str, mode: RepeatMode) -> Result<(), AuthError> 
 /// resumes); `None` seeks whichever device is active (the scrubbable
 /// progress bar — drag/click to seek, with a hover preview of the target
 /// timestamp).
-pub async fn seek(
-    token: &str,
-    position_ms: u32,
-    device_id: Option<&str>,
-) -> Result<(), AuthError> {
+pub async fn seek(token: &str, position_ms: u32, device_id: Option<&str>) -> Result<(), AuthError> {
     let path = match device_id {
         Some(id) => format!("/me/player/seek?position_ms={position_ms}&device_id={id}"),
         None => format!("/me/player/seek?position_ms={position_ms}"),
@@ -1922,11 +2155,9 @@ mod tests {
     #[test]
     fn item_resolver_handles_both_wrappers() {
         // Playlist `/items` → `item`; saved `/me/tracks` → `track`. Both map.
-        let from_item: RawItem =
-            serde_json::from_str(r#"{ "item": { "name": "P" } }"#).unwrap();
+        let from_item: RawItem = serde_json::from_str(r#"{ "item": { "name": "P" } }"#).unwrap();
         assert_eq!(from_item.track().unwrap().name, "P");
-        let from_track: RawItem =
-            serde_json::from_str(r#"{ "track": { "name": "S" } }"#).unwrap();
+        let from_track: RawItem = serde_json::from_str(r#"{ "track": { "name": "S" } }"#).unwrap();
         assert_eq!(from_track.track().unwrap().name, "S");
         let empty: RawItem = serde_json::from_str(r#"{ "item": null }"#).unwrap();
         assert!(empty.track().is_none());

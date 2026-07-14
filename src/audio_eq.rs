@@ -23,12 +23,14 @@ pub const NUM_BANDS: usize = 10;
 
 /// ISO octave-spaced band centre frequencies (Hz) — the standard 10-band
 /// graphic-EQ layout (31 Hz … 16 kHz).
-pub const BAND_FREQS: [f32; NUM_BANDS] =
-    [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
+pub const BAND_FREQS: [f32; NUM_BANDS] = [
+    31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
+];
 
 /// Short axis labels for the UI (`"31"`, `"1k"`, `"16k"`).
-pub const BAND_LABELS: [&str; NUM_BANDS] =
-    ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
+pub const BAND_LABELS: [&str; NUM_BANDS] = [
+    "31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k",
+];
 
 /// Per-band gain range, ±dB. The sliders and presets clamp to this.
 pub const GAIN_DB_MAX: f32 = 12.0;
@@ -120,7 +122,15 @@ struct Biquad {
 impl Biquad {
     /// Identity (unity passthrough).
     const fn identity() -> Self {
-        Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0, z1: 0.0, z2: 0.0 }
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+            z1: 0.0,
+            z2: 0.0,
+        }
     }
 
     /// RBJ "cookbook" peaking-EQ coefficients (normalised by a0). Preserves
@@ -389,7 +399,10 @@ mod tests {
         gains[2] = 8.0; // 125 Hz boost
         let at_band = response_db(&gains, BAND_FREQS[2] as f64, FS as f64);
         let far = response_db(&gains, BAND_FREQS[9] as f64, FS as f64); // 16 kHz
-        assert!(at_band > 6.0, "near the boosted band the curve rises: {at_band}");
+        assert!(
+            at_band > 6.0,
+            "near the boosted band the curve rises: {at_band}"
+        );
         assert!(far.abs() < 1.0, "far from it the curve is ~flat: {far}");
         // Flat gains → flat (0 dB) curve everywhere.
         let flat = [0.0; NUM_BANDS];

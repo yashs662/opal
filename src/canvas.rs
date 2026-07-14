@@ -82,7 +82,9 @@ fn parse_canvaz(canvaz: &[u8]) -> Option<CanvasEntry> {
     if url.is_empty() || !url.starts_with("http") {
         return None;
     }
-    let kind = field_varint(canvaz, 4).map(CanvasType::from_raw).unwrap_or(CanvasType::Unknown(0));
+    let kind = field_varint(canvaz, 4)
+        .map(CanvasType::from_raw)
+        .unwrap_or(CanvasType::Unknown(0));
     Some(CanvasEntry { url, kind })
 }
 

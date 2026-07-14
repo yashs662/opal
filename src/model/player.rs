@@ -313,9 +313,7 @@ impl PlayerModel {
         let label = p.context_name.as_deref().or_else(|| {
             self.resolved_context
                 .as_ref()
-                .filter(|(u, n)| {
-                    Some(u.as_str()) == p.context_uri.as_deref() && !n.is_empty()
-                })
+                .filter(|(u, n)| Some(u.as_str()) == p.context_uri.as_deref() && !n.is_empty())
                 .map(|(_, n)| n.as_str())
         });
         self.context_label
@@ -338,7 +336,13 @@ impl PlayerModel {
         self.progress.set(frac);
         if p.is_playing && p.duration_ms > 0 {
             let remaining = p.duration_ms.saturating_sub(live);
-            tl.animate(&self.progress, 1.0, Curve::Linear, Duration::from_millis(remaining), now);
+            tl.animate(
+                &self.progress,
+                1.0,
+                Curve::Linear,
+                Duration::from_millis(remaining),
+                now,
+            );
         } else {
             tl.stop_for(&self.progress);
         }

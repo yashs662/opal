@@ -3249,6 +3249,7 @@ version = "0.1.0"
 dependencies = [
  "apple-native-keyring-store",
  "base64",
+ "chrono",
  "cpal",
  "dioxus-devtools",
  "dirs",

@@ -144,7 +144,12 @@ impl NowPlaying<'_> {
                     (self.canvas.hover_t.clone(), self.player.np_card_t.clone()),
                     |(h, k)| {
                         let strength = (1.0 - h.clamp(0.0, 1.0)).max(k.clamp(0.0, 1.0));
-                        [0.0, 0.0, 0.0, crate::model::canvas::CANVAS_DIM_ALPHA * strength]
+                        [
+                            0.0,
+                            0.0,
+                            0.0,
+                            crate::model::canvas::CANVAS_DIM_ALPHA * strength,
+                        ]
                     },
                 );
                 bg.rect(())
@@ -239,10 +244,9 @@ impl NowPlaying<'_> {
     /// over any art/video.
     fn hide_button(&self, m: &mut Scene) {
         let hover = Signal::new(false);
-        let tint = Computed::new(
-            (hover.clone(), self.backdrop.accent.clone()),
-            |(h, acc)| if h { accent_hover_color(&acc) } else { t::TEXT },
-        );
+        let tint = Computed::new((hover.clone(), self.backdrop.accent.clone()), |(h, acc)| {
+            if h { accent_hover_color(&acc) } else { t::TEXT }
+        });
         let on_toggle = self.on_toggle.clone();
         // Over the full-bleed video the pane edge is the visual edge; in
         // art mode the cover is inset SP_2, so the arrow steps in one more
@@ -401,7 +405,12 @@ impl NowPlaying<'_> {
                     .radius(t::R_SM)
                     .hover_color(t::HOVER_LIFT_SUBTLE)
                     .on_click(move |ctx| {
-                        nav(ctx, crate::views::MainNav::Artist { id: artist_id.clone() })
+                        nav(
+                            ctx,
+                            crate::views::MainNav::Artist {
+                                id: artist_id.clone(),
+                            },
+                        )
                     })
                     .child(|name| {
                         name.text((), about.name.clone(), 14.0)
@@ -413,15 +422,18 @@ impl NowPlaying<'_> {
                         }
                     });
                 if let Some(bio) = &self.player.np_bio {
-                    txt.col(()).w(Len::Fill).pad_xy(t::SP_2, t::SP_0).child(|b| {
-                        // Fill-width + wrap → the paragraph flows to the
-                        // pane's live width and re-wraps on resize (the pane
-                        // width tracks window height via the 9:16 aspect).
-                        b.text((), clamp_bio(bio), 12.0)
-                            .color(t::TEXT_DIM)
-                            .w(Len::Fill)
-                            .wrap();
-                    });
+                    txt.col(())
+                        .w(Len::Fill)
+                        .pad_xy(t::SP_2, t::SP_0)
+                        .child(|b| {
+                            // Fill-width + wrap → the paragraph flows to the
+                            // pane's live width and re-wraps on resize (the pane
+                            // width tracks window height via the 9:16 aspect).
+                            b.text((), clamp_bio(bio), 12.0)
+                                .color(t::TEXT_DIM)
+                                .w(Len::Fill)
+                                .wrap();
+                        });
                 }
             });
     }
@@ -493,14 +505,15 @@ impl NowPlaying<'_> {
         if clickable {
             let nav = self.nav.clone();
             let id = person.artist_id.clone();
-            row.hover_color(t::HOVER_LIFT_SUBTLE).on_click(move |ctx| {
-                nav(ctx, crate::views::MainNav::Artist { id: id.clone() })
-            });
+            row.hover_color(t::HOVER_LIFT_SUBTLE)
+                .on_click(move |ctx| nav(ctx, crate::views::MainNav::Artist { id: id.clone() }));
         }
         let name = person.name.clone();
         let roles = person.roles.clone();
         row.child(|r| {
-            r.text((), name, 13.0).color(t::TEXT).max_width_px(CARD_TEXT_MAX);
+            r.text((), name, 13.0)
+                .color(t::TEXT)
+                .max_width_px(CARD_TEXT_MAX);
             if !roles.is_empty() {
                 r.text((), roles, 11.0)
                     .color(t::TEXT_DIM)

@@ -212,7 +212,10 @@ impl Component for SettingsPanel<'_> {
 
 /// Hairline divider between settings sections.
 fn divider(s: &mut Scene) {
-    s.rect(()).w(Len::Fill).h_px(t::SP_PX).rgba(1.0, 1.0, 1.0, 0.06);
+    s.rect(())
+        .w(Len::Fill)
+        .h_px(t::SP_PX)
+        .rgba(1.0, 1.0, 1.0, 0.06);
 }
 
 /// The preset-dropdown emitter bundle — clone-cheap.
@@ -245,8 +248,11 @@ fn eq_section(
     let rename_idx = eq.rename_index.get();
     let rename_buf = eq.rename_buf.clone();
     // (name, custom) per preset — the dropdown shows delete/rename on customs.
-    let entries: Vec<(Rc<str>, bool)> =
-        eq.presets().iter().map(|p| (p.name.clone(), p.custom)).collect();
+    let entries: Vec<(Rc<str>, bool)> = eq
+        .presets()
+        .iter()
+        .map(|p| (p.name.clone(), p.custom))
+        .collect();
     let bands = eq.bands.clone();
     let shared = eq.shared();
     let icons = icons.clone();
@@ -326,12 +332,9 @@ fn preset_dropdown(
         .align(Align::Start)
         .gap(t::SP_3)
         .child(move |row| {
-            row.row(())
-                .h_px(t::SP_9)
-                .align(Align::Center)
-                .child(|l| {
-                    l.text((), "Presets", t::TEXT_SM).color(t::TEXT_DIM);
-                });
+            row.row(()).h_px(t::SP_9).align(Align::Center).child(|l| {
+                l.text((), "Presets", t::TEXT_SM).color(t::TEXT_DIM);
+            });
             row.col(()).w(Len::Fill).gap(t::SP_1).child(move |dd| {
                 // The button: current preset name + chevron.
                 let label = TextBind::derived(selected.clone(), move |sel| {
@@ -586,70 +589,78 @@ fn eq_graph(
     let bands = bands.clone();
     let accent = accent.clone();
 
-    s.row(()).w(Len::Fill).align(Align::Start).gap(t::SP_2).child(move |gr| {
-        // dB axis — auto-width (sizes to its labels), right-aligned.
-        gr.col(())
-            .w(Len::Auto)
-            .h_px(GRAPH_H)
-            .justify(Justify::SpaceBetween)
-            .align(Align::End)
-            .child(|ax| {
-                ax.text((), "+12dB", t::TEXT_XS).color(t::TEXT_DIM);
-                ax.text((), "0", t::TEXT_XS).color(t::TEXT_DIM);
-                ax.text((), "-12dB", t::TEXT_XS).color(t::TEXT_DIM);
-            });
-        // Plot + frequency labels fill the remaining width.
-        gr.col(()).w(Len::Fill).gap(t::SP_1).child(move |right| {
-            right
-                .col(())
-                .w(Len::Fill)
+    s.row(())
+        .w(Len::Fill)
+        .align(Align::Start)
+        .gap(t::SP_2)
+        .child(move |gr| {
+            // dB axis — auto-width (sizes to its labels), right-aligned.
+            gr.col(())
+                .w(Len::Auto)
                 .h_px(GRAPH_H)
-                .radius(t::R_SM)
-                .rgba(GRAPH_BG[0], GRAPH_BG[1], GRAPH_BG[2], GRAPH_BG[3])
-                .overflow(opal_gfx::Overflow::Hidden, opal_gfx::Overflow::Hidden)
-                .child(move |plot| {
-                    // The response curve — a GPU-shaded, anti-aliased filled
-                    // spline through the band points (one `curve` effect node,
-                    // reactive off `points`), replacing the old bar fill.
-                    plot.curve(())
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h_px(GRAPH_H)
-                        .color(fill_col)
-                        .effect_data_bind(points);
-                    // 0 dB gridline across the vertical centre.
-                    plot.rect(())
-                        .abs(0.0, GRAPH_H / 2.0 - 0.5)
-                        .w(Len::Fill)
-                        .h_px(1.0)
-                        .rgba(GRID_COL[0], GRID_COL[1], GRID_COL[2], GRID_COL[3]);
-                    // Draggable band handles on top.
-                    plot.row(()).abs(0.0, 0.0).w(Len::Fill).h_px(GRAPH_H).child(move |cols| {
-                        for (i, band) in bands.into_iter().enumerate() {
-                            band_handle(
-                                cols,
-                                i,
-                                g_lo.clone(),
-                                g_hi.clone(),
-                                band,
-                                shared.clone(),
-                                &accent,
-                                on_commit.clone(),
-                            );
-                        }
-                    });
+                .justify(Justify::SpaceBetween)
+                .align(Align::End)
+                .child(|ax| {
+                    ax.text((), "+12dB", t::TEXT_XS).color(t::TEXT_DIM);
+                    ax.text((), "0", t::TEXT_XS).color(t::TEXT_DIM);
+                    ax.text((), "-12dB", t::TEXT_XS).color(t::TEXT_DIM);
                 });
-            // Frequency labels, one per handle column (aligned by matching
-            // the handle row's equal Fill columns).
-            right.row(()).w(Len::Fill).child(|fl| {
-                for label in BAND_LABELS.iter() {
-                    fl.col(()).w(Len::Fill).center().child(|c| {
-                        c.text((), *label, t::TEXT_XS).color(t::TEXT_DIM);
+            // Plot + frequency labels fill the remaining width.
+            gr.col(()).w(Len::Fill).gap(t::SP_1).child(move |right| {
+                right
+                    .col(())
+                    .w(Len::Fill)
+                    .h_px(GRAPH_H)
+                    .radius(t::R_SM)
+                    .rgba(GRAPH_BG[0], GRAPH_BG[1], GRAPH_BG[2], GRAPH_BG[3])
+                    .overflow(opal_gfx::Overflow::Hidden, opal_gfx::Overflow::Hidden)
+                    .child(move |plot| {
+                        // The response curve — a GPU-shaded, anti-aliased filled
+                        // spline through the band points (one `curve` effect node,
+                        // reactive off `points`), replacing the old bar fill.
+                        plot.curve(())
+                            .abs(0.0, 0.0)
+                            .w(Len::Fill)
+                            .h_px(GRAPH_H)
+                            .color(fill_col)
+                            .effect_data_bind(points);
+                        // 0 dB gridline across the vertical centre.
+                        plot.rect(())
+                            .abs(0.0, GRAPH_H / 2.0 - 0.5)
+                            .w(Len::Fill)
+                            .h_px(1.0)
+                            .rgba(GRID_COL[0], GRID_COL[1], GRID_COL[2], GRID_COL[3]);
+                        // Draggable band handles on top.
+                        plot.row(())
+                            .abs(0.0, 0.0)
+                            .w(Len::Fill)
+                            .h_px(GRAPH_H)
+                            .child(move |cols| {
+                                for (i, band) in bands.into_iter().enumerate() {
+                                    band_handle(
+                                        cols,
+                                        i,
+                                        g_lo.clone(),
+                                        g_hi.clone(),
+                                        band,
+                                        shared.clone(),
+                                        &accent,
+                                        on_commit.clone(),
+                                    );
+                                }
+                            });
                     });
-                }
+                // Frequency labels, one per handle column (aligned by matching
+                // the handle row's equal Fill columns).
+                right.row(()).w(Len::Fill).child(|fl| {
+                    for label in BAND_LABELS.iter() {
+                        fl.col(()).w(Len::Fill).center().child(|c| {
+                            c.text((), *label, t::TEXT_XS).color(t::TEXT_DIM);
+                        });
+                    }
+                });
             });
         });
-    });
 }
 
 /// A draggable band handle: a dot sitting on the curve at its band's
@@ -712,8 +723,15 @@ fn band_handle(
         .on_drag_end(move |_| commit())
         .child(move |col| {
             // Transparent spacer pushes the dot down to the curve.
-            col.rect(()).w_px(1.0).height_px_bind(dot_top.clone()).rgba(0.0, 0.0, 0.0, 0.0);
-            col.rect(()).w_px(DOT).h_px(DOT).radius(t::R_FULL).color(acc.clone());
+            col.rect(())
+                .w_px(1.0)
+                .height_px_bind(dot_top.clone())
+                .rgba(0.0, 0.0, 0.0, 0.0);
+            col.rect(())
+                .w_px(DOT)
+                .h_px(DOT)
+                .radius(t::R_FULL)
+                .color(acc.clone());
             // dB readout pinned at the top of the column, revealed on hover.
             col.row(())
                 .abs(0.0, t::SP_0_5)
@@ -736,7 +754,10 @@ fn band_handle(
 /// A `Computed<[f32;5]>` over five consecutive band signals starting at
 /// `base` — the group deps for the response `Computed`s (which can't take
 /// all ten bands at once).
-fn band_group(bands: &[Signal<f32>; crate::audio_eq::NUM_BANDS], base: usize) -> Computed<[f32; 5]> {
+fn band_group(
+    bands: &[Signal<f32>; crate::audio_eq::NUM_BANDS],
+    base: usize,
+) -> Computed<[f32; 5]> {
     Computed::new(
         (
             bands[base].clone(),
@@ -773,10 +794,15 @@ fn quality_row(
     s.col(()).w(Len::Fill).gap(t::SP_2).child(move |c| {
         c.col(()).gap(t::SP_0_5).child(|m| {
             m.text((), "Streaming quality", 14.0).color(t::TEXT);
-            m.text((), "Applies on next launch", t::TEXT_XS).color(t::TEXT_DIM);
+            m.text((), "Applies on next launch", t::TEXT_XS)
+                .color(t::TEXT_DIM);
         });
         c.row(()).gap(t::SP_2).child(move |row| {
-            for (q, label) in [(Q::Low, "Low 96k"), (Q::Normal, "Normal 160k"), (Q::High, "High 320k")] {
+            for (q, label) in [
+                (Q::Low, "Low 96k"),
+                (Q::Normal, "Normal 160k"),
+                (Q::High, "High 320k"),
+            ] {
                 let selected = q == current;
                 let mut chip = row.row(());
                 chip.h_px(t::CHIP_H)
@@ -829,7 +855,13 @@ fn cache_section(
     on_change_dir: Rc<dyn Fn()>,
 ) {
     let total = usage.total();
-    let frac = |b: u64| if total > 0 { b as f32 / total as f32 } else { 0.0 };
+    let frac = |b: u64| {
+        if total > 0 {
+            b as f32 / total as f32
+        } else {
+            0.0
+        }
+    };
     // Non-zero segments in draw order, for the proportional bar. End caps
     // are rounded by rounding the first segment's left + last's right.
     let segments: Vec<(f32, [f32; 4])> = [
@@ -848,17 +880,12 @@ fn cache_section(
     let json_label = format!("Metadata  {}", fmt_bytes(usage.json));
     let path = path.to_string();
     s.col(()).w(Len::Fill).gap(t::SP_2).child(move |c| {
-        c.row(())
-            .w(Len::Fill)
-            .align(Align::Center)
-            .child(|h| {
-                h.text((), "Storage", t::TEXT_SM).color(t::TEXT_DIM);
-                h.row(())
-                    .push_end()
-                    .child(|e| {
-                        e.text((), &total_label, t::TEXT_SM).color(t::TEXT);
-                    });
+        c.row(()).w(Len::Fill).align(Align::Center).child(|h| {
+            h.text((), "Storage", t::TEXT_SM).color(t::TEXT_DIM);
+            h.row(()).push_end().child(|e| {
+                e.text((), &total_label, t::TEXT_SM).color(t::TEXT);
             });
+        });
         // Proportional usage bar. Coloured segments fill it by each
         // category's share; the rounded track clips them (rounded overflow
         // clipping), so the whole bar reads as a clean pill with rounded
@@ -893,11 +920,12 @@ fn cache_section(
             .align(Align::Center)
             .gap(t::SP_2)
             .child(move |loc| {
-                loc.col(())
-                    .child(|p| {
-                        p.text((), "Location", t::TEXT_XS).color(t::TEXT_DIM);
-                        p.text((), &path, t::TEXT_XS).color(t::TEXT).max_width_px(240.0);
-                    });
+                loc.col(()).child(|p| {
+                    p.text((), "Location", t::TEXT_XS).color(t::TEXT_DIM);
+                    p.text((), &path, t::TEXT_XS)
+                        .color(t::TEXT)
+                        .max_width_px(240.0);
+                });
                 loc.row(())
                     .push_end()
                     .h_px(t::SP_8)
@@ -935,8 +963,14 @@ fn legend_dot(s: &mut Scene, color: [f32; 4], label: &str) {
         .align(Align::Center)
         .gap(t::SP_1)
         .child(|d| {
-            d.rect(()).w_px(t::SP_2).h_px(t::SP_2).radius(t::R_FULL).color(color);
-            d.text((), label, t::TEXT_XS).color(t::TEXT_DIM).max_width_px(150.0);
+            d.rect(())
+                .w_px(t::SP_2)
+                .h_px(t::SP_2)
+                .radius(t::R_FULL)
+                .color(color);
+            d.text((), label, t::TEXT_XS)
+                .color(t::TEXT_DIM)
+                .max_width_px(150.0);
         });
 }
 
@@ -972,19 +1006,16 @@ fn setting_row(
     accent: &Signal<[f32; 4]>,
     on_change: Rc<dyn Fn()>,
 ) {
-    s.row(())
-        .w(Len::Fill)
-        .align(Align::Center)
-        .child(|r| {
-            r.col(()).gap(t::SP_0_5).child(|c| {
-                c.text((), title, t::TEXT_BASE).color(t::TEXT);
-                c.text((), subtitle, t::TEXT_XS).color(t::TEXT_DIM);
-            });
-            r.row(())
-                .push_end()
-                .align(Align::Center)
-                .child(|ctrl| toggle_switch(ctrl, state, accent, on_change));
+    s.row(()).w(Len::Fill).align(Align::Center).child(|r| {
+        r.col(()).gap(t::SP_0_5).child(|c| {
+            c.text((), title, t::TEXT_BASE).color(t::TEXT);
+            c.text((), subtitle, t::TEXT_XS).color(t::TEXT_DIM);
         });
+        r.row(())
+            .push_end()
+            .align(Align::Center)
+            .child(|ctrl| toggle_switch(ctrl, state, accent, on_change));
+    });
 }
 
 /// The animated on/off switch. A `knob_t` signal (0..=TRAVEL px) is
@@ -1001,13 +1032,10 @@ fn toggle_switch(
     on_change: Rc<dyn Fn()>,
 ) {
     let knob_t = Signal::new(if state.get() { TOGGLE_TRAVEL } else { 0.0 });
-    let track_col = Computed::new(
-        (knob_t.clone(), accent.clone()),
-        |(x, acc)| {
-            let f = (x / TOGGLE_TRAVEL).clamp(0.0, 1.0);
-            lerp4(TOGGLE_OFF, acc, f)
-        },
-    );
+    let track_col = Computed::new((knob_t.clone(), accent.clone()), |(x, acc)| {
+        let f = (x / TOGGLE_TRAVEL).clamp(0.0, 1.0);
+        lerp4(TOGGLE_OFF, acc, f)
+    });
     let st = state.clone();
     let kt = knob_t.clone();
     s.row(())
@@ -1060,30 +1088,24 @@ fn account(s: &mut Scene, profile: Option<&Profile>, sign_out: Rc<dyn Fn()>) {
         .map(|p| p.display_name.as_str())
         .filter(|n| !n.is_empty())
         .unwrap_or("Spotify account");
-    s.col(())
-        .w(Len::Fill)
-        .gap(t::SP_2)
-        .child(|acc| {
-            acc.text((), "Account", t::TEXT_SM).color(t::TEXT_DIM);
-            // Name on the left, Sign out pushed to the right edge, both
-            // vertically centred on one full-width row.
-            acc.row(())
-                .w(Len::Fill)
-                .align(Align::Center)
-                .child(|r| {
-                    r.text((), name, t::TEXT_BASE).color(t::TEXT);
-                    r.row(())
-                        .push_end()
-                        .w_px(SIGN_OUT_W)
-                        .h_px(t::SP_9)
-                        .radius(t::R_FULL)
-                        .border(1.0, t::BORDER)
-                        .center()
-                        .hover_color(t::BTN_HOVER)
-                        .on_click(move |_| sign_out())
-                        .child(|b| {
-                            b.text((), "Sign out", t::TEXT_SM).color(t::TEXT);
-                        });
+    s.col(()).w(Len::Fill).gap(t::SP_2).child(|acc| {
+        acc.text((), "Account", t::TEXT_SM).color(t::TEXT_DIM);
+        // Name on the left, Sign out pushed to the right edge, both
+        // vertically centred on one full-width row.
+        acc.row(()).w(Len::Fill).align(Align::Center).child(|r| {
+            r.text((), name, t::TEXT_BASE).color(t::TEXT);
+            r.row(())
+                .push_end()
+                .w_px(SIGN_OUT_W)
+                .h_px(t::SP_9)
+                .radius(t::R_FULL)
+                .border(1.0, t::BORDER)
+                .center()
+                .hover_color(t::BTN_HOVER)
+                .on_click(move |_| sign_out())
+                .child(|b| {
+                    b.text((), "Sign out", t::TEXT_SM).color(t::TEXT);
                 });
         });
+    });
 }

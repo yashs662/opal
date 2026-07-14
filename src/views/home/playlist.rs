@@ -488,6 +488,7 @@ fn sticky_bar(
         // Promote to its own composite layer ABOVE the track-list layer so
         // the per-glass backdrop pass frosts the list scrolling beneath it
         // (a glass only sees layers below its own in z-order).
+        .radii(t::R_LG, t::R_LG, t::R_NONE, t::R_NONE)
         .layer()
         .child(move |c| {
             c.row(())
@@ -628,108 +629,33 @@ fn track_row(
     {
         request_cover(url.clone());
     }
-    let mut row = s.row(());
-    row.w(Len::Fill)
-        .h_px(ROW_H)
-        .pad_xy(t::SP_3, t::SP_1)
-        .gap(t::SP_3)
-        .align(Align::Center)
-        .radius(t::R_MD);
-    if r.playable {
-        let on_play = on_play.clone();
-        let rows = rows.clone();
-        let ctx = context_uri.clone();
-        row.hover_color(t::HOVER_LIFT_SUBTLE)
-            .on_click(move |_| on_play(make_target(&ctx, &rows, index)));
-    } else {
-        // Local file / region-blocked: visible so the playlist reads
-        // complete, but faded and inert — no hover lift, no click.
-        row.opacity(0.4);
-    }
-    // Right-click → the shared context menu, with the full row so "Add
-    // to playlist…" shows too.
-    crate::views::home::attach_context_menu(
-        &mut row,
-        on_context_menu,
-        crate::model::MenuTarget {
-            uri: r.uri.clone(),
-            album_id: r.album_id.clone(),
-            artist_id: r.artist_id.clone(),
-            track: Some(Box::new(r.to_track())),
+    // Delegate to the one shared row renderer so every flat list looks +
+    // behaves the same. Context playback + the lazy-cover fetch above are
+    // the only playlist-specific bits; the rest is the common row.
+    let on_play = on_play.clone();
+    let rows = rows.clone();
+    let ctx = context_uri.clone();
+    let activate: Rc<dyn Fn()> = Rc::new(move || on_play(make_target(&ctx, &rows, index)));
+    crate::widgets::track_row::track_row(
+        s,
+        crate::widgets::track_row::TrackRow {
+            index: Some(index + 1),
+            track: r.to_track(),
+            cover: r.art.clone(),
+            duration: r.duration.clone(),
+            activate,
+            sources: None,
+            in_library: r.in_library,
+            playable: r.playable,
+        },
+        &crate::widgets::track_row::TrackRowActions {
+            on_context_menu: on_context_menu.clone(),
+            on_like: on_like.clone(),
+            on_navigate: on_navigate.clone(),
+            icons: icons.clone(),
+            accent: accent.clone(),
         },
     );
-    row.child(|row| {
-            row.row(()).w_px(t::SP_7).center().child(|c| {
-                c.text((), format!("{}", index + 1), 13.0)
-                    .color(t::TEXT_DIM);
-            });
-            // Thumb.
-            row.col(()).w_px(t::THUMB_SM).h_px(t::THUMB_SM).child(|b| {
-                if let Some(sig) = r.art.clone() {
-                    b.image_bound((), sig)
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .radius(t::R_SM)
-                        .placeholder_fill(t::PLACEHOLDER);
-                } else {
-                    b.rect(())
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                        .radius(t::R_SM);
-                }
-            });
-            // Title + artist(s).
-            row.col(())
-                .w(Len::Fill)
-                .gap(t::SP_0_5)
-                .h(Len::Fill)
-                .justify(Justify::Center)
-                .overflow_x(Overflow::Hidden)
-                .child(|m| {
-                    m.text((), &r.title, 14.0)
-                        .color(t::TEXT)
-                        .max_width_px(360.0);
-                    artist_line(m, &r.artists, &r.artist, &r.artist_id, on_navigate, 360.0);
-                });
-            // Album.
-            row.col(())
-                .w_px(t::SP_48)
-                .h(Len::Fill)
-                .justify(Justify::Center)
-                .overflow_x(Overflow::Hidden)
-                .child(|m| {
-                    if r.album_id.is_empty() {
-                        m.text((), &r.album, 12.0)
-                            .color(t::TEXT_DIM)
-                            .max_width_px(t::SP_48);
-                    } else {
-                        let nav = on_navigate.clone();
-                        let id = r.album_id.clone();
-                        m.text((), &r.album, 12.0)
-                            .color(t::TEXT_DIM)
-                            .max_width_px(t::SP_48)
-                            .cursor(opal_gfx::CursorIcon::Pointer)
-                            .hover_color(t::TEXT)
-                            .on_click(move |ctx| nav(ctx, MainNav::Album { id: id.clone() }));
-                    }
-                });
-            // Heart — opens the like picker targeted at this row.
-            crate::widgets::track_row::like_heart(
-                row,
-                icons,
-                accent,
-                r.to_track(),
-                r.in_library,
-                on_like.clone(),
-            );
-            // Duration.
-            row.row(()).w_px(t::SP_12).justify(Justify::End).child(|c| {
-                c.text((), &r.duration, 12.0).color(t::TEXT_DIM);
-            });
-        });
 }
 
 /// The artist line for a track row: one clickable span per credited
@@ -746,7 +672,9 @@ pub(crate) fn artist_line(
 ) {
     if artists.is_empty() {
         if fallback_id.is_empty() {
-            s.text((), fallback, 12.0).color(t::TEXT_DIM).max_width_px(max_w);
+            s.text((), fallback, 12.0)
+                .color(t::TEXT_DIM)
+                .max_width_px(max_w);
         } else {
             let nav = on_navigate.clone();
             let id = fallback_id.to_string();

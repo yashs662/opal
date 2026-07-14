@@ -312,8 +312,7 @@ fn crop_center_portrait(src: Vec<u8>, w: u32, h: u32) -> (Vec<u8>, u32, u32) {
     for row in 0..ch {
         let src_off = (((y0 + row) * w + x0) * 4) as usize;
         let dst_off = row as usize * row_bytes;
-        out[dst_off..dst_off + row_bytes]
-            .copy_from_slice(&src[src_off..src_off + row_bytes]);
+        out[dst_off..dst_off + row_bytes].copy_from_slice(&src[src_off..src_off + row_bytes]);
     }
     (out, cw, ch)
 }
@@ -429,7 +428,9 @@ mod tests {
     #[test]
     fn downscale_averages_block() {
         // 2x2 solid value → 1x1 keeps the average (here, identical pixels).
-        let src = vec![10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40];
+        let src = vec![
+            10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40,
+        ];
         let (px, w, h) = downscale_to_height(src, 2, 2, 1);
         assert_eq!((w, h), (1, 1));
         assert_eq!(px, vec![10, 20, 30, 40]);

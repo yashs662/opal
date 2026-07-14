@@ -89,7 +89,11 @@ impl PrefsModel {
 
     /// Snapshot the signal-backed values (player + panel widths + canvas
     /// flag) into the serialized prefs, then write to disk.
-    fn flush(&mut self, player: Option<&CurrentlyPlaying>, show_canvas: bool) -> std::io::Result<()> {
+    fn flush(
+        &mut self,
+        player: Option<&CurrentlyPlaying>,
+        show_canvas: bool,
+    ) -> std::io::Result<()> {
         self.snapshot_player(player);
         self.data.panels.sidebar_w = self.sidebar_w.get();
         self.data.panels.now_playing_open = self.now_playing_open.get();
@@ -137,7 +141,11 @@ impl PrefsModel {
         self.sidebar_w.set(defaults.panels.sidebar_w);
         self.now_playing_open.set(defaults.panels.now_playing_open);
         self.now_playing_open_t
-            .set(if defaults.panels.now_playing_open { 1.0 } else { 0.0 });
+            .set(if defaults.panels.now_playing_open {
+                1.0
+            } else {
+                0.0
+            });
         self.data = defaults;
         self.dirty_since = None;
         match self.data.save() {

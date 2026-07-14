@@ -72,5 +72,4 @@ pub enum HomeSection {
     Recent,
     TopArtists,
     TopTracks,
-    Playlists,
 }

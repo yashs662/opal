@@ -109,7 +109,10 @@ impl CanvasModel {
 
     /// Whether the cached clip is for `track_id`.
     pub fn path_matches(&self, track_id: &str) -> bool {
-        self.path.as_ref().map(|(t, _)| t == track_id).unwrap_or(false)
+        self.path
+            .as_ref()
+            .map(|(t, _)| t == track_id)
+            .unwrap_or(false)
     }
 
     pub fn set_path(&mut self, track_id: String, path: std::path::PathBuf) {
@@ -165,7 +168,13 @@ impl CanvasModel {
         if hov != self.hover_last {
             self.hover_last = hov;
             let target = if hov { 1.0 } else { 0.0 };
-            tl.animate(&self.hover_t, target, Curve::EaseInOut, HOVER_REVEAL_DURATION, now);
+            tl.animate(
+                &self.hover_t,
+                target,
+                Curve::EaseInOut,
+                HOVER_REVEAL_DURATION,
+                now,
+            );
         }
     }
 
@@ -208,7 +217,10 @@ impl CanvasModel {
                     return;
                 };
                 let Some(mut video) = crate::video::CanvasPlayer::open(&bytes) else {
-                    log::warn!("canvas decode: {} is not a decodable AVC clip", path.display());
+                    log::warn!(
+                        "canvas decode: {} is not a decodable AVC clip",
+                        path.display()
+                    );
                     return;
                 };
                 log::debug!("canvas decode: {} samples", video.frame_count());
@@ -272,7 +284,13 @@ impl CanvasModel {
                                         has_video.store(true, Ordering::Relaxed);
                                     }
                                     durations.push(dur);
-                                    sink.push_frame(b, epoch, frame.width, frame.height, frame.rgba);
+                                    sink.push_frame(
+                                        b,
+                                        epoch,
+                                        frame.width,
+                                        frame.height,
+                                        frame.rgba,
+                                    );
                                 }
                                 dur
                             }
@@ -361,9 +379,7 @@ impl CanvasModel {
             old.stop.store(true, Ordering::Relaxed);
         }
         self.has_video.store(false, Ordering::Relaxed);
-        if let (Some(sink), Some(node)) =
-            (self.frame_sink.clone(), *self.node.lock().unwrap())
-        {
+        if let (Some(sink), Some(node)) = (self.frame_sink.clone(), *self.node.lock().unwrap()) {
             sink.clear(node);
         }
     }

@@ -11,9 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use opal_gfx::{
-    Align, Computed, Curve, EventCtx, Justify, Len, NodeId, Scene, Signal, TextSignal,
-};
+use opal_gfx::{Align, Computed, Curve, EventCtx, Justify, Len, NodeId, Scene, Signal, TextSignal};
 
 use crate::app::AppState;
 use crate::app::msg::{Dispatch, Msg};
@@ -125,8 +123,9 @@ impl SetupView {
                 // Fade + slide the content in on view entry (`view_t` 0→1).
                 let t = state.router.view_t.clone();
                 let fade = Computed::new((t.clone(),), |(tt,)| tt.clamp(0.0, 1.0));
-                let slide =
-                    Computed::new((t.clone(),), |(tt,)| [0.0, (1.0 - tt.clamp(0.0, 1.0)) * 16.0]);
+                let slide = Computed::new((t.clone(),), |(tt,)| {
+                    [0.0, (1.0 - tt.clamp(0.0, 1.0)) * 16.0]
+                });
 
                 root.col(())
                     .w(Len::Fill)
@@ -141,8 +140,12 @@ impl SetupView {
                             self.icons.render_logo(r, 56.0);
                             r.text((), "Opal", tokens::TEXT_4XL).color(tokens::TEXT);
                         });
-                        c.text((), "An unofficial Spotify desktop client.", tokens::TEXT_BASE)
-                            .color(tokens::TEXT_DIM);
+                        c.text(
+                            (),
+                            "An unofficial Spotify desktop client.",
+                            tokens::TEXT_BASE,
+                        )
+                        .color(tokens::TEXT_DIM);
 
                         card(
                             c,
@@ -232,7 +235,8 @@ fn card(
             .color(tokens::TEXT_DIM);
 
             for line in INSTRUCTIONS {
-                card.text((), *line, tokens::TEXT_SM).color(tokens::TEXT_DIM);
+                card.text((), *line, tokens::TEXT_SM)
+                    .color(tokens::TEXT_DIM);
             }
 
             // The redirect URI must match the registered value exactly or

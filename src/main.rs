@@ -215,6 +215,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // folder picker) can nudge the frame loop when their result is ready.
     let wake = app.wake_handle();
     app.state_mut().settings.set_wake(wake);
+    // Keep the home greeting current across the day: sleep until the next
+    // time-of-day boundary (05:00/12:00/17:00 local), wake the loop, repeat.
+    // A precise sleep to a known time — not a poll — so the app still parks
+    // at 0% CPU in between; the frame tick re-evaluates the bucket on wake.
+    {
+        let wake = app.wake_handle();
+        std::thread::spawn(move || {
+            loop {
+                let secs = views::home::main_pane::secs_to_next_greeting_boundary();
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                wake.wake();
+            }
+        });
+    }
     let home_view = views::home::HomeView::new(dispatch.clone(), icons.clone());
     let login_view = views::login::LoginView::new(dispatch.clone(), icons.clone());
     let setup_view = views::setup::SetupView::new(dispatch, icons.clone());
@@ -249,10 +263,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // window) and persists the live player snapshot so the next
     // launch can re-hydrate the chrome immediately.
     let app = app.on_exit(move |state: &mut AppState| {
-        state.prefs.flush_on_exit(
-            state.player_ui.snapshot.as_ref(),
-            state.canvas.show.get(),
-        );
+        state
+            .prefs
+            .flush_on_exit(state.player_ui.snapshot.as_ref(), state.canvas.show.get());
     });
 
     // Attach a scripted-input run if the debug config carries one

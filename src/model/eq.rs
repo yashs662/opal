@@ -38,14 +38,35 @@ fn builtin_presets() -> Vec<EqPreset> {
         p("Flat", [0.0; NUM_BANDS]),
         // "Small speakers": a gentle low lift rolling off to the highs —
         // tuned by ear to match the official client's preset.
-        p("Small speakers", [3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, -2.0, -3.0]),
-        p("Bass boost", [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        p("Treble boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.5, 4.0, 5.0, 6.0]),
-        p("Vocal", [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0]),
+        p(
+            "Small speakers",
+            [3.0, 2.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0, -2.0, -3.0],
+        ),
+        p(
+            "Bass boost",
+            [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ),
+        p(
+            "Treble boost",
+            [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.5, 4.0, 5.0, 6.0],
+        ),
+        p(
+            "Vocal",
+            [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0],
+        ),
         p("Rock", [4.0, 3.0, 1.5, 0.0, -1.0, -0.5, 1.5, 3.0, 3.5, 4.0]),
-        p("Electronic", [5.0, 4.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 3.0, 5.0]),
-        p("Loudness", [5.0, 3.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 3.0, 5.0]),
-        p("Podcast", [-4.0, -3.0, -1.0, 2.0, 4.0, 4.0, 3.0, 2.0, 0.0, -2.0]),
+        p(
+            "Electronic",
+            [5.0, 4.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 3.0, 5.0],
+        ),
+        p(
+            "Loudness",
+            [5.0, 3.0, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0, 3.0, 5.0],
+        ),
+        p(
+            "Podcast",
+            [-4.0, -3.0, -1.0, 2.0, 4.0, 4.0, 3.0, 2.0, 0.0, -2.0],
+        ),
     ]
 }
 
@@ -111,14 +132,11 @@ impl EqModel {
     /// all-whitespace name) and leave rename mode.
     pub fn commit_rename(&mut self, index: usize) {
         let name = self.rename_buf.borrow().trim().to_string();
-        if !name.is_empty()
-            && self.presets.get(index).map(|p| p.custom) == Some(true)
-        {
+        if !name.is_empty() && self.presets.get(index).map(|p| p.custom) == Some(true) {
             self.presets[index].name = Rc::from(name.as_str());
         }
         self.rename_index.set(-1);
     }
-
 
     /// Clone of the shared control surface, for the worker/sink.
     pub fn shared(&self) -> Arc<EqShared> {

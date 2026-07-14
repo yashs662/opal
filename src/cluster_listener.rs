@@ -93,8 +93,8 @@ where
             .device
             .get(&cluster.active_device_id)
             .map(|d| (d.volume as f32 / u16::MAX as f32).clamp(0.0, 1.0));
-        let active_device = (!cluster.active_device_id.is_empty())
-            .then(|| cluster.active_device_id.clone());
+        let active_device =
+            (!cluster.active_device_id.is_empty()).then(|| cluster.active_device_id.clone());
         // The active device just dropped off the cluster (its app quit) and
         // no other device took over. Spotify still ships a stale "playing"
         // player_state here (frozen at position 0), which would leave Opal
@@ -189,7 +189,9 @@ fn provided_to_track(pt: &ProvidedTrack) -> PlaylistTrack {
         .or_else(|| md.get("image_small_url"))
         .map(|s| spotify_image_uri_to_https(s));
     let duration_ms = md.get("duration").and_then(|d| d.parse().ok()).unwrap_or(0);
-    let id = crate::api::track_id_from_uri(&pt.uri).unwrap_or_default().to_string();
+    let id = crate::api::track_id_from_uri(&pt.uri)
+        .unwrap_or_default()
+        .to_string();
 
     PlaylistTrack {
         id,
@@ -238,7 +240,10 @@ fn artists_from_metadata(
             } else {
                 String::new()
             };
-            artists.push(TrackArtist { id, name: a.clone() });
+            artists.push(TrackArtist {
+                id,
+                name: a.clone(),
+            });
             i += 1;
         }
     }

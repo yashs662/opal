@@ -12,13 +12,14 @@ pub mod now_playing;
 pub mod player_bar;
 pub mod playlist;
 pub mod queue;
+pub mod recents;
 pub mod settings;
 pub mod show_all;
 pub mod sidebar;
 pub mod top_bar;
 
-use std::rc::Rc;
 use opal_gfx::{Computed, EventCtx, ImageHandle, Len, Scene, Signal};
+use std::rc::Rc;
 
 use crate::album_art;
 use crate::api::PlayTarget;
@@ -281,6 +282,10 @@ pub struct HomeView {
     /// Top-bar history arrows.
     on_nav_back: Rc<dyn Fn()>,
     on_nav_forward: Rc<dyn Fn()>,
+    /// Top-bar home button → jump back to the feed.
+    on_home: Rc<dyn Fn()>,
+    /// Expand/collapse a Recents session group.
+    on_toggle_recent: Rc<dyn Fn(String)>,
 }
 
 impl HomeView {
@@ -412,6 +417,14 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::NavForward))
         };
+        let on_home: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::Navigate(crate::views::MainNav::Home)))
+        };
+        let on_toggle_recent: Rc<dyn Fn(String)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |key| dispatch.send(Msg::ToggleRecentSession(key)))
+        };
         let on_clear_cache: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ClearCache))
@@ -476,6 +489,8 @@ impl HomeView {
             on_show_all_library,
             on_nav_back,
             on_nav_forward,
+            on_home,
+            on_toggle_recent,
         }
     }
 
@@ -550,34 +565,39 @@ impl HomeView {
                         }
                     })
                     .collect();
-                let row_of = |tk: &crate::api::PlaylistTrack,
-                              sources: Option<String>,
-                              in_library: bool| {
-                    let cover = tk
-                        .album_image_url
-                        .as_ref()
-                        .and_then(|u| state.art.signal(&album_art::cache_key(u)));
-                    artist::ArtistTrackRow {
-                        track: tk.clone(),
-                        cover,
-                        duration: playlist::fmt_duration(tk.duration_ms),
-                        sources,
-                        in_library,
-                    }
-                };
+                let row_of =
+                    |tk: &crate::api::PlaylistTrack, sources: Option<String>, in_library: bool| {
+                        let cover = tk
+                            .album_image_url
+                            .as_ref()
+                            .and_then(|u| state.art.signal(&album_art::cache_key(u)));
+                        artist::ArtistTrackRow {
+                            track: tk.clone(),
+                            cover,
+                            duration: playlist::fmt_duration(tk.duration_ms),
+                            sources,
+                            in_library,
+                        }
+                    };
+                // Every heart — here and on the playlist/album pages — reads
+                // the same `is_saved` source of truth (liked ∪ playlist
+                // membership), so the fill is consistent and correct without
+                // first opening the containing playlist.
                 let library: Vec<artist::ArtistTrackRow> = a
                     .library_tracks
                     .iter()
-                    .map(|(tk, srcs)| row_of(tk, Some(srcs.join(" \u{2022} ")), true))
+                    .map(|(tk, srcs)| {
+                        row_of(
+                            tk,
+                            Some(srcs.join(" \u{2022} ")),
+                            state.membership.is_saved(&tk.uri),
+                        )
+                    })
                     .collect();
-                // Cross-mark popular rows the user already saved.
                 let popular = a
                     .top_tracks
                     .iter()
-                    .map(|tk| {
-                        let saved = a.library_tracks.iter().any(|(l, _)| l.uri == tk.uri);
-                        row_of(tk, None, saved)
-                    })
+                    .map(|tk| row_of(tk, None, state.membership.is_saved(&tk.uri)))
                     .collect();
                 artist::ArtistViewData {
                     name: a.name.clone(),
@@ -592,7 +612,16 @@ impl HomeView {
             _ => None,
         };
         let show_all_data: Option<show_all::ShowAllViewData> = match nav {
-            MainNav::ShowAll { section } => Some(build_show_all(&state.art, home_ref, *section)),
+            MainNav::ShowAll { section } if !matches!(section, HomeSection::Recent) => {
+                Some(build_show_all(&state.art, home_ref, *section))
+            }
+            _ => None,
+        };
+        // Recently played is its own session-grouped page (see `recents`).
+        let recents_data: Option<recents::RecentsViewData> = match nav {
+            MainNav::ShowAll {
+                section: HomeSection::Recent,
+            } => Some(build_recents(state)),
             _ => None,
         };
         let now_playing = now_playing::NowPlaying {
@@ -635,6 +664,7 @@ impl HomeView {
             can_forward: &state.router.can_forward,
             on_back: self.on_nav_back.clone(),
             on_forward: self.on_nav_forward.clone(),
+            on_home: self.on_home.clone(),
             icons,
         };
         let main_pane = main_pane::MainPane {
@@ -646,6 +676,8 @@ impl HomeView {
             playlist: playlist.as_ref(),
             artist: artist_data.as_ref(),
             show_all: show_all_data.as_ref(),
+            recents: recents_data.as_ref(),
+            on_toggle_recent: self.on_toggle_recent.clone(),
             queue: queue_ref.as_deref(),
             pulse: &state.library.skeleton_pulse,
             on_skip: self.on_skip.clone(),
@@ -734,6 +766,21 @@ pub(crate) fn target_track(state: &AppState) -> Option<crate::api::PlaylistTrack
     (!track.uri.is_empty()).then(|| track.clone())
 }
 
+/// The picker target's credited artist ids — passed to the worker on a
+/// like / playlist edit so it can keep the membership snapshot's reverse
+/// index current (the artist page reads it on its next open).
+pub(crate) fn target_artist_ids(state: &AppState) -> Vec<String> {
+    state
+        .membership
+        .target
+        .track
+        .artists
+        .iter()
+        .map(|a| a.id.clone())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
 /// Assemble a [`show_all::ShowAllViewData`] for `section` from the loaded
 /// `HomeData`. Cover signals are read narrowly via `art.signal` (the prefetch
 /// already created + dispatched them) — never `or_signal` here, so no
@@ -767,12 +814,7 @@ fn build_show_all(
                         context_uri: format!("spotify:album:{}", t.album_id),
                         track_uri: format!("spotify:track:{}", t.id),
                     }),
-                    menu: Some(crate::model::MenuTarget {
-                        uri: format!("spotify:track:{}", t.id),
-                        album_id: t.album_id.clone(),
-                        artist_id: String::new(),
-                                track: None,
-                            }),
+                    menu: Some(crate::model::MenuTarget::for_track(&t.to_track())),
                 };
                 if groups.last().map(|g| g.header.as_deref()) == Some(Some(label.as_str())) {
                     groups.last_mut().unwrap().rows.push(row);
@@ -821,12 +863,7 @@ fn build_show_all(
                         context_uri: format!("spotify:album:{}", t.album_id),
                         track_uri: format!("spotify:track:{}", t.id),
                     }),
-                    menu: Some(crate::model::MenuTarget {
-                        uri: format!("spotify:track:{}", t.id),
-                        album_id: t.album_id.clone(),
-                        artist_id: String::new(),
-                                track: None,
-                            }),
+                    menu: Some(crate::model::MenuTarget::for_track(&t.to_track())),
                 })
                 .collect();
             ShowAllViewData {
@@ -834,27 +871,164 @@ fn build_show_all(
                 groups: vec![ShowAllGroup { header: None, rows }],
             }
         }
-        HomeSection::Playlists => {
-            let rows = home
-                .playlists
-                .iter()
-                .map(|p| ShowAllRow {
-                    title: p.name.clone(),
-                    subtitle: "Playlist".to_string(),
-                    thumb: sig(&p.image_url),
-                    round: false,
-                    action: show_all::RowAction::Open(MainNav::Playlist {
-                        id: p.id.clone(),
-                        liked: false,
-                    }),
-                    menu: None,
+    }
+}
+
+/// Assemble the session-grouped Recents page: day-group the play history,
+/// then collapse consecutive plays sharing a context into one expandable
+/// session (resolved name/owner/cover fill in via `recent_contexts`).
+fn build_recents(state: &AppState) -> recents::RecentsViewData {
+    use recents::{RecentDay, RecentSession, RecentTrackRow, RecentsViewData};
+    let art = &state.art;
+    let recent = &state.library.home.recent;
+    let contexts = &state.library.recent_contexts;
+    let expanded = &state.library.expanded_recents;
+    let (today, yesterday) = show_all::today_yesterday();
+    let sig = |url: &Option<String>| {
+        url.as_ref()
+            .and_then(|u| art.signal(&album_art::cache_key(u)))
+    };
+    let plural = |n: usize| format!("{n} song{} played", if n == 1 { "" } else { "s" });
+    let ctx_type = |uri: &str| {
+        if uri.contains(":playlist:") {
+            "Playlist"
+        } else if uri.contains(":album:") {
+            "Album"
+        } else if uri.contains(":artist:") {
+            "Artist"
+        } else {
+            "Radio"
+        }
+    };
+    let nav_for = |uri: &str| -> Option<MainNav> {
+        let id = uri.rsplit(':').next().unwrap_or_default().to_string();
+        if uri.contains(":playlist:") {
+            Some(MainNav::Playlist { id, liked: false })
+        } else if uri.contains(":album:") {
+            Some(MainNav::Album { id })
+        } else if uri.contains(":artist:") {
+            Some(MainNav::Artist { id })
+        } else {
+            None
+        }
+    };
+
+    // 1. Day-group, then run-group consecutive same-context plays.
+    struct Sess<'a> {
+        ctx: Option<String>,
+        tracks: Vec<&'a crate::api::RecentTrack>,
+    }
+    let mut raw: Vec<(String, Vec<Sess>)> = Vec::new();
+    for t in recent {
+        let label = show_all::day_label(&t.played_at, &today, &yesterday);
+        if raw.last().map(|(l, _)| l.as_str()) != Some(label.as_str()) {
+            raw.push((label, Vec::new()));
+        }
+        let sessions = &mut raw.last_mut().unwrap().1;
+        match sessions.last_mut() {
+            Some(s) if s.ctx == t.context_uri => s.tracks.push(t),
+            _ => sessions.push(Sess {
+                ctx: t.context_uri.clone(),
+                tracks: vec![t],
+            }),
+        }
+    }
+
+    // 2. Map each session to its display row.
+    let days = raw
+        .into_iter()
+        .map(|(label, sessions)| {
+            let sessions = sessions
+                .into_iter()
+                .map(|s| {
+                    let count = s.tracks.len();
+                    let first = s.tracks[0];
+                    let key = format!("{label}|{}|{}", s.ctx.as_deref().unwrap_or("-"), first.id);
+                    let is_collection = s
+                        .ctx
+                        .as_deref()
+                        .map(|u| u.contains(":collection"))
+                        .unwrap_or(false);
+                    let resolved = s.ctx.as_ref().and_then(|u| contexts.get(u));
+                    let (title, subtitle, thumb, round, open) = match &s.ctx {
+                        None => (
+                            plural(count),
+                            String::new(),
+                            sig(&first.album_image_url),
+                            false,
+                            None,
+                        ),
+                        Some(_) if is_collection => (
+                            "Liked Songs".to_string(),
+                            plural(count),
+                            None,
+                            false,
+                            Some(MainNav::Playlist {
+                                id: crate::api::LIKED_SONGS_ID.to_string(),
+                                liked: true,
+                            }),
+                        ),
+                        Some(uri) => {
+                            let ty = ctx_type(uri);
+                            match resolved {
+                                Some(info) => {
+                                    let owner = if info.owner.is_empty() {
+                                        ty.to_string()
+                                    } else {
+                                        format!("{ty} \u{2022} {}", info.owner)
+                                    };
+                                    (
+                                        info.name.clone(),
+                                        format!("{} \u{2022} {}", plural(count), owner),
+                                        sig(&info.cover_url)
+                                            .or_else(|| sig(&first.album_image_url)),
+                                        ty == "Artist",
+                                        nav_for(uri),
+                                    )
+                                }
+                                // Not resolved yet — generic label until it lands.
+                                None => (
+                                    plural(count),
+                                    ty.to_string(),
+                                    sig(&first.album_image_url),
+                                    false,
+                                    nav_for(uri),
+                                ),
+                            }
+                        }
+                    };
+                    let tracks = s
+                        .tracks
+                        .iter()
+                        .map(|tk| RecentTrackRow {
+                            title: tk.name.clone(),
+                            subtitle: tk.artist.clone(),
+                            thumb: sig(&tk.album_image_url),
+                            play: crate::api::PlayTarget::ContextAt {
+                                context_uri: format!("spotify:album:{}", tk.album_id),
+                                track_uri: format!("spotify:track:{}", tk.id),
+                            },
+                            menu: crate::model::MenuTarget::for_track(&tk.to_track()),
+                        })
+                        .collect();
+                    RecentSession {
+                        expanded: expanded.contains(&key),
+                        key,
+                        title,
+                        subtitle,
+                        thumb,
+                        round,
+                        open,
+                        tracks,
+                    }
                 })
                 .collect();
-            ShowAllViewData {
-                title: "Made For You".to_string(),
-                groups: vec![ShowAllGroup { header: None, rows }],
-            }
-        }
+            RecentDay { label, sessions }
+        })
+        .collect();
+    RecentsViewData {
+        title: "Recently played".to_string(),
+        days,
     }
 }
 
@@ -900,22 +1074,53 @@ fn prepare_nav(state: &mut AppState, worker: &Worker, nav: &MainNav) {
             let token = state.auth.token();
             state
                 .library
-                .open_for(&mut state.art, worker, token, id, *liked, &state.membership.index)
+                .open_for(&mut state.art, worker, token, id, *liked, &state.membership)
         }
         MainNav::Album { id } => {
             state.library.open_artist = None;
             let token = state.auth.token();
             state
                 .library
-                .open_album(&mut state.art, worker, token, id, &state.membership.index)
+                .open_album(&mut state.art, worker, token, id, &state.membership)
         }
         MainNav::Artist { id } => {
             state.library.open_playlist = None;
             let token = state.auth.token();
             state.library.open_artist(worker, token, id)
         }
-        MainNav::ShowAll { .. } | MainNav::Home => {
+        MainNav::ShowAll { section } => {
             // Show-all renders from the already-loaded HomeData — no fetch.
+            state.library.open_playlist = None;
+            state.library.open_artist = None;
+            // The Recents page session-groups by context; resolve each
+            // distinct context's name/owner/cover once (disk-cached).
+            if matches!(section, HomeSection::Recent)
+                && let Some(token) = state.auth.token()
+            {
+                let pending: Vec<String> = state
+                    .library
+                    .home
+                    .recent
+                    .iter()
+                    .filter_map(|t| t.context_uri.clone())
+                    .filter(|u| {
+                        !state.library.recent_contexts_requested.contains(u)
+                            && (u.contains(":playlist:")
+                                || u.contains(":album:")
+                                || u.contains(":artist:"))
+                    })
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !pending.is_empty() {
+                    for u in &pending {
+                        state.library.recent_contexts_requested.insert(u.clone());
+                    }
+                    worker.resolve_contexts(token, pending);
+                }
+            }
+        }
+        MainNav::Home => {
             state.library.open_playlist = None;
             state.library.open_artist = None;
         }

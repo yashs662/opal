@@ -151,12 +151,7 @@ fn queue_row(
     crate::views::home::attach_context_menu(
         &mut row,
         on_context_menu,
-        crate::model::MenuTarget {
-            uri: tr.uri.clone(),
-            album_id: tr.album_id.clone(),
-            artist_id: tr.artist_id.clone(),
-            track: Some(Box::new(tr.clone())),
-        },
+        crate::model::MenuTarget::for_track(tr),
     );
     row.child(|r| {
         r.col(()).w_px(t::THUMB_MD).h_px(t::THUMB_MD).child(|b| {
@@ -183,7 +178,9 @@ fn queue_row(
             .justify(Justify::Center)
             .overflow_x(Overflow::Hidden)
             .child(|m| {
-                m.text((), &tr.name, 14.0).color(t::TEXT).max_width_px(420.0);
+                m.text((), &tr.name, 14.0)
+                    .color(t::TEXT)
+                    .max_width_px(420.0);
                 crate::views::home::playlist::artist_line(
                     m,
                     &tr.artists,

@@ -22,6 +22,8 @@ pub struct TopBar<'a> {
     pub can_forward: &'a Signal<bool>,
     pub on_back: Rc<dyn Fn()>,
     pub on_forward: Rc<dyn Fn()>,
+    /// Home button → jump straight back to the feed.
+    pub on_home: Rc<dyn Fn()>,
     pub icons: &'a Rc<IconSet>,
 }
 
@@ -37,7 +39,8 @@ impl Component for TopBar<'_> {
             .rgba(0.0, 0.0, 0.0, 0.0)
             .window_action(WindowAction::DragMove)
             .child(|t_row| {
-                topbar_icon_btn(t_row, icons, Icon::Menu);
+                let on_home = self.on_home.clone();
+                topbar_icon_btn_click(t_row, icons, Icon::Home, move |_| on_home());
                 nav_arrow(
                     t_row,
                     icons,
@@ -70,7 +73,8 @@ impl Component for TopBar<'_> {
                             .border(1.0, t::BORDER)
                             .child(|s2| {
                                 icons.render(s2, Icon::Search, t::ICON_SM, t::TEXT_DIM);
-                                s2.text((), "What do you want to play?", 13.0).color(t::TEXT_DIM);
+                                s2.text((), "What do you want to play?", 13.0)
+                                    .color(t::TEXT_DIM);
                             });
                     });
 
@@ -82,7 +86,14 @@ impl Component for TopBar<'_> {
                 });
                 topbar_icon_btn(t_row, icons, Icon::Bell);
 
-                chrome_btn(t_row, icons, Icon::Minimize, WindowAction::Minimize, t::BTN_HOVER, true);
+                chrome_btn(
+                    t_row,
+                    icons,
+                    Icon::Minimize,
+                    WindowAction::Minimize,
+                    t::BTN_HOVER,
+                    true,
+                );
                 chrome_btn(
                     t_row,
                     icons,
@@ -91,7 +102,14 @@ impl Component for TopBar<'_> {
                     t::BTN_HOVER,
                     false,
                 );
-                chrome_btn(t_row, icons, Icon::Close, WindowAction::Close, t::CLOSE_HOVER, false);
+                chrome_btn(
+                    t_row,
+                    icons,
+                    Icon::Close,
+                    WindowAction::Close,
+                    t::CLOSE_HOVER,
+                    false,
+                );
                 // ^ window controls share the canonical widget in `chrome`.
             });
     }
@@ -150,4 +168,3 @@ fn topbar_icon_btn(s: &mut Scene, icons: &IconSet, icon: Icon) {
             icons.render(c, icon, t::ICON_MD, t::TEXT);
         });
 }
-

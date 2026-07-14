@@ -174,7 +174,11 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 .player_ui
                 .with_snapshot(|p| {
                     p.is_playing.then(|| {
-                        (p.track_id.clone(), p.live_progress_ms() as u32, p.context_uri.clone())
+                        (
+                            p.track_id.clone(),
+                            p.live_progress_ms() as u32,
+                            p.context_uri.clone(),
+                        )
                     })
                 })
                 .flatten();
@@ -257,19 +261,26 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 }
             }
         }
-        WorkerResponse::MembershipLoaded { playlists, index } => {
+        WorkerResponse::MembershipLoaded {
+            playlists,
+            index,
+            artist_index,
+            liked,
+        } => {
             log::info!("playlist-membership ready: {} playlists", playlists.len());
-            state.membership.set_playlists(playlists, index.clone());
+            state
+                .membership
+                .set_playlists(playlists, index.clone(), artist_index, liked);
             // Resolve the current track's membership now that the index is up.
             if let Some(uri) = state.player_ui.current_track_uri() {
                 worker.query_membership(uri);
             }
             if let Some(open) = state.library.open_playlist.as_ref() {
                 let rows = open.rows.clone();
-                let saved_index = &state.membership.index;
+                let liked_page = open.liked;
                 let mut rows = rows.borrow_mut();
                 for row in rows.iter_mut() {
-                    row.in_library = open.liked || saved_index.contains_key(&row.uri);
+                    row.in_library = liked_page || state.membership.is_saved(&row.uri);
                 }
             }
             if state.library.open_playlist.is_some() {
@@ -376,7 +387,11 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                         .player_ui
                         .with_snapshot(|prev| {
                             (prev.track_id == p.track_id).then(|| {
-                                (prev.name.clone(), prev.artist.clone(), prev.album_image_url.clone())
+                                (
+                                    prev.name.clone(),
+                                    prev.artist.clone(),
+                                    prev.album_image_url.clone(),
+                                )
                             })
                         })
                         .flatten()
@@ -555,7 +570,10 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             let live_match = state
                 .player_ui
                 .with_snapshot(|p| {
-                    p.album_image_url.as_ref().map(|u| album_art::cache_key(u)).as_deref()
+                    p.album_image_url
+                        .as_ref()
+                        .map(|u| album_art::cache_key(u))
+                        .as_deref()
                         == Some(key.as_str())
                 })
                 .unwrap_or(false);
@@ -579,7 +597,9 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 // No rebuild: promote swaps the handles via the reactive
                 // image-handle binds and starts the crossfade tween, both
                 // pumped by the lib without re-running the scene closure.
-                state.backdrop.promote(handle, Some(accent), luma, cx.tl, cx.now);
+                state
+                    .backdrop
+                    .promote(handle, Some(accent), luma, cx.tl, cx.now);
                 state.art.set_shown(key);
             }
         }
@@ -596,7 +616,10 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 || state
                     .player_ui
                     .with_snapshot(|p| {
-                        p.album_image_url.as_ref().map(|u| album_art::cache_key(u)).as_deref()
+                        p.album_image_url
+                            .as_ref()
+                            .map(|u| album_art::cache_key(u))
+                            .as_deref()
                             == Some(key.as_str())
                     })
                     .unwrap_or(false);
@@ -631,9 +654,8 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             state.player_ui.context_inflight = None;
             // Remember even a failed resolution (empty name) so the
             // per-push gate doesn't re-dispatch this uri forever.
-            state
-                .player_ui
-                .resolved_context = Some((uri.clone(), name.clone().unwrap_or_default()));
+            state.player_ui.resolved_context =
+                Some((uri.clone(), name.clone().unwrap_or_default()));
             // Apply to the live pill only if the playing context still
             // matches and the pushes still carry no name of their own.
             if let Some(n) = name
@@ -646,6 +668,19 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             {
                 state.player_ui.context_label.set(n.as_str());
             }
+        }
+        WorkerResponse::ContextsResolved { map } => {
+            // Register + dispatch each context cover so the Recents session
+            // rows can bind a reactive thumb, then store the resolved info.
+            for info in map.values() {
+                if let Some(url) = info.cover_url.clone() {
+                    let key = album_art::cache_key(&url);
+                    state.art.or_signal(key);
+                    state.art.dispatch_cover(worker, url);
+                }
+            }
+            state.library.recent_contexts.extend(map);
+            cx.rebuild();
         }
         WorkerResponse::TrackCreditsReady { track_id, credits } => {
             state.player_ui.np_credits_inflight = None;
@@ -715,17 +750,20 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     o.rows.clone()
                 });
                 if let Some(buf) = buf {
-                    let liked = state.library.open_playlist.as_ref().map(|o| o.liked).unwrap_or(false);
-                    buf.borrow_mut().clear();
-                    state
+                    let liked = state
                         .library
-                        .build_rows(
-                            &mut state.art,
-                            &buf,
-                            &detail.tracks,
-                            liked,
-                            &state.membership.index,
-                        );
+                        .open_playlist
+                        .as_ref()
+                        .map(|o| o.liked)
+                        .unwrap_or(false);
+                    buf.borrow_mut().clear();
+                    state.library.build_rows(
+                        &mut state.art,
+                        &buf,
+                        &detail.tracks,
+                        liked,
+                        &state.membership,
+                    );
                     cx.rebuild();
                 }
             }
@@ -743,16 +781,21 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // via the per-row image bind baked in `build_rows`.)
             let applies = state.router.nav_is_open(&id);
             if applies {
-                let buf = state
-                    .library
-                    .open_playlist
-                    .as_ref()
-                    .map(|o| o.rows.clone());
+                let buf = state.library.open_playlist.as_ref().map(|o| o.rows.clone());
                 if let Some(buf) = buf {
-                    let liked = state.library.open_playlist.as_ref().map(|o| o.liked).unwrap_or(false);
-                    state
+                    let liked = state
                         .library
-                        .build_rows(&mut state.art, &buf, &tracks, liked, &state.membership.index);
+                        .open_playlist
+                        .as_ref()
+                        .map(|o| o.liked)
+                        .unwrap_or(false);
+                    state.library.build_rows(
+                        &mut state.art,
+                        &buf,
+                        &tracks,
+                        liked,
+                        &state.membership,
+                    );
                     // Tell the frame tick to re-materialize the lazy list:
                     // rows the user scrolled past while this page was in
                     // flight are on screen as skeletons and won't re-render
@@ -913,12 +956,7 @@ fn refresh_np_sections(state: &mut AppState, worker: &Worker, cx: &mut Cx) {
     // Credits: refresh when the track actually changes. The stale rows
     // are dropped right away so the previous track never captions this one.
     if let Some(id) = track_id_from_uri(&track_id)
-        && state
-            .player_ui
-            .np_credits
-            .as_ref()
-            .map(|(t, _)| t.as_str())
-            != Some(id)
+        && state.player_ui.np_credits.as_ref().map(|(t, _)| t.as_str()) != Some(id)
         && state.player_ui.np_credits_inflight.as_deref() != Some(id)
     {
         if state.player_ui.np_credits.take().is_some() {

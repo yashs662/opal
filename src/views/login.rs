@@ -63,13 +63,14 @@ impl LoginView {
             .child(|root| {
                 chrome::title_bar(root, &self.icons, "Opal");
 
-                root.col(())
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .child(|body| {
-                        // Top-left: back to setup — only when we came from it.
-                        if show_back {
-                            body.row(()).w(Len::Fill).h(Len::Auto).pad(16.0).child(|tr| {
+                root.col(()).w(Len::Fill).h(Len::Fill).child(|body| {
+                    // Top-left: back to setup — only when we came from it.
+                    if show_back {
+                        body.row(())
+                            .w(Len::Fill)
+                            .h(Len::Auto)
+                            .pad(16.0)
+                            .child(|tr| {
                                 pill_button(
                                     tr,
                                     &self.icons,
@@ -79,38 +80,44 @@ impl LoginView {
                                     on_back,
                                 );
                             });
-                        }
+                    }
 
-                        // Centre fills the gap between the corners → title +
-                        // button sit dead-centre. Entrance fade only (a slide
-                        // here would need an abs wrapper, which would drop the
-                        // corners out of flow). `h(Fill)` pushes Reset to the
-                        // bottom.
-                        let fade = Computed::new(
-                            (state.router.view_t.clone(),),
-                            |(tt,)| tt.clamp(0.0, 1.0),
-                        );
-                        body.col(())
-                            .w(Len::Fill)
-                            .h(Len::Fill)
-                            .center()
-                            .gap(20.0)
-                            .opacity_bind(fade)
-                            .child(|c| {
-                                logo_title(c, &self.icons);
-                                c.text((), "An unofficial Spotify desktop client.", tokens::TEXT_BASE)
+                    // Centre fills the gap between the corners → title +
+                    // button sit dead-centre. Entrance fade only (a slide
+                    // here would need an abs wrapper, which would drop the
+                    // corners out of flow). `h(Fill)` pushes Reset to the
+                    // bottom.
+                    let fade =
+                        Computed::new((state.router.view_t.clone(),), |(tt,)| tt.clamp(0.0, 1.0));
+                    body.col(())
+                        .w(Len::Fill)
+                        .h(Len::Fill)
+                        .center()
+                        .gap(20.0)
+                        .opacity_bind(fade)
+                        .child(|c| {
+                            logo_title(c, &self.icons);
+                            c.text(
+                                (),
+                                "An unofficial Spotify desktop client.",
+                                tokens::TEXT_BASE,
+                            )
+                            .color(tokens::TEXT_DIM);
+                            if checking {
+                                c.text((), "Checking saved credentials...", tokens::TEXT_SM)
                                     .color(tokens::TEXT_DIM);
-                                if checking {
-                                    c.text((), "Checking saved credentials...", tokens::TEXT_SM)
-                                        .color(tokens::TEXT_DIM);
-                                } else {
-                                    login_button(c, on_login);
-                                }
-                            });
+                            } else {
+                                login_button(c, on_login);
+                            }
+                        });
 
-                        // Bottom-left: destructive reset (hidden mid-check).
-                        if !checking {
-                            body.row(()).w(Len::Fill).h(Len::Auto).pad(16.0).child(|br| {
+                    // Bottom-left: destructive reset (hidden mid-check).
+                    if !checking {
+                        body.row(())
+                            .w(Len::Fill)
+                            .h(Len::Auto)
+                            .pad(16.0)
+                            .child(|br| {
                                 pill_button(
                                     br,
                                     &self.icons,
@@ -120,8 +127,8 @@ impl LoginView {
                                     on_reset,
                                 );
                             });
-                        }
-                    });
+                    }
+                });
             });
     }
 
@@ -155,13 +162,10 @@ impl LoginHandle {
 /// The brand header — the logo mark beside the "Opal" wordmark, centered.
 /// (Static for now; a fluttering-wings animation is planned.)
 fn logo_title(c: &mut Scene, icons: &IconSet) {
-    c.row(())
-        .align(Align::Center)
-        .gap(tokens::SP_3)
-        .child(|r| {
-            icons.render_logo(r, 56.0);
-            r.text((), "Opal", tokens::TEXT_4XL).color(tokens::TEXT);
-        });
+    c.row(()).align(Align::Center).gap(tokens::SP_3).child(|r| {
+        icons.render_logo(r, 56.0);
+        r.text((), "Opal", tokens::TEXT_4XL).color(tokens::TEXT);
+    });
 }
 
 /// The "Log in with Spotify" pill.

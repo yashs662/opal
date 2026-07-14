@@ -32,17 +32,27 @@ impl fmt::Display for AuthError {
 impl std::error::Error for AuthError {}
 
 impl From<reqwest::Error> for AuthError {
-    fn from(e: reqwest::Error) -> Self { AuthError::Http(e) }
+    fn from(e: reqwest::Error) -> Self {
+        AuthError::Http(e)
+    }
 }
 impl From<std::io::Error> for AuthError {
-    fn from(e: std::io::Error) -> Self { AuthError::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        AuthError::Io(e)
+    }
 }
 impl From<keyring_core::Error> for AuthError {
-    fn from(e: keyring_core::Error) -> Self { AuthError::Keyring(e) }
+    fn from(e: keyring_core::Error) -> Self {
+        AuthError::Keyring(e)
+    }
 }
 impl From<serde_json::Error> for AuthError {
-    fn from(e: serde_json::Error) -> Self { AuthError::Serde(e) }
+    fn from(e: serde_json::Error) -> Self {
+        AuthError::Serde(e)
+    }
 }
 impl From<std::str::Utf8Error> for AuthError {
-    fn from(e: std::str::Utf8Error) -> Self { AuthError::Utf8(e) }
+    fn from(e: std::str::Utf8Error) -> Self {
+        AuthError::Utf8(e)
+    }
 }

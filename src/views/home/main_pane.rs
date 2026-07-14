@@ -13,21 +13,17 @@ use opal_gfx::{
 };
 
 use crate::album_art;
+use crate::api::PlayTarget;
 use crate::api::{AlbumRef, HomeData};
 use crate::model::ArtModel;
-use crate::api::PlayTarget;
 use crate::views::home::playlist::{self, PlaylistViewData};
 use crate::views::home::{CtxMenuFn, NavFn, PlayFn};
 use crate::views::{HomeSection, MainNav};
-use crate::widgets::chip::chip;
 use crate::widgets::color::accent_fg;
 use crate::widgets::component::Component;
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
-
-/// Content filter tabs shown across the top of the pane.
-const FILTERS: &[&str] = &["All", "Music", "Podcasts", "Audiobooks"];
 
 /// Max tiles rendered per home row. The row is a horizontal scroller, so
 /// this is sized to overflow the widest screen (≈12 × ~190px ≈ 2280px) —
@@ -48,8 +44,13 @@ pub struct MainPane<'a> {
     pub playlist: Option<&'a PlaylistViewData>,
     /// View data for the open artist page (`Some` when `nav` is an Artist).
     pub artist: Option<&'a crate::views::home::artist::ArtistViewData>,
-    /// View data for a "Show all" list (`Some` when `nav` is ShowAll).
+    /// View data for a "Show all" list (`Some` when `nav` is ShowAll, except
+    /// Recently played — see `recents`).
     pub show_all: Option<&'a crate::views::home::show_all::ShowAllViewData>,
+    /// Session-grouped Recently-played page (`Some` for that section only).
+    pub recents: Option<&'a crate::views::home::recents::RecentsViewData>,
+    /// Expand/collapse a Recents session group.
+    pub on_toggle_recent: Rc<dyn Fn(String)>,
     /// The active device's queue (`None` while loading; `nav` is Queue).
     pub queue: Option<&'a [crate::api::PlaylistTrack]>,
     /// Skeleton pulse signal (queue loading placeholders).
@@ -99,8 +100,10 @@ impl Component for MainPane<'_> {
                         MainNav::Home => self.home_feed(content),
                         MainNav::Playlist { .. } | MainNav::Album { .. } => {
                             if let Some(pv) = self.playlist {
-                                let scroll_node =
-                                    self.nav.detail_scroll_node().expect("detail nav has scroller");
+                                let scroll_node = self
+                                    .nav
+                                    .detail_scroll_node()
+                                    .expect("detail nav has scroller");
                                 playlist::view(
                                     content,
                                     self.icons,
@@ -128,7 +131,18 @@ impl Component for MainPane<'_> {
                             }
                         }
                         MainNav::ShowAll { section } => {
-                            if let Some(sv) = self.show_all {
+                            if let Some(rv) = self.recents {
+                                crate::views::home::recents::view(
+                                    content,
+                                    self.icons,
+                                    rv,
+                                    &format!("show_all_scroll:{section:?}"),
+                                    self.on_navigate.clone(),
+                                    self.on_play.clone(),
+                                    self.on_context_menu.clone(),
+                                    self.on_toggle_recent.clone(),
+                                );
+                            } else if let Some(sv) = self.show_all {
                                 crate::views::home::show_all::view(
                                     content,
                                     self.icons,
@@ -168,27 +182,11 @@ impl MainPane<'_> {
         let nav = self.on_navigate.clone();
         let ctx_menu = self.on_context_menu.clone();
         let on_play = self.on_play.clone();
+        let prefix = greeting_prefix(greeting_bucket());
         let greeting = match home.profile.as_ref() {
-            Some(p) if !p.display_name.is_empty() => format!("Good evening, {}", p.display_name),
-            _ => "Good evening".to_string(),
+            Some(p) if !p.display_name.is_empty() => format!("{prefix}, {}", p.display_name),
+            _ => prefix.to_string(),
         };
-        let made_for = match home.profile.as_ref() {
-            Some(p) if !p.display_name.is_empty() => format!("Made For {}", p.display_name),
-            _ => "Made For You".to_string(),
-        };
-        // Filter chips pinned at the top of the pane.
-        content
-            .row(())
-            .w(Len::Fill)
-            .h(Len::Auto)
-            .pad_ltrb(t::SP_6, t::SP_4, t::SP_6, t::SP_0)
-            .gap(t::SP_2)
-            .align(Align::Center)
-            .child(|chips| {
-                for (i, label) in FILTERS.iter().enumerate() {
-                    chip(chips, label, i == 0, accent);
-                }
-            });
         // Scrolling content body — all sections hit real endpoints.
         // Named so the rebuild scroll-preservation keys it precisely: the
         // home feed is one stable thing, so its scroll position survives
@@ -197,7 +195,7 @@ impl MainPane<'_> {
             .col("home_feed_scroll")
             .w(Len::Fill)
             .h(Len::Fill)
-            .pad_xy(t::SP_6, t::SP_2)
+            .pad(t::SP_6)
             .gap(t::SP_5)
             .scroll_y()
             // Compositor scroll layer: the feed body rasters once into a
@@ -238,12 +236,7 @@ impl MainPane<'_> {
                             Some(MainNav::Album {
                                 id: t.album_id.clone(),
                             }),
-                            Some(crate::model::MenuTarget {
-                                uri: format!("spotify:track:{}", t.id),
-                                album_id: t.album_id.clone(),
-                                artist_id: String::new(),
-                                track: None,
-                            }),
+                            Some(crate::model::MenuTarget::for_track(&t.to_track())),
                         )
                     },
                 );
@@ -299,42 +292,7 @@ impl MainPane<'_> {
                             Some(MainNav::Album {
                                 id: t.album_id.clone(),
                             }),
-                            Some(crate::model::MenuTarget {
-                                uri: format!("spotify:track:{}", t.id),
-                                album_id: t.album_id.clone(),
-                                artist_id: String::new(),
-                                track: None,
-                            }),
-                        )
-                    },
-                );
-
-                section_header(
-                    c,
-                    &made_for,
-                    Some(MainNav::ShowAll {
-                        section: HomeSection::Playlists,
-                    }),
-                    &nav,
-                );
-                tile_row(
-                    c,
-                    icons,
-                    home.playlists.iter().take(HOME_ROW_TILES),
-                    art,
-                    nav.clone(),
-                    None,
-                    None,
-                    |p| {
-                        (
-                            p.name.clone(),
-                            "Playlist".to_string(),
-                            p.image_url.clone(),
-                            Some(MainNav::Playlist {
-                                id: p.id.clone(),
-                                liked: false,
-                            }),
-                            None,
+                            Some(crate::model::MenuTarget::for_track(&t.to_track())),
                         )
                     },
                 );
@@ -370,7 +328,15 @@ fn tile_row<T>(
     nav: NavFn,
     on_context_menu: Option<CtxMenuFn>,
     on_play: Option<PlayFn>,
-    label: impl Fn(&T) -> (String, String, Option<String>, Option<MainNav>, Option<crate::model::MenuTarget>),
+    label: impl Fn(
+        &T,
+    ) -> (
+        String,
+        String,
+        Option<String>,
+        Option<MainNav>,
+        Option<crate::model::MenuTarget>,
+    ),
 ) {
     let cards: Vec<Card> = items
         .map(|t| {
@@ -666,4 +632,41 @@ fn new_release_card(
                 icons.render(p, Icon::Play, t::ICON_MD, accent_fg(accent));
             });
     });
+}
+
+/// Time-of-day bucket for the home greeting: 0 = morning, 1 = afternoon,
+/// 2 = evening (local time). The frame tick rebuilds the feed when this
+/// changes so the greeting stays current across a boundary.
+pub(crate) fn greeting_bucket() -> u8 {
+    use chrono::Timelike;
+    match chrono::Local::now().hour() {
+        5..=11 => 0,
+        12..=16 => 1,
+        _ => 2,
+    }
+}
+
+/// The greeting text for a [`greeting_bucket`].
+fn greeting_prefix(bucket: u8) -> &'static str {
+    match bucket {
+        0 => "Good morning",
+        1 => "Good afternoon",
+        _ => "Good evening",
+    }
+}
+
+/// Seconds until the next greeting boundary (05:00 / 12:00 / 17:00 local) —
+/// the background timer sleeps this long, then wakes the loop so the tick
+/// re-evaluates the bucket.
+pub(crate) fn secs_to_next_greeting_boundary() -> u64 {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    let now_s = now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64;
+    const BOUNDS: [i64; 3] = [5 * 3600, 12 * 3600, 17 * 3600];
+    let next = BOUNDS
+        .iter()
+        .copied()
+        .find(|&b| b > now_s)
+        .unwrap_or(BOUNDS[0] + 86_400);
+    (next - now_s).max(1) as u64
 }

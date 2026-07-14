@@ -72,9 +72,15 @@ impl Component for LikeMenu<'_> {
                             .max_width_px(t::SP_80 - t::SP_10);
                     }
                     if !ready {
-                        panel.row(()).w(Len::Fill).h_px(t::SP_12).center().child(|e| {
-                            e.text((), "Loading playlists\u{2026}", 13.0).color(t::TEXT_DIM);
-                        });
+                        panel
+                            .row(())
+                            .w(Len::Fill)
+                            .h_px(t::SP_12)
+                            .center()
+                            .child(|e| {
+                                e.text((), "Loading playlists\u{2026}", 13.0)
+                                    .color(t::TEXT_DIM);
+                            });
                         return;
                     }
                     // One scroll list: Liked Songs first (so it scrolls with
@@ -130,7 +136,9 @@ fn check_row(
         .hover_color(t::HOVER_LIFT_SUBTLE)
         .on_click(move |_| toggle())
         .child(move |r| {
-            r.text((), &name, 14.0).color(t::TEXT).max_width_px(t::SP_56);
+            r.text((), &name, 14.0)
+                .color(t::TEXT)
+                .max_width_px(t::SP_56);
             // Checkbox pushed to the trailing edge.
             let mut box_node = r.row(());
             box_node
@@ -149,4 +157,3 @@ fn check_row(
             }
         });
 }
-

@@ -34,6 +34,13 @@ pub fn tick(
     if crate::hotreload::take_patched() {
         cx.rebuild();
     }
+    // Keep the home greeting current: rebuild when the time-of-day bucket
+    // flips (a background timer wakes the loop at each boundary, so this
+    // fires even if the app has idled on the feed for hours).
+    let bucket = crate::views::home::main_pane::greeting_bucket();
+    if state.library.greeting_bucket.replace(bucket) != bucket {
+        cx.rebuild();
+    }
     // Keep the live canvas node id in sync so the decode thread targets the
     // correct node even after a scene rebuild.
     state.canvas.sync_node(ctx.node("now_playing_canvas"));
@@ -194,8 +201,7 @@ pub fn tick(
             .unwrap_or(false);
         let queue_loading = matches!(state.router.nav, crate::views::MainNav::Queue)
             && state.library.queue.is_none();
-        let want = queue_loading
-            || (streaming && state.router.detail_scroll_node().is_some());
+        let want = queue_loading || (streaming && state.router.detail_scroll_node().is_some());
         if want != state.library.pulse_on {
             let pulse = &state.library.skeleton_pulse;
             if want {

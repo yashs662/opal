@@ -99,7 +99,13 @@ impl DebugConfig {
     /// Build the engine `Script` from the raw steps (dropping any empty
     /// step objects).
     pub fn script(&self) -> Script {
-        Script::new(self.script.iter().cloned().filter_map(|s| s.into_step()).collect())
+        Script::new(
+            self.script
+                .iter()
+                .cloned()
+                .filter_map(|s| s.into_step())
+                .collect(),
+        )
     }
 }
 

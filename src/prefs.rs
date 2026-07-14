@@ -282,13 +282,19 @@ impl UserPreferences {
                     prefs
                 }
                 Err(e) => {
-                    log::warn!("malformed prefs at {}: {e} — using defaults", path.display());
+                    log::warn!(
+                        "malformed prefs at {}: {e} — using defaults",
+                        path.display()
+                    );
                     Self::default()
                 }
             },
             Err(e) if e.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
-                log::warn!("failed to read prefs at {}: {e} — using defaults", path.display());
+                log::warn!(
+                    "failed to read prefs at {}: {e} — using defaults",
+                    path.display()
+                );
                 Self::default()
             }
         }

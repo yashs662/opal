@@ -39,33 +39,30 @@ pub fn artist_links<'a>(
 ) -> opal_gfx::NodeBuilderRef<'a> {
     let artists = artists.to_vec();
     let mut strip = s.marquee(name.to_string(), move |inner| {
-        inner
-            .row(())
-            .gap(t::SP_0)
-            .child(move |line| {
-                if artists.is_empty() {
-                    // Credits not resolved yet — reactive joined names.
-                    line.text_bound((), fallback, font_size).color(color);
-                    return;
+        inner.row(()).gap(t::SP_0).child(move |line| {
+            if artists.is_empty() {
+                // Credits not resolved yet — reactive joined names.
+                line.text_bound((), fallback, font_size).color(color);
+                return;
+            }
+            for (i, a) in artists.iter().enumerate() {
+                if i > 0 {
+                    line.text((), ", ", font_size).color(color.clone());
                 }
-                for (i, a) in artists.iter().enumerate() {
-                    if i > 0 {
-                        line.text((), ", ", font_size).color(color.clone());
-                    }
-                    let mut name_node = line.text((), a.name.clone(), font_size);
-                    name_node.color(color.clone());
-                    if !a.id.is_empty() {
-                        let on_artist = on_artist.clone();
-                        let id = a.id.clone();
-                        // Brighten the name itself on hover (the interact
-                        // sugar swaps the *glyph* colour on text nodes) —
-                        // the click affordance without an underline.
-                        name_node
-                            .hover_color(t::TEXT)
-                            .on_click(move |ctx| on_artist(ctx, &id));
-                    }
+                let mut name_node = line.text((), a.name.clone(), font_size);
+                name_node.color(color.clone());
+                if !a.id.is_empty() {
+                    let on_artist = on_artist.clone();
+                    let id = a.id.clone();
+                    // Brighten the name itself on hover (the interact
+                    // sugar swaps the *glyph* colour on text nodes) —
+                    // the click affordance without an underline.
+                    name_node
+                        .hover_color(t::TEXT)
+                        .on_click(move |ctx| on_artist(ctx, &id));
                 }
-            });
+            }
+        });
     });
     strip.w(Len::Fill);
     strip

@@ -118,7 +118,10 @@ pub struct IconSet {
 
 impl IconSet {
     pub fn get(&self, icon: Icon) -> ImageHandle {
-        *self.handles.get(&icon).expect("icon not loaded — extend ALL")
+        *self
+            .handles
+            .get(&icon)
+            .expect("icon not loaded — extend ALL")
     }
 
     /// The brand logo handle (gradient-preserving — draw it untinted with
@@ -153,6 +156,9 @@ pub fn load_all<S>(app: &mut App<S>) -> IconSet {
         let h = app.stage_image_svg(icon.svg_bytes(), RASTER_PX);
         handles.insert(icon, h);
     }
-    let logo = app.stage_image_svg(include_bytes!("../../assets/logo/geometric-opal.svg"), LOGO_PX);
+    let logo = app.stage_image_svg(
+        include_bytes!("../../assets/logo/geometric-opal.svg"),
+        LOGO_PX,
+    );
     IconSet { handles, logo }
 }

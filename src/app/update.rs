@@ -12,7 +12,7 @@ use crate::app::AppState;
 use crate::app::cx::Cx;
 use crate::app::msg::{Msg, MsgQueue};
 use crate::views::View;
-use crate::views::home::{PlayerAction, navigate, target_track};
+use crate::views::home::{PlayerAction, navigate, target_artist_ids, target_track};
 use crate::worker::{PlaybackCmd, Worker};
 
 /// Drain every view intent queued since the last frame, applying each to the
@@ -61,7 +61,11 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                     // chrome already shows.
                     if !state.player_ui.live {
                         let last = state.prefs.data.last_player.as_ref().map(|p| {
-                            (p.track_id.clone(), p.progress_ms as u32, p.context_uri.clone())
+                            (
+                                p.track_id.clone(),
+                                p.progress_ms as u32,
+                                p.context_uri.clone(),
+                            )
                         });
                         if let Some((uri, position_ms, context_uri)) = last {
                             worker.playback(
@@ -81,7 +85,9 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                 }
                 PlayerAction::Next => PlaybackCmd::Next,
                 PlayerAction::Prev => PlaybackCmd::Prev,
-                PlayerAction::ToggleShuffle => PlaybackCmd::Shuffle(state.player_ui.toggle_shuffle()),
+                PlayerAction::ToggleShuffle => {
+                    PlaybackCmd::Shuffle(state.player_ui.toggle_shuffle())
+                }
                 PlayerAction::CycleRepeat => PlaybackCmd::Repeat(state.player_ui.cycle_repeat()),
                 PlayerAction::SetVolume(pct) => PlaybackCmd::Volume(pct),
             };
@@ -139,7 +145,9 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             // state from the bar heart's already-resolved membership so the
             // popup is correct on first paint.
             if let Some(track) = state.player_ui.with_snapshot(|p| {
-                let id = track_id_from_uri(&p.track_id).unwrap_or_default().to_string();
+                let id = track_id_from_uri(&p.track_id)
+                    .unwrap_or_default()
+                    .to_string();
                 api::PlaylistTrack {
                     id,
                     uri: p.track_id.clone(),
@@ -165,37 +173,45 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
 
         Msg::LikeOpenFor(track) => {
             // Row hearts / the context menu's "Add to playlist…": target an
-            // arbitrary track. Membership + liked resolve async (instant
-            // when the worker index is warm); the rows grey until then.
+            // arbitrary track. Membership + liked resolve **synchronously**
+            // from the in-memory index + liked SoT (no worker round-trip, no
+            // network) so the popup's list is populated the instant it opens.
             // The overlay opens here (not at the emitter) so every surface
             // gets identical behavior from the one message.
             let uri = track.uri.clone();
-            let id = track.id.clone();
-            state.membership.set_target(*track, None);
+            let ids: std::collections::HashSet<String> = state
+                .membership
+                .index
+                .get(&uri)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let liked = state.membership.liked.contains(&uri);
+            state.membership.set_target(*track, Some((ids, liked)));
             state.membership.overlay.open(cx.tl, cx.now);
-            worker.query_membership(uri);
-            if !id.is_empty()
-                && let Some(token) = state.auth.token()
-            {
-                worker.check_saved(token, id);
-            }
             cx.rebuild();
         }
 
         Msg::LikeTogglePlaylist { playlist_id, add } => {
-            let Some(token) = state.auth.token() else { return };
+            let Some(token) = state.auth.token() else {
+                return;
+            };
             let uri = state.membership.target.uri().to_string();
             if uri.is_empty() {
                 return;
             }
+            let artist_ids = target_artist_ids(state);
             // Optimistic flip (checkbox) — the worker confirms, and rolls
             // back via MembershipEditFailed on error. The bar heart follows
             // only when the target IS the playing track.
             state.membership.toggle_target_local(&playlist_id, add);
             if state.player_ui.current_track_uri().as_deref() == Some(uri.as_str()) {
-                state
-                    .membership
-                    .toggle_current_local(&playlist_id, add, state.player_ui.liked.get());
+                state.membership.toggle_current_local(
+                    &playlist_id,
+                    add,
+                    state.player_ui.liked.get(),
+                );
             }
             let entry = state.membership.index.entry(uri.clone()).or_default();
             if add {
@@ -217,27 +233,37 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                         false,
                         &playlist_id,
                         &track,
-                        &state.membership.index,
+                        &state.membership,
                     );
                 }
             } else {
                 state.library.open_remove_track(false, &playlist_id, &uri);
             }
             state.library.invalidate_cached(&playlist_id);
-            worker.edit_membership(token, playlist_id, uri, add);
+            worker.edit_membership(token, playlist_id, uri, artist_ids, add);
             cx.rebuild();
         }
 
         Msg::LikeToggleLiked(add) => {
-            let Some(token) = state.auth.token() else { return };
+            let Some(token) = state.auth.token() else {
+                return;
+            };
             let target_uri = state.membership.target.uri().to_string();
             let id = state.membership.target.id().to_string();
             if id.is_empty() {
                 return;
             }
+            let artist_ids = target_artist_ids(state);
             // Optimistic flip; the worker's SavedState echo reconciles.
             // The playing track's heart follows only when it IS the target.
             state.membership.target_liked = add;
+            // Keep the saved-state source of truth live so every row heart
+            // (not just this page) reflects the like immediately.
+            if add {
+                state.membership.liked.insert(target_uri.clone());
+            } else {
+                state.membership.liked.remove(&target_uri);
+            }
             if state.player_ui.current_track_uri().as_deref() == Some(target_uri.as_str()) {
                 state.player_ui.liked.set(add);
                 state.membership.rebuild_hint(add);
@@ -245,15 +271,13 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             // Live-patch the open Liked Songs page + drop its in-memory cache.
             if add {
                 if let Some(track) = target_track(state) {
-                    state
-                        .library
-                        .open_add_track(
-                            &mut state.art,
-                            true,
-                            api::LIKED_SONGS_ID,
-                            &track,
-                            &state.membership.index,
-                        );
+                    state.library.open_add_track(
+                        &mut state.art,
+                        true,
+                        api::LIKED_SONGS_ID,
+                        &track,
+                        &state.membership,
+                    );
                 }
             } else {
                 state
@@ -261,7 +285,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                     .open_remove_track(true, api::LIKED_SONGS_ID, &target_uri);
             }
             state.library.invalidate_cached(api::LIKED_SONGS_ID);
-            worker.set_saved(token, id, add);
+            worker.set_saved(token, id, artist_ids, add);
             cx.rebuild();
         }
 
@@ -285,7 +309,9 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             }
             let id = format!("__library__{artist}");
             let name = format!("{artist} in your library");
-            state.library.open_synthetic(&mut state.art, name, rows);
+            state
+                .library
+                .open_synthetic(&mut state.art, name, rows, &state.membership);
             state.router.go(
                 crate::views::MainNav::Playlist { id, liked: false },
                 cx.tl,
@@ -295,15 +321,18 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         }
 
         Msg::Transfer(device_id) => {
-            let Some(token) = state.auth.token() else { return };
+            let Some(token) = state.auth.token() else {
+                return;
+            };
             // When leaving Opal itself, carry our locally-tracked position —
             // the Web API transfer drops the librespot device's position and
             // the target would otherwise restart at 0:00.
-            let position_ms = state
-                .devices
-                .playing_on_self
-                .get()
-                .then(|| state.player_ui.with_snapshot(|p| p.live_progress_ms() as u32).unwrap_or(0));
+            let position_ms = state.devices.playing_on_self.get().then(|| {
+                state
+                    .player_ui
+                    .with_snapshot(|p| p.live_progress_ms() as u32)
+                    .unwrap_or(0)
+            });
             log::info!("transferring playback to {device_id} (pos={position_ms:?})");
             worker.transfer_playback(token, device_id, position_ms);
         }
@@ -393,8 +422,16 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             cx.rebuild();
         }
 
+        Msg::ToggleRecentSession(key) => {
+            if !state.library.expanded_recents.remove(&key) {
+                state.library.expanded_recents.insert(key);
+            }
+            cx.rebuild();
+        }
         Msg::Skip(count) => {
-            let Some(token) = state.auth.token() else { return };
+            let Some(token) = state.auth.token() else {
+                return;
+            };
             // Local (Spirc) skip when Opal is the active device — instant +
             // reliable; else repeated Web API next on the remote device.
             let local = state.devices.playing_on_self.get();
