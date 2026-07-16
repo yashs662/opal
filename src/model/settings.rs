@@ -38,7 +38,9 @@ pub struct SettingsModel {
 impl SettingsModel {
     pub fn new(normalize: bool) -> Self {
         Self {
-            overlay: Overlay::new(),
+            // Height-morphing: the overlay springs the panel collapsed → full
+            // on open (and back on close/dismiss) with no per-open plumbing.
+            overlay: Overlay::new().with_morph(crate::views::home::settings::PANEL_COLLAPSED_H),
             cache_usage: CacheUsage::default(),
             normalize: Signal::new(normalize),
             pending_cache_dir: Arc::new(Mutex::new(None)),

@@ -64,6 +64,10 @@ pub struct UserPreferences {
     /// own. See [`Self::client_id`].
     #[serde(default)]
     pub spotify_client_id: Option<String>,
+    /// Recent searches (results the user opened) — powers the search modal's
+    /// "Recent searches" list, persisted so it survives restarts.
+    #[serde(default)]
+    pub search_history: Vec<crate::model::search::SearchHistoryEntry>,
 }
 
 fn default_version() -> u32 {
@@ -85,6 +89,7 @@ impl Default for UserPreferences {
             show_canvas: default_show_canvas(),
             cache_dir: None,
             spotify_client_id: None,
+            search_history: Vec::new(),
         }
     }
 }

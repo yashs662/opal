@@ -47,8 +47,12 @@ const TOGGLE_MS: u64 = 160;
 /// comfortable row (each band ≈ 44 px) without crowding the labels.
 const PANEL_W: f32 = 500.0;
 /// Capped panel height (logical px). The body scrolls past this, so the
-/// modal never exceeds a typical window however many sections we add.
-const PANEL_MAX_H: f32 = 640.0;
+/// modal never exceeds a typical window however many sections we add. Also
+/// the spring target the panel morphs open to (see `SettingsModel::panel_h`).
+pub const PANEL_MAX_H: f32 = 640.0;
+/// The height the panel springs *out from* on open — just the pinned header,
+/// so it reads as morphing open rather than fading in at full size.
+pub const PANEL_COLLAPSED_H: f32 = t::SP_16;
 const SIGN_OUT_W: f32 = 116.0;
 
 // EQ response graph — a Spotify-style filled curve with a draggable handle
@@ -128,7 +132,11 @@ impl Component for SettingsPanel<'_> {
             // so the per-glass backdrop pass samples the content beneath.
             host.glass("settings_panel")
                 .w_px(PANEL_W)
-                .h_px(PANEL_MAX_H)
+                // The overlay morphs this collapsed → full on open (and back
+                // on close/dismiss). `.clip()` so the growing height reveals
+                // the body rather than it spilling past.
+                .height_px_bind(self.settings.overlay.morph_height())
+                .clip()
                 .blur(28.0)
                 .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 0.72)
                 .radius(t::R_XL)
@@ -990,7 +998,7 @@ fn header(s: &mut Scene, icons: &IconSet, overlay: Overlay) {
                 .h_px(t::SP_8)
                 .center()
                 .hover_opacity(0.7)
-                .on_click(move |ctx| overlay.close(ctx.timeline, ctx.now))
+                .on_click(move |ctx| overlay.morph_close(ctx.timeline, ctx.now))
                 .child(|c| {
                     icons.render(c, Icon::Close, t::ICON_MD, t::TEXT_DIM);
                 });

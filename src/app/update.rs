@@ -129,6 +129,13 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
 
         Msg::SettingsOpen => {
             state.settings.refresh_usage();
+            // Morph open: fade + spring the panel from collapsed → full. The
+            // ✕ button / scrim dismiss reverse it via the overlay itself.
+            state.settings.overlay.morph_open(
+                cx.tl,
+                cx.now,
+                crate::views::home::settings::PANEL_MAX_H,
+            );
             cx.rebuild();
         }
 
@@ -422,6 +429,96 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             cx.rebuild();
         }
 
+        Msg::SearchOpen => {
+            // Open fresh: the modal node outlives its visibility (the overlay
+            // builds it every frame, even closed), so a dismiss doesn't drop
+            // its state — reset it here. `focus_pending` also drives clearing
+            // the field's editor after the rebuild (see `frame::tick`). The
+            // overlay morphs the panel open (fade + height spring) to fit the
+            // now-empty content; a scrim dismiss shrinks it back on its own.
+            state.search.query.clear();
+            state.search.results = None;
+            state.search.dispatched.clear();
+            state.search.dirty_since = None;
+            state.search.focus_pending = true;
+            let target = crate::views::home::search_modal::target_h(&state.search);
+            state.search.overlay.morph_open(cx.tl, cx.now, target);
+            cx.rebuild();
+        }
+        Msg::SearchInput(q) => {
+            state.search.query = q.clone();
+            if q.trim().is_empty() {
+                state.search.results = None;
+                state.search.dirty_since = None;
+                state.search.dispatched.clear();
+            } else {
+                // Arm the debounce; the frame tick fires the fetch.
+                state.search.dirty_since = Some(cx.now);
+            }
+            search_morph(state, cx);
+            cx.rebuild();
+        }
+        Msg::SearchSelect(entry) => {
+            let entry = *entry;
+            // Record into recent-search history (persist on a real change).
+            if state.search.record(entry.clone()) {
+                state.prefs.data.search_history = state.search.history.clone();
+                state.prefs.mark_dirty(cx.now);
+            }
+            // Close the modal (fade + inverse-morph the height down), then
+            // act on the choice.
+            state.search.overlay.morph_close(cx.tl, cx.now);
+            match entry.kind.as_str() {
+                "track" => {
+                    if let Some(token) = state.auth.token() {
+                        state.player_ui.is_playing.set(true);
+                        worker.playback(
+                            token,
+                            PlaybackCmd::PlayContext(PlayTarget::Uris {
+                                uris: vec![format!("spotify:track:{}", entry.id)],
+                                offset: 0,
+                            }),
+                            false,
+                        );
+                    }
+                    cx.rebuild();
+                }
+                "artist" => navigate(
+                    state,
+                    cx,
+                    worker,
+                    crate::views::MainNav::Artist { id: entry.id },
+                ),
+                "album" => navigate(
+                    state,
+                    cx,
+                    worker,
+                    crate::views::MainNav::Album { id: entry.id },
+                ),
+                "playlist" => navigate(
+                    state,
+                    cx,
+                    worker,
+                    crate::views::MainNav::Playlist {
+                        id: entry.id,
+                        liked: false,
+                    },
+                ),
+                _ => cx.rebuild(),
+            }
+        }
+        Msg::SearchClearHistory(idx) => {
+            let changed = match idx {
+                Some(i) => state.search.remove(i),
+                None => state.search.clear(),
+            };
+            if changed {
+                state.prefs.data.search_history = state.search.history.clone();
+                state.prefs.mark_dirty(cx.now);
+                search_morph(state, cx);
+                cx.rebuild();
+            }
+        }
         Msg::ToggleRecentSession(key) => {
             if !state.library.expanded_recents.remove(&key) {
                 state.library.expanded_recents.insert(key);
@@ -511,4 +608,11 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             cx.rebuild();
         }
     }
+}
+
+/// Re-morph the open search modal's height toward what its current content
+/// needs (empty history vs results), so it grows/shrinks smoothly as you type.
+fn search_morph(state: &mut AppState, cx: &mut Cx) {
+    let target = crate::views::home::search_modal::target_h(&state.search);
+    state.search.overlay.morph_to(cx.tl, cx.now, target);
 }

@@ -41,6 +41,22 @@ pub fn tick(
     if state.library.greeting_bucket.replace(bucket) != bucket {
         cx.rebuild();
     }
+    // Debounced search: dispatch the fetch once the query has been stable for
+    // the debounce window (the search field's caret blink keeps the loop
+    // awake while focused, so this lands without a dedicated timer).
+    if let Some(t) = state.search.dirty_since
+        && now.duration_since(t) >= std::time::Duration::from_millis(250)
+    {
+        state.search.dirty_since = None;
+        let q = state.search.query.trim().to_string();
+        if !q.is_empty()
+            && q != state.search.dispatched
+            && let Some(token) = state.auth.token()
+        {
+            state.search.dispatched = q.clone();
+            worker.search(token, q);
+        }
+    }
     // Keep the live canvas node id in sync so the decode thread targets the
     // correct node even after a scene rebuild.
     state.canvas.sync_node(ctx.node("now_playing_canvas"));
@@ -177,6 +193,14 @@ pub fn tick(
     // Drain worker responses through the reducer.
     while let Some(resp) = worker.poll() {
         reducer::handle(state, &mut cx, worker, resp);
+    }
+    // On search-modal open: clear the field (its node persists while the
+    // modal is closed, so it would otherwise reopen with the last query) and
+    // autofocus it. Both resolve after this frame's rebuild builds the node.
+    if state.search.focus_pending {
+        state.search.focus_pending = false;
+        ctx.set_field_value("search_input", "");
+        ctx.request_focus("search_input");
     }
     // A streamed page appended rows → re-materialize the open detail
     // page's lazy rows, turning any already-on-screen skeletons (fast

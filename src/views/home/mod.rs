@@ -13,6 +13,7 @@ pub mod player_bar;
 pub mod playlist;
 pub mod queue;
 pub mod recents;
+pub mod search_modal;
 pub mod settings;
 pub mod show_all;
 pub mod sidebar;
@@ -112,6 +113,8 @@ struct Layout<'a> {
     pub devices_panel: &'a crate::views::home::devices::DevicesPanel<'a>,
     /// The playlist-picker popup behind the like icon, ditto.
     pub like_menu: &'a crate::views::home::like_menu::LikeMenu<'a>,
+    /// The Spotlight-style search modal, owning its `Overlay`.
+    pub search_modal: &'a crate::views::home::search_modal::SearchModal<'a>,
     /// Right-click context menu (track row actions) + its handlers.
     pub menu: &'a crate::model::MenuModel,
     pub on_menu_add_queue: Rc<dyn Fn(String)>,
@@ -224,6 +227,7 @@ fn render(s: &mut Scene, v: &Layout) {
         v.settings_panel.view(root);
         v.devices_panel.view(root);
         v.like_menu.view(root);
+        v.search_modal.view(root);
         // Right-click context menu — topmost; renders only when open.
         context_menu::view(
             root,
@@ -286,6 +290,14 @@ pub struct HomeView {
     on_home: Rc<dyn Fn()>,
     /// Expand/collapse a Recents session group.
     on_toggle_recent: Rc<dyn Fn(String)>,
+    /// Open the Spotlight search modal.
+    on_search_open: Rc<dyn Fn()>,
+    /// Search field text changed (modal input).
+    on_search_input: Rc<dyn Fn(String)>,
+    /// A search result / history entry was chosen.
+    on_search_select: Rc<dyn Fn(crate::model::search::SearchHistoryEntry)>,
+    /// Clear one recent search (`Some(i)`) or all (`None`).
+    on_search_clear: Rc<dyn Fn(Option<usize>)>,
 }
 
 impl HomeView {
@@ -425,6 +437,22 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move |key| dispatch.send(Msg::ToggleRecentSession(key)))
         };
+        let on_search_open: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::SearchOpen))
+        };
+        let on_search_input: Rc<dyn Fn(String)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |q| dispatch.send(Msg::SearchInput(q)))
+        };
+        let on_search_select: Rc<dyn Fn(crate::model::search::SearchHistoryEntry)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |entry| dispatch.send(Msg::SearchSelect(Box::new(entry))))
+        };
+        let on_search_clear: Rc<dyn Fn(Option<usize>)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |idx| dispatch.send(Msg::SearchClearHistory(idx)))
+        };
         let on_clear_cache: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ClearCache))
@@ -491,6 +519,10 @@ impl HomeView {
             on_nav_forward,
             on_home,
             on_toggle_recent,
+            on_search_open,
+            on_search_input,
+            on_search_select,
+            on_search_clear,
         }
     }
 
@@ -658,13 +690,13 @@ impl HomeView {
             icons,
         };
         let top_bar = top_bar::TopBar {
-            settings: &state.settings.overlay,
             on_settings_open: self.on_settings_open.clone(),
             can_back: &state.router.can_back,
             can_forward: &state.router.can_forward,
             on_back: self.on_nav_back.clone(),
             on_forward: self.on_nav_forward.clone(),
             on_home: self.on_home.clone(),
+            on_search_open: self.on_search_open.clone(),
             icons,
         };
         let main_pane = main_pane::MainPane {
@@ -694,6 +726,17 @@ impl HomeView {
                 accent: state.backdrop.accent.clone(),
             },
             on_show_all_library: self.on_show_all_library.clone(),
+        };
+        let search_modal = search_modal::SearchModal {
+            icons,
+            art: &state.art,
+            membership: &state.membership,
+            search: &state.search,
+            on_input: self.on_search_input.clone(),
+            on_select: self.on_search_select.clone(),
+            on_clear: self.on_search_clear.clone(),
+            row_actions: &main_pane.row_actions,
+            on_context_menu: self.on_context_menu.clone(),
         };
         let settings_panel = settings::SettingsPanel {
             settings: &state.settings,
@@ -746,6 +789,7 @@ impl HomeView {
             settings_panel: &settings_panel,
             devices_panel: &devices_panel,
             like_menu: &like_menu,
+            search_modal: &search_modal,
             menu: &state.menu,
             on_menu_add_queue: self.on_add_queue.clone(),
             on_menu_navigate: self.on_navigate.clone(),

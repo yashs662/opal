@@ -34,6 +34,7 @@ pub mod menu;
 pub mod player;
 pub mod prefs;
 pub mod router;
+pub mod search;
 pub mod settings;
 
 pub use art::ArtModel;
@@ -48,4 +49,5 @@ pub use menu::{MenuModel, MenuTarget};
 pub use player::PlayerModel;
 pub use prefs::PrefsModel;
 pub use router::RouterModel;
+pub use search::SearchModel;
 pub use settings::SettingsModel;

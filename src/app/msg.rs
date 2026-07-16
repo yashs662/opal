@@ -118,6 +118,15 @@ pub enum Msg {
     EqStartRename(usize),
     /// Commit the inline rename of the custom EQ preset at this index.
     EqCommitRename(usize),
+    /// Open the search modal (search-bar click) — morph it open + focus.
+    SearchOpen,
+    /// The search field's text changed — mirror it + arm the debounced fetch.
+    SearchInput(String),
+    /// A search result / history entry was chosen: record it into recent
+    /// history, close the modal, and open its page (or play, for a track).
+    SearchSelect(Box<crate::model::search::SearchHistoryEntry>),
+    /// Clear one recent search (`Some(index)`) or all (`None`).
+    SearchClearHistory(Option<usize>),
     /// Expand/collapse a Recents session group (by its stable key).
     ToggleRecentSession(String),
     /// Skip forward `count` tracks (queue "play this next-N").

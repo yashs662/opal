@@ -94,6 +94,12 @@ pub enum WorkerCommand {
         access_token: String,
         uris: Vec<String>,
     },
+    /// Full-text search. Result: `SearchResults` (tagged with the query so a
+    /// late response for a since-changed query can be dropped).
+    Search {
+        access_token: String,
+        query: String,
+    },
     /// Track credits (performers / writers / producers) via the spclient
     /// track-credits endpoint — the now-playing card's "Credits" section.
     /// Needs a live session. Result: `TrackCreditsReady`.
@@ -376,6 +382,12 @@ pub enum WorkerResponse {
     ContextsResolved {
         map: std::collections::HashMap<String, api::RecentContextInfo>,
     },
+    /// Search results for `query` (empty on failure). The reducer drops it
+    /// if the live query has moved on.
+    SearchResults {
+        query: String,
+        results: api::SearchResults,
+    },
     /// A track's credits resolved (possibly empty — endpoint had none).
     TrackCreditsReady {
         track_id: String,
@@ -553,6 +565,10 @@ impl Worker {
                         WorkerCommand::ResolveContexts { access_token, uris } => {
                             spawn_resolve_contexts(resp.clone(), access_token, uris)
                         }
+                        WorkerCommand::Search {
+                            access_token,
+                            query,
+                        } => spawn_search(resp.clone(), access_token, query),
                         WorkerCommand::FetchTrackCredits { track_id } => {
                             spawn_fetch_track_credits(resp.clone(), session.clone(), track_id)
                         }
@@ -727,6 +743,12 @@ impl Worker {
         let _ = self
             .cmd_tx
             .send(WorkerCommand::ResolveContexts { access_token, uris });
+    }
+    pub fn search(&self, access_token: String, query: String) {
+        let _ = self.cmd_tx.send(WorkerCommand::Search {
+            access_token,
+            query,
+        });
     }
     pub fn fetch_track_credits(&self, track_id: String) {
         let _ = self
@@ -1706,6 +1728,17 @@ fn spawn_resolve_contexts(resp: Responder, access_token: String, uris: Vec<Strin
             .flatten()
             .collect();
         resp.send(WorkerResponse::ContextsResolved { map });
+    });
+}
+
+/// Run a search; empty results on failure so the UI clears its spinner.
+fn spawn_search(resp: Responder, access_token: String, query: String) {
+    tokio::spawn(async move {
+        let results = api::search(&access_token, &query)
+            .await
+            .inspect_err(|e| warn!("search ({query}) failed: {e}"))
+            .unwrap_or_default();
+        resp.send(WorkerResponse::SearchResults { query, results });
     });
 }
 

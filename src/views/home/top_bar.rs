@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use opal_gfx::{Align, Computed, Len, Overlay, Scene, Signal, WindowAction};
+use opal_gfx::{Align, Computed, Len, Scene, Signal, WindowAction};
 
 use crate::widgets::chrome::chrome_btn;
 use crate::widgets::component::Component;
@@ -11,10 +11,8 @@ use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
 
 pub struct TopBar<'a> {
-    /// The settings modal — opened by the gear button (the bar owns the
-    /// open gesture; the `Overlay` itself owns the scrim/fade).
-    pub settings: &'a Overlay,
-    /// Measure cache usage + rebuild when the modal opens.
+    /// Open the settings modal (the gear button emits this; the handler
+    /// owns opening the overlay + the morph spring).
     pub on_settings_open: Rc<dyn Fn()>,
     /// History arrows: whether each direction has anywhere to go (the
     /// glyphs dim to inert when not) + the step emitters.
@@ -24,6 +22,9 @@ pub struct TopBar<'a> {
     pub on_forward: Rc<dyn Fn()>,
     /// Home button → jump straight back to the feed.
     pub on_home: Rc<dyn Fn()>,
+    /// Open the Spotlight-style search modal (the pill is a button, not a
+    /// live field — the modal owns the real input).
+    pub on_search_open: Rc<dyn Fn()>,
     pub icons: &'a Rc<IconSet>,
 }
 
@@ -56,12 +57,13 @@ impl Component for TopBar<'_> {
                     self.on_forward.clone(),
                 );
 
+                let on_search_open = self.on_search_open.clone();
                 t_row
                     .row(())
                     .w(Len::Fill)
                     .h_px(t::SEARCH_H)
                     .center()
-                    .child(|c| {
+                    .child(move |c| {
                         c.row(())
                             .w_px(t::SEARCH_W)
                             .h_px(t::SEARCH_H)
@@ -71,17 +73,21 @@ impl Component for TopBar<'_> {
                             .rgba(t::PANEL_HI[0], t::PANEL_HI[1], t::PANEL_HI[2], 1.0)
                             .radius(t::R_FULL)
                             .border(1.0, t::BORDER)
-                            .child(|s2| {
+                            .hover_color(t::PANEL)
+                            .cursor(opal_gfx::CursorIcon::Pointer)
+                            .on_click(move |_| on_search_open())
+                            .child(move |s2| {
                                 icons.render(s2, Icon::Search, t::ICON_SM, t::TEXT_DIM);
                                 s2.text((), "What do you want to play?", 13.0)
                                     .color(t::TEXT_DIM);
                             });
                     });
 
-                let settings = self.settings.clone();
                 let on_settings_open = self.on_settings_open.clone();
-                topbar_icon_btn_click(t_row, icons, Icon::Settings, move |ctx| {
-                    settings.open(ctx.timeline, ctx.now);
+                // The handler (`Msg::SettingsOpen`) opens the overlay + starts
+                // the morph spring together, so the panel never flashes at
+                // full height before collapsing (mirrors the search modal).
+                topbar_icon_btn_click(t_row, icons, Icon::Settings, move |_| {
                     on_settings_open();
                 });
                 topbar_icon_btn(t_row, icons, Icon::Bell);

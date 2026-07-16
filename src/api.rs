@@ -1120,6 +1120,134 @@ pub async fn get_top_tracks(token: &str, limit: u32) -> Result<Vec<TrackRef>, Au
         .collect())
 }
 
+/// Everything a search returns, split by type — mapped straight onto the
+/// same refs the home feed + detail pages already render.
+#[derive(Debug, Clone, Default)]
+pub struct SearchResults {
+    pub tracks: Vec<PlaylistTrack>,
+    pub artists: Vec<ArtistRef>,
+    pub albums: Vec<AlbumRef>,
+    pub playlists: Vec<PlaylistRef>,
+}
+
+/// Percent-encode a search query for the `q=` param (safe for spaces + any
+/// punctuation a user might type).
+fn pct(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Full-text search across tracks / artists / albums / playlists
+/// (`/v1/search`). `market=from_token` so track `is_playable` is honest.
+pub async fn search(token: &str, query: &str) -> Result<SearchResults, AuthError> {
+    // `/search?type=track,artist,album,playlist` always returns all four
+    // sections (empty `items` when none), so they're required here.
+    #[derive(Deserialize)]
+    struct R {
+        tracks: Section<RawTrack>,
+        artists: Section<RawEntity>,
+        albums: Section<RawAlbumFull>,
+        playlists: Section<RawEntity>,
+    }
+    // A section's `items` can carry explicit nulls (playlists especially) —
+    // `Vec<Option<T>>` parses those as `None`; the caller `flatten`s them out.
+    // (`#[serde(default)]` here would add an undesired `T: Default` bound; the
+    // field is always present in a search response anyway.)
+    #[derive(Deserialize)]
+    struct Section<T> {
+        items: Vec<Option<T>>,
+    }
+    // Artists + playlists share the id/name/images shape.
+    #[derive(Deserialize, Default)]
+    struct RawEntity {
+        #[serde(default, deserialize_with = "null_default")]
+        id: String,
+        #[serde(default, deserialize_with = "null_default")]
+        name: String,
+        #[serde(default, deserialize_with = "null_default")]
+        images: Vec<RawImg>,
+    }
+    #[derive(Deserialize, Default)]
+    struct RawAlbumFull {
+        #[serde(default, deserialize_with = "null_default")]
+        id: String,
+        #[serde(default, deserialize_with = "null_default")]
+        name: String,
+        #[serde(default, deserialize_with = "null_default")]
+        images: Vec<RawImg>,
+        #[serde(default, deserialize_with = "null_default")]
+        artists: Vec<RawArtist>,
+        #[serde(default, deserialize_with = "null_default")]
+        release_date: String,
+    }
+    let url = format!(
+        "{API}/search?q={}&type=track,artist,album,playlist&limit=8&market=from_token",
+        pct(query)
+    );
+    let r: R = get_json(token, &url, ttl::VOLATILE).await?;
+    Ok(SearchResults {
+        tracks: r
+            .tracks
+            .items
+            .into_iter()
+            .flatten()
+            .filter(|t| !t.id.is_empty())
+            .map(RawTrack::into_track)
+            .collect(),
+        artists: r
+            .artists
+            .items
+            .into_iter()
+            .flatten()
+            .filter(|a| !a.id.is_empty())
+            .map(|a| ArtistRef {
+                id: a.id,
+                name: a.name,
+                image_url: pick_full(&a.images),
+            })
+            .collect(),
+        albums: r
+            .albums
+            .items
+            .into_iter()
+            .flatten()
+            .filter(|a| !a.id.is_empty())
+            .map(|a| AlbumRef {
+                id: a.id,
+                name: a.name,
+                artist: a
+                    .artists
+                    .into_iter()
+                    .next()
+                    .map(|x| x.name)
+                    .unwrap_or_default(),
+                image_url: pick_full(&a.images),
+                release_date: a.release_date,
+            })
+            .collect(),
+        playlists: r
+            .playlists
+            .items
+            .into_iter()
+            .flatten()
+            .filter(|p| !p.id.is_empty())
+            .map(|p| PlaylistRef {
+                id: p.id,
+                name: p.name,
+                image_url: pick_full(&p.images),
+                image_url_small: pick_thumb(&p.images),
+            })
+            .collect(),
+    })
+}
+
 /// Artist header info (name + image) for the artist page. Discography is
 /// fetched separately via [`get_artist_albums`].
 #[derive(Debug, Clone)]

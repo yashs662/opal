@@ -682,6 +682,30 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             state.library.recent_contexts.extend(map);
             cx.rebuild();
         }
+        WorkerResponse::SearchResults { query, results } => {
+            // Drop a late response whose query the user has moved past.
+            if state.search.dispatched != query {
+                return;
+            }
+            // Register + dispatch every result cover so the tiles/rows can
+            // bind a reactive thumb.
+            let covers = results
+                .tracks
+                .iter()
+                .filter_map(|t| t.album_image_url.clone())
+                .chain(results.artists.iter().filter_map(|a| a.image_url.clone()))
+                .chain(results.albums.iter().filter_map(|a| a.image_url.clone()))
+                .chain(results.playlists.iter().filter_map(|p| p.image_url.clone()));
+            for url in covers {
+                state.art.or_signal(album_art::cache_key(&url));
+                state.art.dispatch_cover(worker, url);
+            }
+            state.search.results = Some(results);
+            // Grow/shrink the modal to fit the new results (overlay morph).
+            let target = crate::views::home::search_modal::target_h(&state.search);
+            state.search.overlay.morph_to(cx.tl, cx.now, target);
+            cx.rebuild();
+        }
         WorkerResponse::TrackCreditsReady { track_id, credits } => {
             state.player_ui.np_credits_inflight = None;
             // Key the rows by track so a late arrival for a skipped track

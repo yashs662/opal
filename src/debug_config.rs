@@ -62,6 +62,9 @@ pub struct RawStep {
     pub by: Option<[f32; 2]>,
     #[serde(default)]
     pub drag: Option<[[f32; 2]; 2]>,
+    /// Insert text into the focused field (click the field first).
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 impl RawStep {
@@ -90,6 +93,9 @@ impl RawStep {
         }
         if let Some([a, b]) = self.drag {
             return Some(Step::Drag(a, b));
+        }
+        if let Some(t) = self.text {
+            return Some(Step::Type(t));
         }
         None
     }
@@ -123,6 +129,7 @@ impl Clone for RawStep {
             scroll: self.scroll,
             by: self.by,
             drag: self.drag,
+            text: self.text.clone(),
         }
     }
 }

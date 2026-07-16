@@ -44,6 +44,8 @@ pub struct AppState {
     /// 10-band equaliser slice: the reactive slider mirror + the shared
     /// lock-free control surface the audio sink reads.
     pub eq: EqModel,
+    /// Search slice: the query mirror + latest results.
+    pub search: crate::model::SearchModel,
 }
 
 impl AppState {
@@ -117,6 +119,7 @@ impl AppState {
             menu: MenuModel::new(),
             membership: MembershipModel::new(),
             eq: EqModel::from_prefs(&prefs.audio.eq),
+            search: crate::model::SearchModel::new(prefs.search_history.clone()),
             prefs: PrefsModel::new(prefs),
         }
     }
