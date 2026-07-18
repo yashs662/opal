@@ -143,7 +143,11 @@ impl Component for PlayerBar<'_> {
                             .hover_opacity(0.8)
                             .hover_hint_bind(self.membership.hint.clone())
                             .on_click(move |ctx| {
-                                like_overlay.open(ctx.timeline, ctx.now);
+                                like_overlay.morph_open(
+                                    ctx.timeline,
+                                    ctx.now,
+                                    crate::views::home::like_menu::target_h(),
+                                );
                                 on_like_open();
                             })
                             .child(|h| {
@@ -348,6 +352,10 @@ impl Component for PlayerBar<'_> {
                         );
                         let dev_overlay = self.devices.overlay.clone();
                         let on_devices_open = self.on_devices_open.clone();
+                        // Morph open to the current row count; the async fetch
+                        // re-morphs to the fresh count when it lands.
+                        let dev_target =
+                            crate::views::home::devices::target_h(self.devices.list.len());
                         icon_btn(
                             r,
                             icons,
@@ -355,7 +363,7 @@ impl Component for PlayerBar<'_> {
                             dev_tint.into(),
                             dev_hover,
                             move |ctx| {
-                                dev_overlay.open(ctx.timeline, ctx.now);
+                                dev_overlay.morph_open(ctx.timeline, ctx.now, dev_target);
                                 on_devices_open();
                             },
                         );

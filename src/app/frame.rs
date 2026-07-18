@@ -173,8 +173,15 @@ pub fn tick(
     // (only while the player bar is on screen, so login doesn't spin the loop).
     let on_home = matches!(state.router.view, crate::views::View::Home);
     state.player_ui.tick_loading(on_home, cx.tl, cx.now);
-    // Commit a seek on the release edge of a progress-bar drag.
+    // Commit a seek on the release edge of a progress-bar drag. `tick_seek`
+    // always updates the bar's position; only a *live* playback can actually
+    // be sought. Before anything is live (cold start on the restored
+    // snapshot), a transport seek has nothing to act on and wedges it — the
+    // empty local Spirc / no-active-device Web API seek leaves playback stuck.
+    // So a pre-playback seek just repositions the bar; the play button's
+    // Resume then starts there (see `Msg::Transport`).
     if let Some(ms) = state.player_ui.tick_seek(cx.tl)
+        && state.player_ui.live
         && let Some(token) = state.auth.token()
     {
         let local = state.devices.playing_on_self.get();

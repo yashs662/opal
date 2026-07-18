@@ -21,6 +21,17 @@ use crate::widgets::tokens as t;
 /// rows before scrolling, matching the picker's popup feel.
 const LIST_H: f32 = 300.0;
 
+/// Height the panel morphs *out from* on open — pad + header lines only.
+pub fn collapsed_h() -> f32 {
+    t::SP_5 * 2.0 + t::SP_6 + t::SP_3 + t::SP_4
+}
+
+/// Height the panel morphs *to* — header + the fixed-height list. Fixed (the
+/// list scrolls), so a mild over/under only trims the bottom padding.
+pub fn target_h() -> f32 {
+    collapsed_h() + t::SP_3 + LIST_H
+}
+
 pub struct LikeMenu<'a> {
     pub membership: &'a MembershipModel,
     pub accent: &'a Signal<[f32; 4]>,
@@ -50,9 +61,13 @@ impl Component for LikeMenu<'_> {
             .collect();
         let on_toggle_playlist = self.on_toggle_playlist.clone();
         let on_toggle_liked = self.on_toggle_liked.clone();
+        let panel_h = self.membership.overlay.morph_height();
         self.membership.overlay.render(s, t::SCRIM, move |host| {
             host.col(())
                 .w_px(t::SP_80)
+                // Morphs collapsed → full on open (and back on close/dismiss).
+                .height_px_bind(panel_h)
+                .clip()
                 .pad(t::SP_5)
                 .gap(t::SP_3)
                 .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)

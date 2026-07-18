@@ -116,7 +116,7 @@ impl MembershipModel {
             current: HashSet::new(),
             in_playlist: Signal::new(false),
             hint: TextSignal::new(""),
-            overlay: Overlay::new(),
+            overlay: Overlay::new().with_morph(crate::views::home::like_menu::collapsed_h()),
             target: MembershipTarget::default(),
             target_ids: HashSet::new(),
             target_liked: false,

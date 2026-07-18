@@ -144,6 +144,10 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::Devices { devices } => {
             state.devices.list = devices;
+            // Re-fit the popup height to the fresh row count (the fetch is
+            // async, so open morphed to the prior/empty count first).
+            let target = crate::views::home::devices::target_h(state.devices.list.len());
+            state.devices.overlay.morph_to(cx.tl, cx.now, target);
             // The popup is open (it dispatched this fetch) — rebuild so
             // the rows appear.
             cx.rebuild();

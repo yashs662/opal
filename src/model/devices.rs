@@ -33,7 +33,7 @@ pub struct DevicesModel {
 impl DevicesModel {
     pub fn new() -> Self {
         Self {
-            overlay: Overlay::new(),
+            overlay: Overlay::new().with_morph(crate::views::home::devices::collapsed_h()),
             list: Vec::new(),
             active_id: String::new(),
             self_id: String::new(),

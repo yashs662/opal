@@ -60,14 +60,20 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                     // start the last-played track at exactly the position the
                     // chrome already shows.
                     if !state.player_ui.live {
-                        let last = state.prefs.data.last_player.as_ref().map(|p| {
-                            (
-                                p.track_id.clone(),
-                                p.progress_ms as u32,
-                                p.context_uri.clone(),
-                            )
-                        });
-                        if let Some((uri, position_ms, context_uri)) = last {
+                        let last = state
+                            .prefs
+                            .data
+                            .last_player
+                            .as_ref()
+                            .map(|p| (p.track_id.clone(), p.context_uri.clone()));
+                        if let Some((uri, context_uri)) = last {
+                            // Start where the chrome currently shows — the
+                            // seeded position, or wherever a pre-play seek
+                            // moved the bar to (the persisted `progress_ms`
+                            // would ignore that seek).
+                            let position_ms = (state.player_ui.progress.get()
+                                * state.player_ui.duration_ms.get())
+                                as u32;
                             worker.playback(
                                 token,
                                 PlaybackCmd::PlayContext(PlayTarget::Resume {
@@ -196,7 +202,11 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                 .collect();
             let liked = state.membership.liked.contains(&uri);
             state.membership.set_target(*track, Some((ids, liked)));
-            state.membership.overlay.open(cx.tl, cx.now);
+            state.membership.overlay.morph_open(
+                cx.tl,
+                cx.now,
+                crate::views::home::like_menu::target_h(),
+            );
             cx.rebuild();
         }
 

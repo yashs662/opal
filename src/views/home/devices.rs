@@ -22,6 +22,26 @@ pub struct DevicesPanel<'a> {
     pub on_transfer: Rc<dyn Fn(String)>,
 }
 
+/// One device row's height + the panel padding — the geometry the morph
+/// target is summed from. The list has no scroller, so the target must fit
+/// every row exactly (slight over is fine; under would clip a device).
+const ROW_H: f32 = t::SP_14;
+
+/// Height the panel morphs *out from* on open — pad + the title line only.
+pub fn collapsed_h() -> f32 {
+    t::SP_5 * 2.0 + t::SP_6
+}
+
+/// Height the panel morphs *to* for `n` device rows (or the empty-state row).
+pub fn target_h(n: usize) -> f32 {
+    let base = collapsed_h();
+    if n == 0 {
+        base + t::SP_3 + t::SP_12
+    } else {
+        base + n as f32 * (t::SP_3 + ROW_H)
+    }
+}
+
 impl Component for DevicesPanel<'_> {
     fn view(&self, s: &mut Scene) {
         let icons = self.icons;
@@ -34,6 +54,10 @@ impl Component for DevicesPanel<'_> {
         self.devices.overlay.render(s, t::SCRIM, move |host| {
             host.col(())
                 .w_px(t::SP_80)
+                // Morphs collapsed → the row count on open (and back on
+                // close/dismiss), matching the settings/search modals.
+                .height_px_bind(overlay.morph_height())
+                .clip()
                 .pad(t::SP_5)
                 .gap(t::SP_3)
                 .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)
@@ -104,7 +128,7 @@ fn device_row(
         let on_transfer = on_transfer.clone();
         row.hover_color(t::HOVER_LIFT_SUBTLE).on_click(move |ctx| {
             on_transfer(id.clone());
-            overlay.close(ctx.timeline, ctx.now);
+            overlay.morph_close(ctx.timeline, ctx.now);
         });
     }
     let accent = accent.clone();
