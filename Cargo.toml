@@ -1,3 +1,10 @@
+# `xtask` is the dev-tooling binary (`cargo xtask debug ...` — see
+# debug/README.md); default-members keeps plain `cargo build` scoped to
+# the app.
+[workspace]
+members = ["xtask"]
+default-members = ["."]
+
 [package]
 name = "opal"
 version = "0.1.0"

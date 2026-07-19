@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Dev tooling only (`cargo xtask ...`) — keep it dependency-free so it
+# builds in a blink and never drags the app's dep graph.
+[dependencies]

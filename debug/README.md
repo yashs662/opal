@@ -2,21 +2,22 @@
 
 Scripted-input + screenshot tooling for diagnosing the UI without a human
 at the mouse. **Gated behind the `automation` cargo feature — never in a
-ship build.** To rip out: delete this `debug/` dir, the `automation`
-feature in both `Cargo.toml`s, `src/debug_config.rs`, the
-`#[cfg(feature = "automation")]` lines in `src/main.rs`, and the
+ship build.** To rip out: delete this `debug/` dir, the `xtask/` crate
+(+ its workspace entry in `Cargo.toml` and `.cargo/config.toml` alias),
+the `automation` feature in both `Cargo.toml`s, `src/debug_config.rs`,
+the `#[cfg(feature = "automation")]` lines in `src/main.rs`, and the
 `#[cfg(feature = "automation")]` blocks + `src/automation.rs` in
 `../opal-gfx`.
 
 ## Run
 
 ```
-./debug/run.ps1            # Windows; uses debug/home.json
-./debug/run.sh             # Linux/macOS
-./debug/run.ps1 debug/liked.json
+cargo xtask debug                    # uses debug/home.json
+cargo xtask debug debug/liked.json
 ```
 
-The launcher kills any stale `opal.exe` (the lock that breaks
+The launcher (`xtask/`, a dependency-free Rust binary — cross-platform,
+no shell scripts) kills any stale `opal` process (the lock that breaks
 `cargo run` mid-session), builds with `--features automation`, and runs
 `--config <path>`.
 

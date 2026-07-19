@@ -190,7 +190,7 @@ impl NowPlaying<'_> {
                                 .w(Len::Fill)
                                 .square()
                                 .overflow(Overflow::Hidden, Overflow::Hidden)
-                                .radius(t::R_LG)
+                                .radius(t::R_MD)
                                 .child(|a| {
                                     crossfaded_art_flat(
                                         a,
@@ -315,7 +315,7 @@ impl NowPlaying<'_> {
                 card.col(())
                     .w(Len::Fill)
                     .color(header_bg)
-                    .radii(t::R_SM, t::R_SM, 0.0, 0.0)
+                    .radii(t::R_MD, t::R_MD, 0.0, 0.0)
                     .pad(t::SP_3)
                     .gap(t::SP_0_5)
                     .child(|h| {
@@ -342,7 +342,7 @@ impl NowPlaying<'_> {
                 card.col(())
                     .w(Len::Fill)
                     .color(body_bg)
-                    .radii(0.0, 0.0, t::R_SM, t::R_SM)
+                    .radii(0.0, 0.0, t::R_MD, t::R_MD)
                     .overflow(Overflow::Hidden, Overflow::Hidden)
                     .child(|body| {
                         self.about_artist(body);

@@ -18,7 +18,6 @@ use protobuf::EnumOrUnknown;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
-use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc::{self as tmpsc, UnboundedSender};
 
@@ -491,7 +490,21 @@ impl Worker {
         let resp = Responder { tx: resp_tx, wake };
 
         thread::spawn(move || {
-            let rt = Runtime::new().unwrap();
+            // Bound the blocking pool: every disk-cache read/write and
+            // cover decode rides `spawn_blocking`, and tokio's default cap
+            // is 512 threads — a cold start (hundreds of covers + library
+            // scans at once) balloons to ~570 OS threads and saturates
+            // every core. CPU-bound decodes gain nothing past core count;
+            // excess work queues instead of spawning.
+            let blocking_cap = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8)
+                .clamp(4, 16);
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .max_blocking_threads(blocking_cap)
+                .build()
+                .unwrap();
             // Long-lived librespot session — held on the worker so its
             // background tasks (AP socket, dealer) stay alive across
             // command iterations. `None` until `ConnectSpotifySession`
