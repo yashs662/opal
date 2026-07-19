@@ -14,6 +14,7 @@ the `#[cfg(feature = "automation")]` lines in `src/main.rs`, and the
 ```
 cargo xtask debug                    # uses debug/home.json
 cargo xtask debug debug/liked.json
+cargo xtask debug --release          # optimized build (perf comparisons)
 ```
 
 The launcher (`xtask/`, a dependency-free Rust binary — cross-platform,

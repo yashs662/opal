@@ -12,6 +12,12 @@
 //! the loop replays from VRAM, so there's no system-RAM frame cache and no
 //! per-frame CPU→GPU transfer once looping.
 //!
+//! Frames stay **YUV end-to-end**: the decoder's I420 planes are cropped +
+//! downscaled per-plane and shipped as NV12 (luma + interleaved half-res
+//! chroma) — 12 bits/px resident instead of RGBA's 32, with the YUV→RGB
+//! conversion done by the compositor's `fs_nv12` shader. No CPU
+//! colour-space conversion at all.
+//!
 //! Samples are fed in decode order. Spotify Canvas clips are simple
 //! (baseline/main profile, no B-frames in practice) so decode order
 //! matches display order; we don't reorder by composition timestamp.
@@ -23,13 +29,26 @@ use openh264::decoder::{Decoder, DecoderConfig, Flush};
 use openh264::formats::YUVSource;
 use re_mp4::{Mp4, StsdBoxContent, TrackKind};
 
-/// One decoded frame: tightly-packed RGBA8 (`width * height * 4`) plus how
-/// long it should stay on screen before the next one.
+/// One decoded frame in NV12: `y` is `width × height` luma bytes, `uv` is
+/// `(width/2) × (height/2)` interleaved chroma pairs, plus how long it
+/// should stay on screen before the next one. Dims are always even.
 pub struct VideoFrame {
-    pub rgba: Vec<u8>,
+    pub y: Vec<u8>,
+    pub uv: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub duration: Duration,
+}
+
+/// A cropped I420 frame between decode and the budget downscale —
+/// internal to the decode pass.
+struct I420Frame {
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    width: u32,
+    height: u32,
+    duration: Duration,
 }
 
 /// Demuxed H.264 Canvas clip + an openh264 decoder. Decoded one pass via
@@ -52,15 +71,17 @@ const CANVAS_ASPECT: f32 = 9.0 / 16.0;
 const ASPECT_EPS: f32 = 0.01;
 
 /// Cap on frame height (px); taller frames are area-downscaled preserving
-/// 9:16. Frames live in VRAM (one texture each), replayed by re-binding, so
-/// height drives the resident VRAM, not any per-frame transfer. The budget
-/// below shrinks this further when a clip has too many frames to fit.
+/// 9:16. Frames live in VRAM (one texture pair each), replayed by
+/// re-binding, so height drives the resident VRAM, not any per-frame
+/// transfer. The budget below shrinks this further when a clip has too
+/// many frames to fit.
 const CANVAS_TARGET_HEIGHT: u32 = 1080;
 
-/// Ceiling on the resident frame set (bytes of VRAM). A long or 60 fps clip
-/// has enough frames to blow past [`CANVAS_TARGET_HEIGHT`]'s implied size, so
-/// the effective height is shrunk to keep the whole set under this.
-const CANVAS_CACHE_BUDGET: u64 = 192 * 1024 * 1024;
+/// Ceiling on the resident frame set (bytes of VRAM, NV12 = 1.5 B/px). A
+/// long or 60 fps clip has enough frames to blow past
+/// [`CANVAS_TARGET_HEIGHT`]'s implied size, so the effective height is
+/// shrunk to keep the whole set under this.
+const CANVAS_CACHE_BUDGET: u64 = 96 * 1024 * 1024;
 
 impl CanvasVideo {
     /// Demux `mp4_bytes`, pick the first H.264 video track, and prime the
@@ -135,11 +156,12 @@ impl CanvasVideo {
         self.samples.len()
     }
 
-    /// Decode the sample at the cursor and advance it, returning the cropped
-    /// frame. `None` when the access unit yields no picture (need-more-data
-    /// or a recoverable hiccup) — callers skip to the next sample. Caller
-    /// must ensure the cursor is in range (see [`at_end`](Self::at_end)).
-    fn decode_at_cursor(&mut self) -> Option<VideoFrame> {
+    /// Decode the sample at the cursor and advance it, returning the
+    /// centre-cropped I420 planes. `None` when the access unit yields no
+    /// picture (need-more-data or a recoverable hiccup) — callers skip to
+    /// the next sample. Caller must ensure the cursor is in range (see
+    /// [`at_end`](Self::at_end)).
+    fn decode_at_cursor(&mut self) -> Option<I420Frame> {
         let idx = self.next;
         self.next += 1;
         let (au, dur) = &self.samples[idx];
@@ -147,14 +169,16 @@ impl CanvasVideo {
         match self.decoder.decode(au) {
             Ok(Some(yuv)) => {
                 let (w, h) = yuv.dimensions();
-                let mut rgba = vec![0u8; w * h * 4];
-                yuv.write_rgba8(&mut rgba);
+                let (sy, su, sv) = yuv.strides();
                 // Some Canvas clips ship wider than 9:16 (e.g. 948x720); the
                 // official client shows a centred 9:16 crop. Match it so the
-                // vertical now-playing slot doesn't squish them.
-                let (rgba, cw, ch) = crop_center_portrait(rgba, w as u32, h as u32);
-                Some(VideoFrame {
-                    rgba,
+                // vertical now-playing slot doesn't squish them. Even-aligned
+                // so the half-res chroma planes crop on exact pixels.
+                let (x0, y0, cw, ch) = crop_rect_portrait(w as u32, h as u32);
+                Some(I420Frame {
+                    y: crop_plane(yuv.y(), sy, x0, y0, cw, ch),
+                    u: crop_plane(yuv.u(), su, x0 / 2, y0 / 2, cw / 2, ch / 2),
+                    v: crop_plane(yuv.v(), sv, x0 / 2, y0 / 2, cw / 2, ch / 2),
                     width: cw,
                     height: ch,
                     duration: dur,
@@ -205,9 +229,9 @@ impl CanvasPlayer {
         self.video.frame_count()
     }
 
-    /// Next frame of the first pass, downscaled to the budgeted height.
-    /// `None` once the pass ends (no looping). Skips no-picture samples
-    /// within the call so the cadence isn't broken.
+    /// Next frame of the first pass, downscaled to the budgeted height and
+    /// packed as NV12. `None` once the pass ends (no looping). Skips
+    /// no-picture samples within the call so the cadence isn't broken.
     pub fn next_pass_frame(&mut self) -> Option<VideoFrame> {
         if self.done {
             return None;
@@ -220,11 +244,21 @@ impl CanvasPlayer {
             let Some(f) = self.video.decode_at_cursor() else {
                 continue;
             };
-            let (rgba, w, h) = downscale_to_height(f.rgba, f.width, f.height, self.target_h);
+            let (dw, dh) = target_dims(f.width, f.height, self.target_h);
+            let (y, u, v) = if (dw, dh) == (f.width, f.height) {
+                (f.y, f.u, f.v)
+            } else {
+                (
+                    downscale_plane(&f.y, f.width, f.height, dw, dh),
+                    downscale_plane(&f.u, f.width / 2, f.height / 2, dw / 2, dh / 2),
+                    downscale_plane(&f.v, f.width / 2, f.height / 2, dw / 2, dh / 2),
+                )
+            };
             return Some(VideoFrame {
-                rgba,
-                width: w,
-                height: h,
+                y,
+                uv: interleave_uv(&u, &v),
+                width: dw,
+                height: dh,
                 duration: f.duration,
             });
         }
@@ -232,16 +266,17 @@ impl CanvasPlayer {
 }
 
 /// Largest frame height (≤ [`CANVAS_TARGET_HEIGHT`]) whose total resident
-/// VRAM for `frame_count` 9:16 frames stays under [`CANVAS_CACHE_BUDGET`].
-/// Scales height by `sqrt(budget / size_at_cap)` since size grows with
-/// height² (9:16 → width ∝ height). Floored so it never collapses to mush.
+/// VRAM for `frame_count` 9:16 NV12 frames (1.5 B/px) stays under
+/// [`CANVAS_CACHE_BUDGET`]. Scales height by `sqrt(budget / size_at_cap)`
+/// since size grows with height² (9:16 → width ∝ height). Floored so it
+/// never collapses to mush.
 fn budgeted_target_height(frame_count: usize) -> u32 {
     let cap = CANVAS_TARGET_HEIGHT;
     if frame_count == 0 {
         return cap;
     }
     let w = (cap as u64 * 9 / 16).max(1);
-    let at_cap = frame_count as u64 * w * cap as u64 * 4;
+    let at_cap = frame_count as u64 * w * cap as u64 * 3 / 2;
     if at_cap <= CANVAS_CACHE_BUDGET {
         return cap;
     }
@@ -249,72 +284,84 @@ fn budgeted_target_height(frame_count: usize) -> u32 {
     ((cap as f64 * scale) as u32).max(180)
 }
 
-/// Area-average downscale tightly-packed RGBA8 to `target_h` (preserving
-/// aspect), never upscaling. Returns the source unchanged when it's already
-/// no taller than `target_h`. Each destination pixel averages the source box
-/// it covers — run once per frame at preload, so quality over speed.
-fn downscale_to_height(src: Vec<u8>, sw: u32, sh: u32, target_h: u32) -> (Vec<u8>, u32, u32) {
-    if sh <= target_h || sh == 0 || sw == 0 {
-        return (src, sw, sh);
+/// Even-aligned destination dims for the budget downscale: height capped
+/// at `target_h` (never upscaling), width scaled to preserve aspect. Both
+/// even so the NV12 chroma plane is exactly half-res.
+fn target_dims(sw: u32, sh: u32, target_h: u32) -> (u32, u32) {
+    if sh <= target_h {
+        return (sw, sh);
     }
-    let dh = target_h;
-    let dw = ((sw as u64 * dh as u64) / sh as u64).max(1) as u32;
-    let mut out = vec![0u8; (dw * dh * 4) as usize];
+    let dh = (target_h & !1).max(2);
+    let dw = (((sw as u64 * dh as u64) / sh as u64).max(2) as u32) & !1;
+    (dw.max(2), dh)
+}
+
+/// Area-average downscale of one tightly-packed single-channel plane to
+/// exactly `dw × dh`. Each destination pixel averages the source box it
+/// covers — run once per frame at preload, so quality over speed.
+fn downscale_plane(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (dw * dh) as usize];
     for dy in 0..dh {
         let sy0 = (dy as u64 * sh as u64 / dh as u64) as u32;
         let sy1 = ((((dy + 1) as u64 * sh as u64 / dh as u64) as u32).max(sy0 + 1)).min(sh);
         for dx in 0..dw {
             let sx0 = (dx as u64 * sw as u64 / dw as u64) as u32;
             let sx1 = ((((dx + 1) as u64 * sw as u64 / dw as u64) as u32).max(sx0 + 1)).min(sw);
-            let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            let (mut acc, mut n) = (0u32, 0u32);
             for sy in sy0..sy1 {
-                let row = (sy * sw * 4) as usize;
+                let row = (sy * sw) as usize;
                 for sx in sx0..sx1 {
-                    let o = row + (sx * 4) as usize;
-                    r += src[o] as u32;
-                    g += src[o + 1] as u32;
-                    b += src[o + 2] as u32;
-                    a += src[o + 3] as u32;
+                    acc += src[row + sx as usize] as u32;
                     n += 1;
                 }
             }
-            let n = n.max(1);
-            let o = ((dy * dw + dx) * 4) as usize;
-            out[o] = (r / n) as u8;
-            out[o + 1] = (g / n) as u8;
-            out[o + 2] = (b / n) as u8;
-            out[o + 3] = (a / n) as u8;
+            out[(dy * dw + dx) as usize] = (acc / n.max(1)) as u8;
         }
     }
-    (out, dw, dh)
+    out
 }
 
-/// Centre-crop tightly-packed RGBA8 to a 9:16 portrait rect, matching the
-/// official client's handling of non-portrait Canvas clips. Returns the
-/// source unchanged when it's already ~9:16. Crops the wider axis: too-wide
-/// clips lose left/right, too-tall clips lose top/bottom.
-fn crop_center_portrait(src: Vec<u8>, w: u32, h: u32) -> (Vec<u8>, u32, u32) {
-    let cur = w as f32 / h as f32;
-    if (cur - CANVAS_ASPECT).abs() < ASPECT_EPS {
-        return (src, w, h);
+/// Interleave separate U + V quarter planes into NV12's `uv` layout.
+fn interleave_uv(u: &[u8], v: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(u.len(), v.len());
+    let mut uv = vec![0u8; u.len() * 2];
+    for (i, (&cu, &cv)) in u.iter().zip(v.iter()).enumerate() {
+        uv[i * 2] = cu;
+        uv[i * 2 + 1] = cv;
     }
-    let (cw, ch) = if cur > CANVAS_ASPECT {
+    uv
+}
+
+/// Centre 9:16 crop rect for a `w × h` luma plane, matching the official
+/// client's handling of non-portrait Canvas clips. Returns `(x0, y0, cw,
+/// ch)`, all even (so the half-res chroma planes crop on exact pixels).
+/// A clip already ~9:16 keeps its full (even-floored) size.
+fn crop_rect_portrait(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let cur = w as f32 / h as f32;
+    let (cw, ch) = if (cur - CANVAS_ASPECT).abs() < ASPECT_EPS {
+        (w, h)
+    } else if cur > CANVAS_ASPECT {
         ((h as f32 * CANVAS_ASPECT).round() as u32, h)
     } else {
         (w, (w as f32 / CANVAS_ASPECT).round() as u32)
     };
-    let cw = cw.clamp(1, w);
-    let ch = ch.clamp(1, h);
-    let x0 = (w - cw) / 2;
-    let y0 = (h - ch) / 2;
-    let row_bytes = (cw * 4) as usize;
-    let mut out = vec![0u8; row_bytes * ch as usize];
-    for row in 0..ch {
-        let src_off = (((y0 + row) * w + x0) * 4) as usize;
-        let dst_off = row as usize * row_bytes;
-        out[dst_off..dst_off + row_bytes].copy_from_slice(&src[src_off..src_off + row_bytes]);
+    let cw = (cw.clamp(1, w) & !1).max(2).min(w & !1);
+    let ch = (ch.clamp(1, h) & !1).max(2).min(h & !1);
+    let x0 = ((w - cw) / 2) & !1;
+    let y0 = ((h - ch) / 2) & !1;
+    (x0, y0, cw, ch)
+}
+
+/// Copy a `cw × ch` window at `(x0, y0)` out of a strided plane into a
+/// tightly-packed buffer.
+fn crop_plane(src: &[u8], stride: usize, x0: u32, y0: u32, cw: u32, ch: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (cw * ch) as usize];
+    for row in 0..ch as usize {
+        let s = (y0 as usize + row) * stride + x0 as usize;
+        let d = row * cw as usize;
+        out[d..d + cw as usize].copy_from_slice(&src[s..s + cw as usize]);
     }
-    (out, cw, ch)
+    out
 }
 
 /// Rewrite a length-prefixed (AVCC) sample into start-code-prefixed
@@ -363,34 +410,44 @@ mod tests {
 
     #[test]
     fn portrait_clip_not_cropped() {
-        let (px, w, h) = crop_center_portrait(vec![7u8; 9 * 16 * 4], 9, 16);
-        assert_eq!((w, h), (9, 16));
-        assert_eq!(px.len(), 9 * 16 * 4);
+        // 90x160 is exactly 9:16 → full even rect at origin.
+        assert_eq!(crop_rect_portrait(90, 160), (0, 0, 90, 160));
     }
 
     #[test]
     fn wide_clip_cropped_to_portrait_width() {
-        // 948x720 → keep height, width = 720 * 9/16 = 405, centred.
-        let (px, w, h) = crop_center_portrait(vec![0u8; 948 * 720 * 4], 948, 720);
-        assert_eq!((w, h), (405, 720));
-        assert_eq!(px.len(), (405 * 720 * 4) as usize);
+        // 948x720 → keep height, width = 720 * 9/16 = 405 → even 404,
+        // centred (x0 even).
+        let (x0, y0, cw, ch) = crop_rect_portrait(948, 720);
+        assert_eq!((cw, ch), (404, 720));
+        assert_eq!(y0, 0);
+        assert_eq!(x0 % 2, 0);
+        assert!(x0 >= 271 && x0 + cw <= 948, "crop must be centred-ish");
     }
 
     #[test]
-    fn crop_takes_center_columns() {
-        // 4x2, target portrait → cw = (2 * 9/16).round() = 1, x0 = 1.
-        // Tag each pixel's first byte with its column so we can check which
-        // column survived.
-        let (w, h) = (4u32, 2u32);
-        let mut src = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                src[((y * w + x) * 4) as usize] = x as u8;
-            }
+    fn crop_rect_always_even() {
+        for (w, h) in [(948, 720), (405, 719), (91, 161), (640, 640)] {
+            let (x0, y0, cw, ch) = crop_rect_portrait(w, h);
+            assert_eq!((x0 % 2, y0 % 2, cw % 2, ch % 2), (0, 0, 0, 0), "{w}x{h}");
+            assert!(x0 + cw <= w && y0 + ch <= h, "{w}x{h}");
         }
-        let (px, cw, ch) = crop_center_portrait(src, w, h);
-        assert_eq!((cw, ch), (1, 2));
-        assert_eq!(px[0], 1); // (4 - 1) / 2 = 1
+    }
+
+    #[test]
+    fn crop_plane_takes_window() {
+        // 4x2 plane, tag each byte with its column; crop the centre 2x2.
+        let src = [0u8, 1, 2, 3, 0, 1, 2, 3];
+        let out = crop_plane(&src, 4, 1, 0, 2, 2);
+        assert_eq!(out, [1, 2, 1, 2]);
+    }
+
+    #[test]
+    fn crop_plane_respects_stride() {
+        // Stride 6 with 4 used columns.
+        let src = [10u8, 11, 12, 13, 99, 99, 20, 21, 22, 23, 99, 99];
+        let out = crop_plane(&src, 6, 2, 0, 2, 2);
+        assert_eq!(out, [12, 13, 22, 23]);
     }
 
     #[test]
@@ -405,35 +462,35 @@ mod tests {
         let h = budgeted_target_height(480);
         assert!(h < CANVAS_TARGET_HEIGHT, "expected shrink, got {h}");
         assert!(h >= 180, "floored, got {h}");
-        // Resulting cache must actually fit the budget.
+        // Resulting cache must actually fit the budget (NV12 = 1.5 B/px).
         let w = (h as u64 * 9 / 16).max(1);
-        assert!(480 * w * h as u64 * 4 <= CANVAS_CACHE_BUDGET);
+        assert!(480 * w * h as u64 * 3 / 2 <= CANVAS_CACHE_BUDGET);
     }
 
     #[test]
-    fn downscale_keeps_small_frames() {
-        let (px, w, h) = downscale_to_height(vec![5u8; 270 * 480 * 4], 270, 480, 480);
-        assert_eq!((w, h), (270, 480));
-        assert_eq!(px.len(), 270 * 480 * 4);
+    fn target_dims_keeps_small_frames() {
+        assert_eq!(target_dims(270, 480, 480), (270, 480));
     }
 
     #[test]
-    fn downscale_caps_height_and_keeps_aspect() {
-        // 405x720 capped at 480 → 270x480 (9:16 preserved).
-        let (px, w, h) = downscale_to_height(vec![0u8; 405 * 720 * 4], 405, 720, 480);
-        assert_eq!((w, h), (270, 480));
-        assert_eq!(px.len(), (270 * 480 * 4) as usize);
+    fn target_dims_caps_height_and_stays_even() {
+        // 404x720 capped at 480 → even dims, aspect ≈ preserved.
+        let (w, h) = target_dims(404, 720, 480);
+        assert_eq!(h, 480);
+        assert_eq!(w % 2, 0);
+        assert!((w as i64 - 404 * 480 / 720).abs() <= 1, "got {w}");
     }
 
     #[test]
-    fn downscale_averages_block() {
-        // 2x2 solid value → 1x1 keeps the average (here, identical pixels).
-        let src = vec![
-            10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40,
-        ];
-        let (px, w, h) = downscale_to_height(src, 2, 2, 1);
-        assert_eq!((w, h), (1, 1));
-        assert_eq!(px, vec![10, 20, 30, 40]);
+    fn downscale_plane_averages_block() {
+        // 2x2 → 1x1 keeps the average.
+        let out = downscale_plane(&[10, 20, 30, 40], 2, 2, 1, 1);
+        assert_eq!(out, vec![25]);
+    }
+
+    #[test]
+    fn interleave_uv_pairs() {
+        assert_eq!(interleave_uv(&[1, 2], &[3, 4]), vec![1, 3, 2, 4]);
     }
 
     #[test]

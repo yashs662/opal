@@ -250,9 +250,10 @@ pub struct HomeData {
     pub recent: Vec<RecentTrack>,
     pub top_artists: Vec<ArtistRef>,
     pub top_tracks: Vec<TrackRef>,
-    /// Newest album from the user's #1 top artist — our "New release"
-    /// stand-in. `/v1/browse/new-releases` got deprecated for new apps
-    /// in Nov 2024 alongside featured-playlists + recommendations.
+    /// Newest album/single released within the last ~6 weeks across the
+    /// user's followed + top artists — our "New release" stand-in
+    /// (`/v1/browse/new-releases` was removed in Feb 2026 with no
+    /// replacement). `None` (section hidden) when nothing is recent.
     pub latest_release: Option<AlbumRef>,
 }
 
@@ -1058,6 +1059,41 @@ pub async fn get_top_artists(token: &str, limit: u32) -> Result<Vec<ArtistRef>, 
             id: a.id,
             name: a.name,
             // Home "Your top artists" tiles.
+            image_url: pick_full(&a.images),
+        })
+        .collect())
+}
+
+/// Artists the user follows (`/me/following?type=artist`), up to `limit`
+/// (single page, cursor paging not followed). Combined with top artists
+/// to scan discographies for the home "New release" spotlight.
+pub async fn get_followed_artists(token: &str, limit: u32) -> Result<Vec<ArtistRef>, AuthError> {
+    #[derive(Deserialize)]
+    struct R {
+        artists: Inner,
+    }
+    #[derive(Deserialize)]
+    struct Inner {
+        #[serde(default)]
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        images: Vec<RawImg>,
+    }
+    let url = format!("{API}/me/following?type=artist&limit={limit}");
+    let r: R = get_json(token, &url, ttl::SLOW).await?;
+    Ok(r.artists
+        .items
+        .into_iter()
+        .map(|a| ArtistRef {
+            id: a.id,
+            name: a.name,
             image_url: pick_full(&a.images),
         })
         .collect())

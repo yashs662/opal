@@ -284,12 +284,13 @@ impl CanvasModel {
                                         has_video.store(true, Ordering::Relaxed);
                                     }
                                     durations.push(dur);
-                                    sink.push_frame(
+                                    sink.push_frame_nv12(
                                         b,
                                         epoch,
                                         frame.width,
                                         frame.height,
-                                        frame.rgba,
+                                        frame.y,
+                                        frame.uv,
                                     );
                                 }
                                 dur

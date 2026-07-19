@@ -65,6 +65,9 @@ pub struct RawStep {
     /// Insert text into the focused field (click the field first).
     #[serde(default)]
     pub text: Option<String>,
+    /// Dump the live memory split (VRAM vs system RAM) to the log.
+    #[serde(default)]
+    pub mem_report: Option<bool>,
 }
 
 impl RawStep {
@@ -96,6 +99,9 @@ impl RawStep {
         }
         if let Some(t) = self.text {
             return Some(Step::Type(t));
+        }
+        if self.mem_report == Some(true) {
+            return Some(Step::MemReport);
         }
         None
     }
@@ -130,6 +136,7 @@ impl Clone for RawStep {
             by: self.by,
             drag: self.drag,
             text: self.text.clone(),
+            mem_report: self.mem_report,
         }
     }
 }

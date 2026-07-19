@@ -22,6 +22,15 @@ use crate::worker::Worker;
 /// on screen, and re-resolves hit the on-disk cache, so UX is unaffected.
 const ART_CACHE_CAP: usize = 4096;
 
+/// How many recently-played covers the boot prefetch resolves. The home
+/// strip shows ~10; the persisted recents *archive* behind it runs to
+/// hundreds of tracks (391 in a real session), and prefetching all of
+/// them at 640² decoded ~550 MB of RGBA into the atlas on every cold
+/// start. The archive page fetches lazily per materialized row
+/// ([`Self::dispatch_cover`]), so anything past the strip loads when
+/// it's actually scrolled into view.
+const RECENT_PREFETCH: usize = 20;
+
 pub struct ArtModel {
     /// Per-URL (cache_key) reactive cover handle for every cover shown
     /// anywhere — tiles/rows/player bind their image to it, so an art
@@ -199,6 +208,7 @@ impl ArtModel {
             .chain(
                 data.recent
                     .iter()
+                    .take(RECENT_PREFETCH)
                     .filter_map(|t| t.album_image_url.as_ref()),
             )
             .chain(data.top_artists.iter().filter_map(|a| a.image_url.as_ref()))

@@ -4,11 +4,12 @@
 //! OS process tools, nothing more.
 //!
 //! Commands:
-//! - `debug [config.json]` — run the scripted-input + screenshot harness
-//!   (see `debug/README.md`): kill any stale `opal` process (whose file
-//!   lock otherwise breaks the build mid-session), build with the
-//!   `automation` feature, and run against the given config
-//!   (default `debug/home.json`).
+//! - `debug [--release] [config.json]` — run the scripted-input +
+//!   screenshot harness (see `debug/README.md`): kill any stale `opal`
+//!   process (whose file lock otherwise breaks the build mid-session),
+//!   build with the `automation` feature, and run against the given
+//!   config (default `debug/home.json`). `--release` runs the optimized
+//!   build — debug-vs-release perf comparisons.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -16,9 +17,9 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("debug") => debug_harness(args.next()),
+        Some("debug") => debug_harness(args),
         _ => {
-            eprintln!("usage: cargo xtask debug [config.json]");
+            eprintln!("usage: cargo xtask debug [--release] [config.json]");
             ExitCode::FAILURE
         }
     }
@@ -32,8 +33,18 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn debug_harness(config: Option<String>) -> ExitCode {
+fn debug_harness(args: impl Iterator<Item = String>) -> ExitCode {
     let root = repo_root();
+    // `--release` runs the harness against an optimized build (perf work:
+    // debug-vs-release comparisons); any other arg is the config path.
+    let mut release = false;
+    let mut config: Option<String> = None;
+    for a in args {
+        match a.as_str() {
+            "--release" => release = true,
+            _ => config = Some(a),
+        }
+    }
     let config = config.unwrap_or_else(|| "debug/home.json".into());
     if !root.join(&config).is_file() && !Path::new(&config).is_file() {
         eprintln!("config not found: {config}");
@@ -42,8 +53,12 @@ fn debug_harness(config: Option<String>) -> ExitCode {
 
     kill_stale_opal();
 
+    let mut build_args = vec!["build", "--features", "automation"];
+    if release {
+        build_args.push("--release");
+    }
     let build = Command::new("cargo")
-        .args(["build", "--features", "automation"])
+        .args(&build_args)
         .current_dir(&root)
         .status();
     match build {
@@ -56,7 +71,11 @@ fn debug_harness(config: Option<String>) -> ExitCode {
     }
 
     let exe = root
-        .join("target/debug")
+        .join(if release {
+            "target/release"
+        } else {
+            "target/debug"
+        })
         .join(format!("opal{}", std::env::consts::EXE_SUFFIX));
     match Command::new(exe)
         .args(["--config", &config])

@@ -956,14 +956,63 @@ fn merge_recents_history(fresh: Vec<api::RecentTrack>) -> Vec<api::RecentTrack> 
     out
 }
 
+/// How far back an album/single still counts as a "New release" on Home.
+const NEW_RELEASE_WINDOW_DAYS: i64 = 42;
+/// Most artists whose discographies the new-release scan will touch.
+const NEW_RELEASE_SCAN_CAP: usize = 30;
+
+/// Newest album/single released within [`NEW_RELEASE_WINDOW_DAYS`] across
+/// `artists` (deduped, first [`NEW_RELEASE_SCAN_CAP`] kept — pass followed
+/// artists before top artists so follows win the cap). `None` when nothing
+/// recent — the Home section hides rather than showing a stale album.
+async fn find_new_release<'a>(
+    token: &str,
+    artists: impl Iterator<Item = &'a api::ArtistRef>,
+) -> Option<api::AlbumRef> {
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<String> = artists
+        .filter(|a| !a.id.is_empty() && seen.insert(a.id.clone()))
+        .map(|a| a.id.clone())
+        .take(NEW_RELEASE_SCAN_CAP)
+        .collect();
+    // Lexicographic compare is chronological for `YYYY[-MM[-DD]]`;
+    // year-only dates sort before the cutoff and are treated as old.
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(NEW_RELEASE_WINDOW_DAYS))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut newest: Option<api::AlbumRef> = None;
+    // Chunked so a cold cache doesn't burst-fire the whole candidate list.
+    for chunk in ids.chunks(8) {
+        let futs = chunk.iter().map(|id| api::get_artist_albums(token, id, 5));
+        for res in futures::future::join_all(futs).await {
+            match res {
+                Ok(albums) => {
+                    for a in albums {
+                        if a.release_date.as_str() >= cutoff.as_str()
+                            && newest
+                                .as_ref()
+                                .is_none_or(|n| a.release_date > n.release_date)
+                        {
+                            newest = Some(a);
+                        }
+                    }
+                }
+                Err(e) => warn!("new-release discography fetch failed: {e}"),
+            }
+        }
+    }
+    newest
+}
+
 fn spawn_fetch_home(resp: Responder, access_token: String) {
     tokio::spawn(async move {
-        let (profile, playlists, recent, top_artists, top_tracks) = tokio::join!(
+        let (profile, playlists, recent, top_artists, top_tracks, followed) = tokio::join!(
             api::get_me(&access_token),
             api::get_playlists(&access_token),
             api::get_recently_played(&access_token),
             api::get_top_artists(&access_token, 12),
             api::get_top_tracks(&access_token, 12),
+            api::get_followed_artists(&access_token, 50),
         );
         let mut data = HomeData::default();
         match profile {
@@ -990,14 +1039,15 @@ fn spawn_fetch_home(resp: Responder, access_token: String) {
             Ok(t) => data.top_tracks = t,
             Err(e) => warn!("get_top_tracks failed: {e}"),
         }
-        // Chained "latest release": newest album from #1 top artist.
-        // Skipped silently if top_artists came back empty.
-        if let Some(top) = data.top_artists.first() {
-            match api::get_artist_albums(&access_token, &top.id, 5).await {
-                Ok(mut albums) => data.latest_release = albums.drain(..).next(),
-                Err(e) => warn!("get_artist_albums for top artist failed: {e}"),
-            }
-        }
+        // Chained "New release": scan followed ∪ top artists' discographies
+        // for the newest album/single released within the window; `None`
+        // (section hidden) when nobody dropped anything recently. Per-artist
+        // pages ride the day-long disk cache, so repeat scans are free.
+        let followed = followed
+            .inspect_err(|e| warn!("get_followed_artists failed: {e}"))
+            .unwrap_or_default();
+        data.latest_release =
+            find_new_release(&access_token, followed.iter().chain(&data.top_artists)).await;
         info!(
             "home data: profile={} playlists={} recent={} top_artists={} top_tracks={} latest_release={}",
             data.profile.is_some(),
@@ -2451,9 +2501,83 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
 /// a 429 from anywhere can't snowball into a flood of retries.
 const ART_CONCURRENCY: usize = 4;
 
-fn art_throttle() -> &'static Arc<tokio::sync::Semaphore> {
-    static SEM: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(ART_CONCURRENCY)))
+fn art_throttle() -> &'static Arc<LifoGate> {
+    static GATE: std::sync::OnceLock<Arc<LifoGate>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| LifoGate::new(ART_CONCURRENCY))
+}
+
+/// A concurrency gate whose waiters wake **newest-first** (a fair/FIFO
+/// semaphore is exactly wrong for cover art: fast-scrolling a 1000-row
+/// playlist queues a fetch per row flown past, and the row the user
+/// *lands* on ends up last in line — covers took 5 s+ to appear). LIFO
+/// means whatever was requested most recently — i.e. what's on screen —
+/// fetches first; stale requests still drain afterwards and warm the
+/// disk cache.
+struct LifoGate {
+    /// Free permits + LIFO stack of waiters. One lock, never held across
+    /// an await. A waiter whose receiver was dropped (task cancelled) is
+    /// skipped at wake time via the failed `send`.
+    state: std::sync::Mutex<GateState>,
+}
+
+struct GateState {
+    permits: usize,
+    waiters: Vec<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// RAII permit — returns to the gate (or hands off to the newest waiter)
+/// on drop.
+struct LifoPermit(Arc<LifoGate>);
+
+impl LifoGate {
+    fn new(permits: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::Mutex::new(GateState {
+                permits,
+                waiters: Vec::new(),
+            }),
+        })
+    }
+
+    async fn acquire(self: &Arc<Self>) -> LifoPermit {
+        loop {
+            let rx = {
+                let mut st = self.state.lock().unwrap();
+                if st.permits > 0 {
+                    st.permits -= 1;
+                    return LifoPermit(self.clone());
+                }
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                st.waiters.push(tx);
+                rx
+            };
+            // A successful recv carries permit ownership (the releaser
+            // decrements nothing — the permit transfers directly). An Err
+            // means the sender was dropped without a hand-off; loop and
+            // re-contend.
+            if rx.await.is_ok() {
+                return LifoPermit(self.clone());
+            }
+        }
+    }
+
+    fn release(&self) {
+        let mut st = self.state.lock().unwrap();
+        // Hand the permit to the newest live waiter; a send failure means
+        // that waiter's task was cancelled — skip it and try the next.
+        while let Some(tx) = st.waiters.pop() {
+            if tx.send(()).is_ok() {
+                return;
+            }
+        }
+        st.permits += 1;
+    }
+}
+
+impl Drop for LifoPermit {
+    fn drop(&mut self) {
+        self.0.release();
+    }
 }
 
 /// Fetch the raw image bytes for `url`. Honors `Retry-After` on 429 +
@@ -2516,7 +2640,7 @@ fn spawn_fetch_album_art(resp: Responder, uploader: Arc<Uploader>, url: String, 
                 // Bound concurrent network fetches across all in-flight
                 // art tasks. Held only for the actual GET (decode + atlas
                 // upload run uncapped).
-                let _permit = art_throttle().acquire().await.ok();
+                let _permit = art_throttle().acquire().await;
                 match fetch_art_bytes(&url).await {
                     Some(b) => (b, true),
                     None => {

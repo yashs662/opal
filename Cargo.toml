@@ -104,3 +104,25 @@ winresource = "0.1"
 # codegen-units = 1
 # panic = "abort"
 # strip = true
+
+# Media decoding is unusable at opt-level 0 (canvas H.264 + cover
+# decode made debug builds feel broken, forcing release builds for
+# everyday dev). Optimize just the decode-heavy deps; opal + opal-gfx
+# stay unoptimized and fully debuggable, and the cost is a one-time
+# dep rebuild. Swap the list for `[profile.dev.package."*"]` if every
+# dep (wgpu, librespot) should go fast too — at the price of opal-gfx
+# (not a workspace member) losing debuggability.
+[profile.dev.package.openh264]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.re_mp4]
+opt-level = 3
