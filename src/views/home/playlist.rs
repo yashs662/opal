@@ -409,6 +409,13 @@ fn strip_items(h: &mut Scene) {
     h.col(()).w_px(t::SP_48).child(|x| {
         x.text((), "Album", 12.0).color(t::TEXT_DIM);
     });
+    // Transparent spacer matching the row's heart column — without it the
+    // Album box (and label) sits a heart-plus-gap right of the rows' album
+    // column.
+    h.rect(())
+        .w_px(t::SP_7)
+        .h_px(t::SP_PX)
+        .rgba(0.0, 0.0, 0.0, 0.0);
     h.row(()).w_px(t::SP_12).justify(Justify::End).child(|x| {
         x.text((), "Time", 12.0).color(t::TEXT_DIM);
     });

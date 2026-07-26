@@ -46,6 +46,10 @@ pub struct AppState {
     pub eq: EqModel,
     /// Search slice: the query mirror + latest results.
     pub search: crate::model::SearchModel,
+    /// OS media integration (SMTC / MPRIS / NowPlaying). `None` until the
+    /// window exists (SMTC registers against the HWND) or if the platform
+    /// registration failed — everything media-key related is fail-soft.
+    pub media: Option<crate::media_controls::MediaModel>,
 }
 
 impl AppState {
@@ -104,7 +108,7 @@ impl AppState {
             library: LibraryModel::new(),
             canvas: CanvasModel::new(prefs.show_canvas),
             art: ArtModel::new(),
-            backdrop: BackdropModel::new(),
+            backdrop: BackdropModel::new(prefs.backdrop_blur),
             player_ui: PlayerModel::seed(
                 title,
                 artist,
@@ -120,6 +124,7 @@ impl AppState {
             membership: MembershipModel::new(),
             eq: EqModel::from_prefs(&prefs.audio.eq),
             search: crate::model::SearchModel::new(prefs.search_history.clone()),
+            media: None,
             prefs: PrefsModel::new(prefs),
         }
     }

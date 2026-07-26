@@ -41,16 +41,21 @@ pub fn view(
     s.col("queue_scroll")
         .w(Len::Fill)
         .h(Len::Fill)
-        // Bottom inset matches the sides so the last row scrolls clear of
-        // the pane edge instead of sitting flush against it.
-        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
+        // SP_3 side gutter + SP_3 on every heading/row = SP_6 content
+        // inset all round: titles, headings and row *content* share one
+        // 24px edge, and a row's hover pill overhangs into the gutter
+        // instead of pushing its content further in. Top matches the
+        // sides (it used to be SP_2 — cramped under the top bar).
+        .pad_ltrb(t::SP_3, t::SP_6, t::SP_3, t::SP_6)
         .gap(t::SP_3)
         .scroll_y()
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
             // (Back = the top-bar history arrows.)
-            c.text((), "Queue", 28.0).color(t::TEXT).max_width_px(520.0);
+            c.row(()).w(Len::Fill).pad_xy(t::SP_3, t::SP_0).child(|r| {
+                r.text((), "Queue", 28.0).color(t::TEXT).max_width_px(520.0);
+            });
 
             match queue {
                 None => {
@@ -107,6 +112,7 @@ fn section_label(s: &mut Scene, label: &str) {
     s.row(())
         .w(Len::Fill)
         .h_px(t::SP_8)
+        .pad_xy(t::SP_3, t::SP_0)
         .align(Align::End)
         .child(|r| {
             r.text((), label, 16.0).color(t::TEXT);
@@ -137,7 +143,7 @@ fn queue_row(
     let mut row = s.row(());
     row.w(Len::Fill)
         .h_px(ROW_H)
-        .pad_xy(t::SP_2, t::SP_1)
+        .pad_xy(t::SP_3, t::SP_1)
         .gap(t::SP_3)
         .align(Align::Center)
         .radius(t::R_MD);
@@ -221,7 +227,7 @@ fn skeleton_row(s: &mut Scene, pulse: &Signal<f32>) {
     s.row(())
         .w(Len::Fill)
         .h_px(ROW_H)
-        .pad_xy(t::SP_2, t::SP_1)
+        .pad_xy(t::SP_3, t::SP_1)
         .gap(t::SP_3)
         .align(Align::Center)
         .opacity_bind(pulse.clone())

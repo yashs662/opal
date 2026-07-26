@@ -51,6 +51,10 @@ pub struct UserPreferences {
     /// user's choice so it's honoured the moment canvas support lands.
     #[serde(default = "default_show_canvas")]
     pub show_canvas: bool,
+    /// Backdrop-art blur radius (logical px) for the ambient Home glass.
+    /// 0 = sharp cover; the settings slider tunes it live.
+    #[serde(default = "default_backdrop_blur")]
+    pub backdrop_blur: f32,
     /// User-chosen cache directory (parent of `opal/art` + `json`).
     /// `None` = the OS cache dir. Lets the user relocate the on-disk cache
     /// (album art, Canvas videos, API JSON) to another drive/folder.
@@ -78,6 +82,15 @@ fn default_show_canvas() -> bool {
     true
 }
 
+/// Matches the pre-slider hardcoded glass radius.
+pub fn default_backdrop_blur() -> f32 {
+    80.0
+}
+
+/// Slider ceiling for the backdrop blur (logical px). Past this the mip
+/// chain is exhausted and more radius stops reading as more blur.
+pub const BACKDROP_BLUR_MAX: f32 = 150.0;
+
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
@@ -87,6 +100,7 @@ impl Default for UserPreferences {
             audio: AudioPrefs::default(),
             last_player: None,
             show_canvas: default_show_canvas(),
+            backdrop_blur: default_backdrop_blur(),
             cache_dir: None,
             spotify_client_id: None,
             search_history: Vec::new(),

@@ -51,10 +51,14 @@ pub struct BackdropModel {
     /// the **slow** crossfade tween, in step with the backdrop dissolve
     /// it compensates for.
     pub art_luma: Signal<f32>,
+    /// User-tunable ambient-glass blur radius (logical px). Bound to the
+    /// Home glass via the engine's blur bind, so the settings slider
+    /// retunes it live with no rebuild. Persisted in prefs.
+    pub blur: Signal<f32>,
 }
 
 impl BackdropModel {
-    pub fn new() -> Self {
+    pub fn new(blur: f32) -> Self {
         Self {
             prev: Signal::new(None),
             curr: Signal::new(None),
@@ -62,6 +66,7 @@ impl BackdropModel {
             panel_t: Signal::new(1.0),
             accent: Signal::new(tokens::ACCENT),
             art_luma: Signal::new(0.0),
+            blur: Signal::new(blur),
         }
     }
 
@@ -140,6 +145,6 @@ impl BackdropModel {
 
 impl Default for BackdropModel {
     fn default() -> Self {
-        Self::new()
+        Self::new(crate::prefs::default_backdrop_blur())
     }
 }

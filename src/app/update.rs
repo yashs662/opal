@@ -368,6 +368,11 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             state.prefs.mark_dirty(cx.now);
         }
 
+        Msg::BackdropBlurCommitted => {
+            state.prefs.data.backdrop_blur = state.backdrop.blur.get();
+            state.prefs.mark_dirty(cx.now);
+        }
+
         Msg::EqBandCommitted => {
             // The drag updated the band signal + shared surface live; on
             // release, re-derive whether the shape still matches a named

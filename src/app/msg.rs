@@ -101,6 +101,9 @@ pub enum Msg {
     SetQuality(AudioQuality),
     /// Persist the (already-flipped) "normalize volume" toggle.
     ToggleNormalize,
+    /// The backdrop-blur slider was released — persist the signal's value
+    /// (the drag itself already retuned the glass live via the blur bind).
+    BackdropBlurCommitted,
     /// A band slider was released — re-derive the selected preset + persist
     /// (the drag itself already updated the signal + shared surface live).
     EqBandCommitted,

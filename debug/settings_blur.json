@@ -1,0 +1,15 @@
+{
+  "force_home": true,
+  "window": [1280, 780],
+  "log_filter": "info,wgpu_hal=warn,wgpu_core=warn,opal=info,opal_gfx=warn",
+  "script": [
+    { "wait_ms": 2500 },
+    { "click": [2105, 56] },
+    { "wait_ms": 900 },
+    { "hover": [1000, 497], "dwell_ms": 300 },
+    { "screenshot": "debug_captures/blur_01_settings.png" },
+    { "drag": [[900, 497], [1360, 497]] },
+    { "wait_ms": 400 },
+    { "screenshot": "debug_captures/blur_02_dragged.png" }
+  ]
+}

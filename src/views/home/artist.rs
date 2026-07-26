@@ -75,18 +75,25 @@ pub fn view(
     s.col(scroll_node)
         .w(Len::Fill)
         .h(Len::Fill)
-        // Top/bottom insets match the sides so content breathes instead
-        // of hugging the pane edges. (Back = the top-bar history arrows.)
-        .pad(t::SP_6)
+        // SP_3 side gutter + SP_3 on the hero/headings = SP_6 content
+        // inset, matching the SP_6 top — hero circle sits the same
+        // distance from the top and left edges, and `track_row`'s SP_3
+        // hover-pill pad lands its content on the same 24px line as the
+        // headings. (Back = the top-bar history arrows.)
+        .pad_ltrb(t::SP_3, t::SP_6, t::SP_3, t::SP_6)
         .gap(t::SP_5)
         .scroll_y()
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
-            // Hero: circular artist image + name.
+            // Hero: circular artist image + name. Row height == the
+            // circle, so `align(End)` leaves no slack above it — the
+            // circle sits exactly SP_6 from the top, matching its left
+            // inset.
             c.row(())
                 .w(Len::Fill)
-                .h_px(t::SP_44)
+                .h_px(t::THUMB_2XL)
+                .pad_xy(t::SP_3, t::SP_0)
                 .gap(t::SP_5)
                 .align(Align::End)
                 .child(|hero| {
@@ -201,7 +208,9 @@ pub fn view(
             section_header(c, "Discography", None);
             if data.albums.is_empty() {
                 if !data.loading {
-                    c.text((), "No releases", 14.0).color(t::TEXT_DIM);
+                    c.row(()).w(Len::Fill).pad_xy(t::SP_3, t::SP_0).child(|r| {
+                        r.text((), "No releases", 14.0).color(t::TEXT_DIM);
+                    });
                 }
             } else {
                 // Reuse the shared card strip (cover + arrows-on-hover).
@@ -216,14 +225,18 @@ pub fn view(
                         menu: None,
                     })
                     .collect();
-                crate::views::home::main_pane::card_row(
-                    c,
-                    icons,
-                    on_navigate.clone(),
-                    None,
-                    None,
-                    cards,
-                );
+                // Padded wrapper so the tiles start on the same 24px
+                // content line as the headings above them.
+                c.col(()).w(Len::Fill).pad_xy(t::SP_3, t::SP_0).child(|w| {
+                    crate::views::home::main_pane::card_row(
+                        w,
+                        icons,
+                        on_navigate.clone(),
+                        None,
+                        None,
+                        cards,
+                    );
+                });
             }
         });
 }
@@ -235,6 +248,7 @@ fn section_header(s: &mut Scene, title: &str, show_all: Option<Rc<dyn Fn()>>) {
     s.row(())
         .w(Len::Fill)
         .h_px(t::SP_7)
+        .pad_xy(t::SP_3, t::SP_0)
         .align(Align::Center)
         .justify(Justify::SpaceBetween)
         .child(move |h| {

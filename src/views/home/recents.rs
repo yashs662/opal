@@ -73,19 +73,24 @@ pub fn view(
     s.col(scroll_node)
         .w(Len::Fill)
         .h(Len::Fill)
-        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
+        // SP_3 gutter + SP_3 heading/row pad = SP_6 shared content inset
+        // (see the queue scroller).
+        .pad_ltrb(t::SP_3, t::SP_6, t::SP_3, t::SP_6)
         .gap(t::SP_3)
         .scroll_y()
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
-            c.text((), &data.title, 28.0)
-                .color(t::TEXT)
-                .max_width_px(520.0);
+            c.row(()).w(Len::Fill).pad_xy(t::SP_3, t::SP_0).child(|r| {
+                r.text((), &data.title, 28.0)
+                    .color(t::TEXT)
+                    .max_width_px(520.0);
+            });
             for day in &data.days {
                 c.row(())
                     .w(Len::Fill)
                     .h_px(t::SP_8)
+                    .pad_xy(t::SP_3, t::SP_0)
                     .align(Align::End)
                     .child(|r| {
                         r.text((), &day.label, 16.0).color(t::TEXT);
@@ -125,7 +130,7 @@ fn session(
     let mut row = s.row(());
     row.w(Len::Fill)
         .h_px(SESSION_H)
-        .pad_xy(t::SP_2, t::SP_1)
+        .pad_xy(t::SP_3, t::SP_1)
         .gap(t::SP_3)
         .align(Align::Center)
         .radius(t::R_MD)
@@ -209,8 +214,10 @@ fn track(s: &mut Scene, tr: &RecentTrackRow, play: &PlayFn, on_context_menu: &Ct
     let mut row = s.row(());
     row.w(Len::Fill)
         .h_px(TRACK_H)
-        // Inset past the session thumb so the tracks read as nested under it.
-        .pad_ltrb(t::SP_12, t::SP_1, t::SP_2, t::SP_1)
+        // Inset past the session thumb so the tracks read as nested under
+        // it (session pad SP_3 + the extra SP_1 keeps the old relative
+        // nesting now that rows sit one step further in).
+        .pad_ltrb(t::SP_12 + t::SP_1, t::SP_1, t::SP_3, t::SP_1)
         .gap(t::SP_3)
         .align(Align::Center)
         .radius(t::R_MD)

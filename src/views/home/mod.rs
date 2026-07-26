@@ -91,6 +91,8 @@ struct Layout<'a> {
     /// Mean luminance of the current cover — drives the adaptive
     /// ambient-glass dim.
     pub art_luma: &'a Signal<f32>,
+    /// User-tunable ambient-glass blur radius (settings slider, live).
+    pub backdrop_blur: &'a Signal<f32>,
     /// Resizable sidebar width (driven by its splitter via `width_px_bind`).
     pub sidebar_w: &'a Signal<f32>,
     /// Called by the splitters after every committed width change.
@@ -194,7 +196,7 @@ fn render(s: &mut Scene, v: &Layout) {
             .abs(0.0, 0.0)
             .w(Len::Fill)
             .h(Len::Fill)
-            .blur(80.0)
+            .blur(v.backdrop_blur.clone())
             .color(glass_tint);
         v.top_bar.view(root);
         root.row(())
@@ -263,6 +265,7 @@ pub struct HomeView {
     on_transfer: Rc<dyn Fn(String)>,
     on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     on_normalize: Rc<dyn Fn()>,
+    on_blur_commit: Rc<dyn Fn()>,
     /// EQ settings: band-drag release (persist), enable toggle, preset
     /// apply (by index), save-current-as-custom.
     on_eq_commit: Rc<dyn Fn()>,
@@ -354,6 +357,10 @@ impl HomeView {
         let on_normalize: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ToggleNormalize))
+        };
+        let on_blur_commit: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::BackdropBlurCommitted))
         };
         let on_eq_commit: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
@@ -500,6 +507,7 @@ impl HomeView {
             on_transfer,
             on_quality,
             on_normalize,
+            on_blur_commit,
             on_eq_commit,
             on_eq_toggle,
             on_eq_preset,
@@ -751,6 +759,7 @@ impl HomeView {
             quality: state.prefs.data.audio.quality,
             on_quality: self.on_quality.clone(),
             on_normalize: self.on_normalize.clone(),
+            on_blur_commit: self.on_blur_commit.clone(),
             eq: &state.eq,
             on_eq_commit: self.on_eq_commit.clone(),
             on_eq_toggle: self.on_eq_toggle.clone(),
@@ -779,6 +788,7 @@ impl HomeView {
             backdrop_curr: &state.backdrop.curr,
             crossfade_t: &state.backdrop.crossfade_t,
             art_luma: &state.backdrop.art_luma,
+            backdrop_blur: &state.backdrop.blur,
             sidebar_w: &state.prefs.sidebar_w,
             mark_dirty: self.mark_dirty.clone(),
             now_playing: &now_playing,

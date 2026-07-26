@@ -195,11 +195,42 @@ pub fn tick(
         log::info!("access token nearing expiry — refreshing");
         worker.refresh_tokens(rt, state.prefs.data.client_id().unwrap_or_default());
     }
+    // Hardware media keys / OS-panel buttons → the same transport intents
+    // the player-bar buttons emit (queued ahead of the drain below).
+    // Play/Pause are mapped against the current playing flag because our
+    // transport verb is a toggle; a redundant Play-while-playing is dropped.
+    if let Some(media) = state.media.as_mut() {
+        use crate::views::home::PlayerAction;
+        use souvlaki::MediaControlEvent as E;
+        let playing = state.player_ui.is_playing.get();
+        for event in media.drain() {
+            let action = match event {
+                E::Toggle => Some(PlayerAction::PlayPause),
+                E::Play if !playing => Some(PlayerAction::PlayPause),
+                E::Pause if playing => Some(PlayerAction::PlayPause),
+                E::Next => Some(PlayerAction::Next),
+                E::Previous => Some(PlayerAction::Prev),
+                _ => None,
+            };
+            if let Some(a) = action {
+                msgs.borrow_mut()
+                    .push_back(crate::app::msg::Msg::Transport(a));
+            }
+        }
+    }
     // Apply view-emitted intents (clicks/nav/etc.) queued since last frame.
     update::drain(state, worker, msgs, &mut cx);
     // Drain worker responses through the reducer.
     while let Some(resp) = worker.poll() {
         reducer::handle(state, &mut cx, worker, resp);
+    }
+    // Mirror the (possibly just-updated) player state out to the OS media
+    // panel — no-op unless the track or playing flag actually changed.
+    if let Some(media) = state.media.as_mut() {
+        let playing = state.player_ui.is_playing.get();
+        let progress_ms = (state.player_ui.progress.get() as f64
+            * state.player_ui.duration_ms.get() as f64) as u64;
+        media.sync(state.player_ui.snapshot.as_ref(), playing, progress_ms);
     }
     // On search-modal open: clear the field (its node persists while the
     // modal is closed, so it would otherwise reopen with the last query) and

@@ -72,23 +72,27 @@ pub fn view(
     s.col(scroll_node)
         .w(Len::Fill)
         .h(Len::Fill)
-        // Bottom inset matches the sides (see the queue scroller); back
-        // navigation lives in the top-bar history arrows.
-        .pad_ltrb(t::SP_6, t::SP_2, t::SP_6, t::SP_6)
+        // SP_3 gutter + SP_3 heading/row pad = SP_6 shared content inset
+        // (see the queue scroller); back navigation lives in the top-bar
+        // history arrows.
+        .pad_ltrb(t::SP_3, t::SP_6, t::SP_3, t::SP_6)
         .gap(t::SP_3)
         .scroll_y()
         .layer()
         .scrollbar(|sb| sb.auto_hide(true).margin(t::SP_0_5).thickness(t::SP_1))
         .child(move |c| {
-            c.text((), &data.title, 28.0)
-                .color(t::TEXT)
-                .max_width_px(520.0);
+            c.row(()).w(Len::Fill).pad_xy(t::SP_3, t::SP_0).child(|r| {
+                r.text((), &data.title, 28.0)
+                    .color(t::TEXT)
+                    .max_width_px(520.0);
+            });
 
             for group in &data.groups {
                 if let Some(h) = &group.header {
                     c.row(())
                         .w(Len::Fill)
                         .h_px(t::SP_8)
+                        .pad_xy(t::SP_3, t::SP_0)
                         .align(Align::End)
                         .child(|r| {
                             r.text((), h, 16.0).color(t::TEXT);
@@ -116,7 +120,7 @@ fn show_all_row(
     let mut r = s.row(());
     r.w(Len::Fill)
         .h_px(ROW_H)
-        .pad_xy(t::SP_2, t::SP_1)
+        .pad_xy(t::SP_3, t::SP_1)
         .gap(t::SP_3)
         .align(Align::Center)
         .radius(t::R_MD)

@@ -20,6 +20,7 @@ mod errors;
 mod extracted_color;
 mod hotreload;
 mod local_player;
+mod media_controls;
 mod model;
 mod prefs;
 mod spirc_bootstrap;
@@ -267,6 +268,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .prefs
             .flush_on_exit(state.player_ui.snapshot.as_ref(), state.canvas.show.get());
     });
+
+    // Register as an OS media app once the window is up (SMTC needs its
+    // HWND). Media keys + the OS panel then drive the same transport
+    // path as the player bar; the frame tick mirrors state back out.
+    let app = {
+        let wake = app.wake_handle();
+        app.on_window_ready(move |state: &mut AppState, hwnd| {
+            state.media = media_controls::MediaModel::new(hwnd, wake);
+        })
+    };
 
     // Attach a scripted-input run if the debug config carries one
     // (REMOVABLE — `automation` feature).

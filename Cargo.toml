@@ -78,6 +78,7 @@ openh264 = "0.9.3"
 # Pin both to the same version as the `dx` CLI you run.
 subsecond = { version = "0.7.9", optional = true }
 dioxus-devtools = { version = "0.7.9", optional = true }
+souvlaki = "0.8.3"
 
 # OS-native credential stores for keyring-core, one per platform. Registered
 # at startup. NOTE: keyutils on Linux is process/session-scoped and does NOT

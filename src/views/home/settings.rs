@@ -93,6 +93,9 @@ pub struct SettingsPanel<'a> {
     pub on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     /// Persist the "Normalize volume" toggle after it flips.
     pub on_normalize: Rc<dyn Fn()>,
+    /// The backdrop-blur slider was released → persist (the drag already
+    /// retuned the glass live).
+    pub on_blur_commit: Rc<dyn Fn()>,
     /// Equaliser slice — the slider signals + presets to bind/read.
     pub eq: &'a EqModel,
     /// A band slider was released → re-derive preset + persist.
@@ -169,6 +172,12 @@ impl Component for SettingsPanel<'_> {
                                 &self.canvas.show,
                                 &self.backdrop.accent,
                                 self.on_canvas_change.clone(),
+                            );
+                            blur_row(
+                                body,
+                                &self.backdrop.blur,
+                                &self.backdrop.accent,
+                                self.on_blur_commit.clone(),
                             );
                             divider(body);
                             quality_row(
@@ -786,6 +795,106 @@ fn response_frac(lo: [f32; 5], hi: [f32; 5], freq: f64) -> f32 {
     ];
     let db = crate::audio_eq::response_db(&gains, freq, CURVE_FS) as f32;
     ((db + GAIN_DB_MAX) / (2.0 * GAIN_DB_MAX)).clamp(0.0, 1.0)
+}
+
+/// Backdrop-blur slider: label + live "NN px" readout over a full-width
+/// drag lane (the volume slider's interaction grammar — a tall
+/// transparent lane holding a thin track). Dragging writes the blur
+/// signal, which the Home glass follows live through the engine's blur
+/// bind (no rebuild); release persists via `on_commit`.
+/// Diameter of the slider knob (revealed on hover / while dragging).
+const SLIDER_KNOB: f32 = t::SP_3;
+
+fn blur_row(s: &mut Scene, blur: &Signal<f32>, accent: &Signal<[f32; 4]>, on_commit: Rc<dyn Fn()>) {
+    use crate::prefs::BACKDROP_BLUR_MAX;
+    let sig = blur.clone();
+    let fill = Computed::new((blur.clone(),), |(b,)| {
+        (b / BACKDROP_BLUR_MAX).clamp(0.0, 1.0)
+    });
+    let px_label = TextBind::derived(blur.clone(), |b: f32| format!("{} px", b.round() as u32));
+    let accent = accent.clone();
+    // Knob reveal: hover or an active drag (the cursor can wander off the
+    // lane mid-drag; the knob must not flicker out while held).
+    let hovered = Signal::new(false);
+    let dragging = Signal::new(false);
+    let knob_vis = animated(
+        Computed::new((hovered.clone(), dragging.clone()), |(h, d)| {
+            if h || d { 1.0 } else { 0.0 }
+        }),
+        Curve::EaseInOut,
+        Duration::from_millis(120),
+    );
+    let drag_on = dragging.clone();
+    let drag_off = dragging;
+    s.col(()).w(Len::Fill).gap(t::SP_2).child(move |c| {
+        c.row(()).w(Len::Fill).align(Align::Center).child(|h| {
+            h.col(()).gap(t::SP_0_5).child(|m| {
+                m.text((), "Backdrop blur", 14.0).color(t::TEXT);
+                m.text(
+                    (),
+                    "How much the album art behind the app is frosted",
+                    t::TEXT_XS,
+                )
+                .color(t::TEXT_DIM);
+            });
+            h.row(()).push_end().align(Align::Center).child(|v| {
+                v.text_bound((), px_label, t::TEXT_SM).color(t::TEXT_DIM);
+            });
+        });
+        c.row(())
+            .w(Len::Fill)
+            .h_px(t::SP_4)
+            .align(Align::Center)
+            .cursor(opal_gfx::CursorIcon::Pointer)
+            .on_hover(hovered)
+            .on_drag(move |ctx| {
+                // Fraction physical/physical so display scale cancels.
+                drag_on.set(true);
+                let frac = ((ctx.current[0] - ctx.rect[0]) / ctx.rect[2]).clamp(0.0, 1.0);
+                sig.set((frac * BACKDROP_BLUR_MAX).round());
+            })
+            .on_drag_end(move |_| {
+                drag_off.set(false);
+                on_commit();
+            })
+            .child(|lane| {
+                lane.rect(())
+                    .w(Len::Fill)
+                    .h_px(t::SP_1)
+                    .rgba(1.0, 1.0, 1.0, 0.10)
+                    .radius(t::R_SM / 2.0)
+                    .child(|bar| {
+                        bar.rect(())
+                            .width_pct(fill.clone())
+                            .h_px(t::SP_1)
+                            .color(accent.clone())
+                            .radius(t::R_SM / 2.0);
+                    });
+                // Knob riding the fill's end: a full-width absolute overlay
+                // shifted left by half a knob, holding a `width_pct` spacer +
+                // the dot — the dot's centre lands exactly on the fill
+                // fraction without disturbing the lane's flow layout.
+                lane.row(())
+                    .abs(-SLIDER_KNOB / 2.0, 0.0)
+                    .w(Len::Fill)
+                    .h(Len::Fill)
+                    .align(Align::Center)
+                    .child(|overlay| {
+                        overlay
+                            .rect(())
+                            .width_pct(fill)
+                            .h_px(1.0)
+                            .rgba(0.0, 0.0, 0.0, 0.0);
+                        overlay
+                            .rect(())
+                            .w_px(SLIDER_KNOB)
+                            .h_px(SLIDER_KNOB)
+                            .radius(t::R_FULL)
+                            .rgba(1.0, 1.0, 1.0, 1.0)
+                            .opacity_bind(knob_vis);
+                    });
+            });
+    });
 }
 
 /// Streaming-quality picker: three chips (96 / 160 / 320 kbps), the
