@@ -83,10 +83,26 @@ impl ArtModel {
     }
 
     /// Push a resolved handle into the matching signal (repaints bound
-    /// nodes, no rebuild). No-op if nothing bound to `key`.
+    /// nodes, no rebuild).
+    ///
+    /// Every fetch path (`dispatch_cover` / `rehydrate_cover` /
+    /// `prefetch`) creates the signal *before* dispatching, so a missing
+    /// key here means a fetch was fired without one — the art was
+    /// downloaded, decoded, and uploaded, then dropped on the floor
+    /// (exactly how album-page heros silently stayed grey). Scream so
+    /// the regression is caught the day it's written, not months later.
     pub fn set_resolved(&self, key: &str, handle: ImageHandle) {
-        if let Some(sig) = self.home_art.get(key) {
-            sig.set(Some(handle));
+        match self.home_art.get(key) {
+            Some(sig) => {
+                sig.set(Some(handle));
+            }
+            None => {
+                debug_assert!(false, "art resolved with no signal: {key}");
+                log::error!(
+                    "art resolved with no signal to land in (dropped): {key} — \
+                     the dispatch site must create the signal before fetching"
+                );
+            }
         }
     }
 
@@ -142,13 +158,15 @@ impl ArtModel {
 
     // --- fetch dispatch -----------------------------------------------
 
-    /// Lazily fetch a track cover (called when a row materializes). Gated:
-    /// already-resolved / in-flight covers are no-ops.
+    /// Lazily fetch a cover (rows on materialize, page heros on open).
+    /// Gated: already-resolved / in-flight covers are no-ops. Ensures the
+    /// reactive signal exists *before* fetching — `set_resolved` is a
+    /// no-op for an absent key, so a fetch dispatched without its signal
+    /// would upload the art and then silently drop the handle (album-page
+    /// heros stayed grey when no other surface had bound that URL).
     pub fn dispatch_cover(&mut self, worker: &Worker, url: String) {
         let key = album_art::cache_key(&url);
-        if let Some(sig) = self.signal(&key)
-            && sig.get().is_some()
-        {
+        if self.or_signal(key.clone()).get().is_some() {
             return;
         }
         if self.is_inflight(&key) {
@@ -165,6 +183,9 @@ impl ArtModel {
     /// washed-out pixel-average until the next track change).
     pub fn rehydrate_cover(&mut self, url: &str, worker: &Worker) {
         let key = album_art::cache_key(url);
+        // Same invariant as `dispatch_cover`: the signal must exist
+        // before the fetch or the resolution has nowhere to land.
+        self.or_signal(key.clone());
         self.mark_inflight(key.clone());
         worker.fetch_album_art(url.to_string(), key.clone());
         worker.fetch_accent(key);

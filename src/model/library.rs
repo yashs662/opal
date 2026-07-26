@@ -337,6 +337,11 @@ impl LibraryModel {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
             self.build_rows(art, &buf, &detail.tracks, liked, membership);
+            // Hero cover — rows fetch the 300px tier, so nothing else is
+            // guaranteed to have fetched this URL.
+            if let Some(u) = detail.image_url.clone() {
+                art.dispatch_cover(worker, u);
+            }
             self.open_playlist = Some(OpenPlaylist {
                 liked,
                 name: detail.name,
@@ -398,6 +403,10 @@ impl LibraryModel {
         if let Some(detail) = self.cached_detail(id) {
             let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
             self.build_rows(art, &buf, &detail.tracks, false, membership);
+            // Hero cover — see `open_for`.
+            if let Some(u) = detail.image_url.clone() {
+                art.dispatch_cover(worker, u);
+            }
             self.open_playlist = Some(OpenPlaylist {
                 liked: false,
                 name: detail.name,

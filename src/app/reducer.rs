@@ -446,6 +446,8 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 if let Some(url) = p.album_image_url.as_ref() {
                     let key = album_art::cache_key(url);
                     if !state.art.is_shown(&key) && !state.art.is_inflight(&key) {
+                        // Signal-before-fetch invariant (see `set_resolved`).
+                        state.art.or_signal(key.clone());
                         state.art.mark_inflight(key.clone());
                         worker.fetch_album_art(url.clone(), key.clone());
                     }
@@ -767,6 +769,11 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // total). Subsequent pages append without a rebuild.
             let applies = state.router.nav_is_open(&id);
             if applies {
+                // Hero cover: nothing else is guaranteed to have fetched
+                // this URL (rows use the 300px tier) — dispatch it here.
+                if let Some(u) = detail.image_url.clone() {
+                    state.art.dispatch_cover(worker, u);
+                }
                 let buf = state.library.open_playlist.as_mut().map(|o| {
                     o.name = detail.name.clone();
                     o.owner = detail.owner.clone();
@@ -953,6 +960,8 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             if let Some(url) = fetch_cover {
                 let key = album_art::cache_key(&url);
                 if !state.art.is_shown(&key) && !state.art.is_inflight(&key) {
+                    // Signal-before-fetch invariant (see `set_resolved`).
+                    state.art.or_signal(key.clone());
                     state.art.mark_inflight(key.clone());
                     worker.fetch_album_art(url, key);
                 }
