@@ -23,6 +23,13 @@ const AUDIO_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// reads it from disk instead of re-streaming the CDN. The right policy
 /// for immutable content is the size-capped LRU librespot implements —
 /// a TTL would only force pointless refetches.
+///
+/// The session keeps librespot's default (keymaster) client id, which must
+/// match the app that minted the credentials we connect with — hence
+/// `auth::streaming`'s separate grant. Handing it the user's own dev client
+/// id instead fails twice over: `clienttoken` 400s on an unrecognised app,
+/// and `login5` rejects a stored credential from a different app
+/// (`INVALID_CREDENTIALS`), even though the AP handshake itself succeeds.
 pub fn new_session() -> Session {
     let cache = crate::disk_cache::audio_dir().and_then(|dir| {
         Cache::new(

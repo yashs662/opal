@@ -83,6 +83,11 @@ impl AuthModel {
         if let Err(e) = crate::auth::token_manager::delete_tokens() {
             log::warn!("sign-out: failed to clear stored token: {e}");
         }
+        // Both grants belong to the account that's leaving — dropping only
+        // the Web API one would hand the next user this one's session.
+        if let Err(e) = crate::auth::streaming::delete() {
+            log::warn!("sign-out: failed to clear streaming grant: {e}");
+        }
         self.clear();
     }
 }

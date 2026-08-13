@@ -101,6 +101,9 @@ pub enum Msg {
     SetQuality(AudioQuality),
     /// Persist the (already-flipped) "normalize volume" toggle.
     ToggleNormalize,
+    /// "Lossless (Spotify client)" flipped — start or stop the hidden
+    /// official client as the playback engine.
+    ToggleLosslessEngine,
     /// The backdrop-blur slider was released — persist the signal's value
     /// (the drag itself already retuned the glass live via the blur bind).
     BackdropBlurCommitted,

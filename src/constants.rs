@@ -1,5 +1,52 @@
 pub const CREDENTIAL_SERVICE_NAME: &str = "Opal";
 pub const CREDENTIAL_USER_NAME: &str = "Opal_user";
+/// Keyring slot for the streaming-session tokens — a *second*, independent
+/// OAuth grant (see [`STREAMING_CLIENT_ID`]) that must not collide with the
+/// Web API tokens under [`CREDENTIAL_USER_NAME`].
+pub const STREAMING_CREDENTIAL_USER_NAME: &str = "Opal_streaming";
+
+/// Spotify's own "keymaster" app id, as hardcoded by every librespot-based
+/// client. The librespot session needs it: after the access-point handshake,
+/// `clienttoken` and `login5` are first-party services that reject an app id
+/// they don't recognise (400 / INVALID_CREDENTIALS), and login5 additionally
+/// refuses a stored credential minted under a *different* app. So the
+/// streaming session runs its own OAuth grant under this id, while every
+/// Web API call keeps using the user's own client id.
+pub const STREAMING_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
+/// Loopback callback for the streaming grant. Distinct port from
+/// [`SPOTIFY_REDIRECT_URI`] so both listeners can coexist; the `/login`
+/// path is what this app id has registered.
+pub const STREAMING_REDIRECT_URI: &str = "http://127.0.0.1:8898/login";
+/// Scopes for the streaming grant — librespot's own list, i.e. what the
+/// desktop client asks for. Only the session uses this token.
+pub const STREAMING_SCOPES: &[&str] = &[
+    "app-remote-control",
+    "playlist-modify",
+    "playlist-modify-private",
+    "playlist-modify-public",
+    "playlist-read",
+    "playlist-read-collaborative",
+    "playlist-read-private",
+    "streaming",
+    "ugc-image-upload",
+    "user-follow-modify",
+    "user-follow-read",
+    "user-library-modify",
+    "user-library-read",
+    "user-modify",
+    "user-modify-playback-state",
+    "user-modify-private",
+    "user-personalized",
+    "user-read-birthdate",
+    "user-read-currently-playing",
+    "user-read-email",
+    "user-read-play-history",
+    "user-read-playback-position",
+    "user-read-playback-state",
+    "user-read-private",
+    "user-read-recently-played",
+    "user-top-read",
+];
 pub const SPOTIFY_REDIRECT_URI: &str = "http://127.0.0.1:8888/callback";
 pub const SPOTIFY_ACCESS_SCOPES: &str = "streaming,user-read-email,user-read-private,playlist-read-private,playlist-read-collaborative,playlist-modify-public,playlist-modify-private,user-follow-modify,user-follow-read,user-library-read,user-library-modify,user-top-read,user-read-recently-played,user-read-playback-state,user-read-currently-playing,user-modify-playback-state";
 

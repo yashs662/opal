@@ -368,6 +368,53 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             state.prefs.mark_dirty(cx.now);
         }
 
+        Msg::ToggleLosslessEngine => {
+            // Guard the in-flight window. Bringing the client up takes
+            // seconds, and a second click during it would either relaunch or
+            // tear down work already running — so the switch is inert until
+            // the engine settles (the row renders locked to match).
+            if !state.engine.is_interactive() {
+                // Undo the optimistic flip the switch already applied.
+                let on = state.settings.lossless_engine.get();
+                state.settings.lossless_engine.set(!on);
+                if !state.engine.installed {
+                    log::warn!("lossless engine: Spotify desktop client not installed");
+                }
+                return;
+            }
+            // The toggle already flipped the signal. Unlike the other
+            // settings this one acts immediately: bring the official client
+            // up (hidden) and hand playback over, or release it.
+            let on = state.settings.lossless_engine.get();
+            state.prefs.data.audio.lossless_engine = on;
+            state.prefs.mark_dirty(cx.now);
+            match (on, state.auth.token()) {
+                (true, Some(token)) => {
+                    // Show the work starting *now* — the audible switchover
+                    // trails by seconds, and silence reads as a dead button.
+                    state.engine.status = crate::model::EngineStatus::Starting;
+                    // Carry the current transport state across the handover:
+                    // switching engines mid-song keeps playing, flipping it
+                    // while paused stays paused.
+                    let playing = state.player_ui.is_playing.get();
+                    worker.start_lossless_engine(token, playing);
+                    cx.rebuild();
+                }
+                (true, None) => {
+                    // No token to find/transfer to its device with — undo
+                    // rather than leave the switch lying about the state.
+                    log::warn!("lossless engine needs a signed-in session");
+                    state.settings.lossless_engine.set(false);
+                    state.prefs.data.audio.lossless_engine = false;
+                }
+                (false, _) => {
+                    state.engine.status = crate::model::EngineStatus::Off;
+                    worker.stop_lossless_engine();
+                    cx.rebuild();
+                }
+            }
+        }
+
         Msg::BackdropBlurCommitted => {
             state.prefs.data.backdrop_blur = state.backdrop.blur.get();
             state.prefs.mark_dirty(cx.now);

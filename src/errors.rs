@@ -2,6 +2,9 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum AuthError {
+    /// The credentials themselves were rejected (revoked token, denied
+    /// login) — re-auth is the only fix, retrying is pointless.
+    Credentials(String),
     Server(String),
     Parse(String),
     Timeout(String),
@@ -16,6 +19,7 @@ pub enum AuthError {
 impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AuthError::Credentials(s) => write!(f, "credentials: {s}"),
             AuthError::Server(s) => write!(f, "server: {s}"),
             AuthError::Parse(s) => write!(f, "parse: {s}"),
             AuthError::Timeout(s) => write!(f, "timeout: {s}"),

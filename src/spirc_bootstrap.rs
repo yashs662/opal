@@ -116,7 +116,20 @@ pub async fn start(
 
     let (spirc, task) = Spirc::new(connect_config, session, credentials, player, mixer)
         .await
-        .map_err(|e| AuthError::Server(format!("spirc init: {e}")))?;
+        .map_err(|e| {
+            let msg = format!("spirc init: {e}");
+            // AP login denial surfaces as PermissionDenied; the login5 path
+            // buries INVALID_CREDENTIALS inside a FailedPrecondition (its
+            // error enum is private, so the string is the only handle).
+            // Either way the token is dead — re-auth, don't retry.
+            if e.kind == librespot_core::error::ErrorKind::PermissionDenied
+                || msg.contains("INVALID_CREDENTIALS")
+            {
+                AuthError::Credentials(msg)
+            } else {
+                AuthError::Server(msg)
+            }
+        })?;
 
     Ok(SpircBootstrap {
         spirc,

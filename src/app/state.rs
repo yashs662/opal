@@ -32,6 +32,8 @@ pub struct AppState {
     pub player_ui: PlayerModel,
     /// Settings-modal slice: the `Overlay`, cache usage, dir-picker handoff.
     pub settings: SettingsModel,
+    /// Official-client playback engine (lossless) lifecycle + availability.
+    pub engine: crate::model::EngineModel,
     /// Connect-devices slice: the devices popup + active-device chrome.
     pub devices: DevicesModel,
     /// Right-click context-menu slice (track row actions).
@@ -118,7 +120,8 @@ impl AppState {
                 prefs.audio.volume,
                 restored,
             ),
-            settings: SettingsModel::new(prefs.audio.normalize),
+            settings: SettingsModel::new(prefs.audio.normalize, prefs.audio.lossless_engine),
+            engine: crate::model::EngineModel::new(),
             devices: DevicesModel::new(),
             menu: MenuModel::new(),
             membership: MembershipModel::new(),

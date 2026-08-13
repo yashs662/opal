@@ -22,6 +22,7 @@ mod hotreload;
 mod local_player;
 mod media_controls;
 mod model;
+mod official_app;
 mod prefs;
 mod spirc_bootstrap;
 mod spotify_session;
@@ -267,6 +268,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state
             .prefs
             .flush_on_exit(state.player_ui.snapshot.as_ref(), state.canvas.show.get());
+        // Hand the official client back if we're holding it: a window we hid
+        // returns minimised (reachable, still playing, but it doesn't leap up
+        // as Opal disappears), a process we launched gets closed. Without
+        // this, quitting Opal would strand an invisible Spotify.
+        official_app::release(official_app::Restore::Minimized);
     });
 
     // Register as an OS media app once the window is up (SMTC needs its

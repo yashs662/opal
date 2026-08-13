@@ -265,6 +265,7 @@ pub struct HomeView {
     on_transfer: Rc<dyn Fn(String)>,
     on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     on_normalize: Rc<dyn Fn()>,
+    on_lossless_engine: Rc<dyn Fn()>,
     on_blur_commit: Rc<dyn Fn()>,
     /// EQ settings: band-drag release (persist), enable toggle, preset
     /// apply (by index), save-current-as-custom.
@@ -357,6 +358,10 @@ impl HomeView {
         let on_normalize: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ToggleNormalize))
+        };
+        let on_lossless_engine: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::ToggleLosslessEngine))
         };
         let on_blur_commit: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
@@ -507,6 +512,7 @@ impl HomeView {
             on_transfer,
             on_quality,
             on_normalize,
+            on_lossless_engine,
             on_blur_commit,
             on_eq_commit,
             on_eq_toggle,
@@ -680,6 +686,7 @@ impl HomeView {
             player: &state.player_ui,
             on_action: self.on_action.clone(),
             devices: &state.devices,
+            engine: &state.engine,
             on_devices_open: self.on_devices_open.clone(),
             on_navigate: self.on_navigate.clone(),
             membership: &state.membership,
@@ -759,6 +766,8 @@ impl HomeView {
             quality: state.prefs.data.audio.quality,
             on_quality: self.on_quality.clone(),
             on_normalize: self.on_normalize.clone(),
+            on_lossless_engine: self.on_lossless_engine.clone(),
+            engine: &state.engine,
             on_blur_commit: self.on_blur_commit.clone(),
             eq: &state.eq,
             on_eq_commit: self.on_eq_commit.clone(),

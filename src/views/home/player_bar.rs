@@ -33,6 +33,9 @@ pub struct PlayerBar<'a> {
     pub on_action: Rc<dyn Fn(PlayerAction)>,
     /// Devices slice — the popup overlay + "playing on Opal" tint.
     pub devices: &'a DevicesModel,
+    /// Playback-engine slice — lights the "LOSSLESS" badge while the
+    /// official client is the one playing.
+    pub engine: &'a crate::model::EngineModel,
     /// Fetch a fresh device list + rebuild (the popup opened).
     pub on_devices_open: Rc<dyn Fn()>,
     /// Queue icon → the queue page.
@@ -103,6 +106,45 @@ impl Component for PlayerBar<'_> {
                                     }),
                                 )
                                 .w_px(180.0);
+                                // Lossless badge — the audible switchover to
+                                // the official client trails the toggle by
+                                // seconds, so the chrome says which engine is
+                                // actually playing rather than leaving the
+                                // user to infer it from the sound.
+                                if self.engine.is_active() {
+                                    // Accent-tinted fill + a stronger accent
+                                    // hairline, both derived from the live
+                                    // cover accent so the badge belongs to
+                                    // the same palette as the rest of the
+                                    // chrome rather than reading as chrome
+                                    // bolted on.
+                                    let fill =
+                                        Computed::new((self.backdrop.accent.clone(),), |(acc,)| {
+                                            [acc[0], acc[1], acc[2], 0.16]
+                                        });
+                                    // The hairline stays neutral: engine
+                                    // borders take a static colour (only
+                                    // fills accept a bind), and a frozen
+                                    // accent edge would drift out of step
+                                    // with the tint as covers change.
+                                    // Wrapper supplies the top margin: the
+                                    // engine has no margin builder, and
+                                    // padding on the badge itself would just
+                                    // make it taller instead of sitting it
+                                    // lower under the artist line.
+                                    m.row(()).pad_ltrb(0.0, t::SP_1, 0.0, 0.0).child(|w| {
+                                        w.row(())
+                                            .pad_xy(t::SP_2, t::SP_0_5)
+                                            .radius(t::R_SM)
+                                            .color(fill)
+                                            .border(1.0, t::BORDER)
+                                            .align(Align::Center)
+                                            .child(|p| {
+                                                p.text((), "LOSSLESS", 9.0)
+                                                    .color(self.backdrop.accent.clone());
+                                            });
+                                    });
+                                }
                             });
                         // Heart — accent when the track is in the library
                         // (Liked Songs OR any playlist), and a *filled* glyph

@@ -23,6 +23,10 @@ pub struct SettingsModel {
     /// switch reactively. The pref is read at session start (applies on
     /// next launch), so this only mirrors + persists the choice.
     pub normalize: Signal<bool>,
+    /// "Lossless (Spotify client)" toggle. Unlike the others this drives a
+    /// live action — flipping it starts/stops the hidden official client —
+    /// so it's flipped back by the reducer if the engine fails to come up.
+    pub lossless_engine: Signal<bool>,
     /// Folder picked by the off-thread (blocking) cache-relocation dialog,
     /// awaiting pickup on the UI thread in the frame loop.
     pub pending_cache_dir: Arc<Mutex<Option<PathBuf>>>,
@@ -36,13 +40,14 @@ pub struct SettingsModel {
 }
 
 impl SettingsModel {
-    pub fn new(normalize: bool) -> Self {
+    pub fn new(normalize: bool, lossless_engine: bool) -> Self {
         Self {
             // Height-morphing: the overlay springs the panel collapsed → full
             // on open (and back on close/dismiss) with no per-open plumbing.
             overlay: Overlay::new().with_morph(crate::views::home::settings::PANEL_COLLAPSED_H),
             cache_usage: CacheUsage::default(),
             normalize: Signal::new(normalize),
+            lossless_engine: Signal::new(lossless_engine),
             pending_cache_dir: Arc::new(Mutex::new(None)),
             pending_usage: Arc::new(Mutex::new(None)),
             wake: None,
@@ -127,6 +132,6 @@ impl SettingsModel {
 
 impl Default for SettingsModel {
     fn default() -> Self {
-        Self::new(true)
+        Self::new(true, false)
     }
 }

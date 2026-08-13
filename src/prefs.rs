@@ -222,6 +222,14 @@ pub struct AudioPrefs {
     /// effect immediately, not on next launch.
     #[serde(default)]
     pub eq: EqPrefs,
+    /// Route playback through the official Spotify client, hidden, instead
+    /// of Opal's own Connect device (see `official_app`). The only way to
+    /// get lossless: Spotify streams FLAC to its own apps and Ogg Vorbis
+    /// 320 to every third-party Connect endpoint. Costs the client's memory
+    /// (~800 MB) and bypasses Opal's own sink, so the EQ doesn't apply.
+    /// Off by default — it launches another application.
+    #[serde(default)]
+    pub lossless_engine: bool,
 }
 
 /// Persisted equaliser state. `bands` is the ten ISO-octave gains in dB
@@ -260,6 +268,7 @@ impl Default for AudioPrefs {
             quality: AudioQuality::default(),
             normalize: default_normalize(),
             eq: EqPrefs::default(),
+            lossless_engine: false,
         }
     }
 }

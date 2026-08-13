@@ -6,7 +6,7 @@ use crate::disk_cache;
 use crate::errors::AuthError;
 use crate::extracted_color;
 use crate::widgets::{color, tokens};
-use crate::{cluster_listener, spirc_bootstrap, spotify_session};
+use crate::{cluster_listener, official_app, spirc_bootstrap, spotify_session};
 use librespot_connect::{LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::Session;
 use librespot_core::authentication::Credentials;
@@ -16,8 +16,10 @@ use log::{debug, error, info, warn};
 use opal_gfx::{ImageHandle, Uploader, WakeHandle};
 use protobuf::EnumOrUnknown;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
+use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc::{self as tmpsc, UnboundedSender};
 
@@ -131,7 +133,6 @@ pub enum WorkerCommand {
         track_id: String,
     },
     ConnectSpotifySession {
-        access_token: String,
         /// Persisted volume preference (0..=1) — the Connect device's
         /// advertised initial volume, so a transfer to Opal doesn't
         /// snap the user back to librespot's 50% default.
@@ -181,6 +182,19 @@ pub enum WorkerCommand {
     FetchDevices {
         access_token: String,
     },
+    /// Bring up the official client as a hidden playback engine (lossless),
+    /// then hand playback to it. See `official_app`.
+    StartLosslessEngine {
+        access_token: String,
+        /// Whether playback should be *running* on the client once it takes
+        /// over. Mirrors what's playing right now: routing audio to a
+        /// different engine must not decide, on the user's behalf, that
+        /// music should start.
+        resume: bool,
+    },
+    /// Release the official client — re-show a window we hid, close a
+    /// process we launched.
+    StopLosslessEngine,
     /// Transfer playback to a device (and resume there). `position_ms` is
     /// `Some` only when leaving Opal itself: the Web API transfer drops
     /// our librespot device's position (the target restarts at 0:00), so we
@@ -275,13 +289,29 @@ pub enum WorkerResponse {
     TokensRefreshed {
         auth: SpotifyAuthResponse,
     },
-    /// Proactive token refresh failed — the auth model backs off and the
-    /// due-check retries shortly.
-    TokensRefreshFailed,
+    /// Proactive token refresh failed. `permanent` = the grant itself was
+    /// rejected (revoked/expired refresh token) — the session is dead and
+    /// only a re-login fixes it; otherwise the auth model backs off and
+    /// the due-check retries shortly.
+    TokensRefreshFailed {
+        permanent: bool,
+    },
     /// Connect device list (devices popup).
     Devices {
         devices: Vec<api::Device>,
     },
+    /// The official client is up, hidden, and holding playback.
+    LosslessEngineReady {
+        device_id: String,
+        device_name: String,
+    },
+    /// Couldn't bring the engine up (not installed, never appeared, or its
+    /// Connect device never registered). The toggle flips back.
+    LosslessEngineFailed {
+        error: String,
+    },
+    /// The engine was released; playback is Opal's own device again.
+    LosslessEngineStopped,
     /// The cluster's active device changed; `is_self` = Opal is it.
     ActiveDeviceChanged {
         device_id: String,
@@ -432,6 +462,9 @@ pub enum WorkerResponse {
         /// this row "This device".
         device_id: String,
     },
+    /// The librespot session couldn't be established. Only the streaming
+    /// grant is implicated — the Web API login is independent and still
+    /// good, so this degrades playback rather than logging the user out.
     SpotifySessionFailed {
         error: String,
     },
@@ -522,6 +555,10 @@ impl Worker {
             // sections are a single clone/store.
             let local_ctx: Arc<std::sync::Mutex<Option<String>>> =
                 Arc::new(std::sync::Mutex::new(None));
+            // Drives the official client's re-hide watchdog task, which
+            // exits when this clears. The engine record itself lives in
+            // `official_app` (the exit hook needs it too).
+            let engine_watchdog = Arc::new(AtomicBool::new(false));
             // Canonical playlist-membership index (track→playlists). Lives
             // here so the heavy map never crosses to the UI; the UI gets the
             // playlist list + per-track lookups + edit confirmations.
@@ -599,7 +636,6 @@ impl Worker {
                             track_id,
                         } => spawn_fetch_canvas(resp.clone(), session.clone(), track_uri, track_id),
                         WorkerCommand::ConnectSpotifySession {
-                            access_token,
                             initial_volume,
                             quality,
                             normalize,
@@ -608,7 +644,6 @@ impl Worker {
                             session.clone(),
                             spirc.clone(),
                             local_ctx.clone(),
-                            access_token,
                             initial_volume,
                             quality,
                             normalize,
@@ -643,6 +678,18 @@ impl Worker {
                         } => spawn_refresh_tokens(resp.clone(), refresh_token, client_id),
                         WorkerCommand::FetchDevices { access_token } => {
                             spawn_fetch_devices(resp.clone(), access_token)
+                        }
+                        WorkerCommand::StartLosslessEngine {
+                            access_token,
+                            resume,
+                        } => spawn_start_engine(
+                            resp.clone(),
+                            engine_watchdog.clone(),
+                            access_token,
+                            resume,
+                        ),
+                        WorkerCommand::StopLosslessEngine => {
+                            spawn_stop_engine(resp.clone(), engine_watchdog.clone())
                         }
                         WorkerCommand::TransferPlayback {
                             access_token,
@@ -785,13 +832,11 @@ impl Worker {
     }
     pub fn connect_spotify_session(
         &self,
-        access_token: String,
         initial_volume: f32,
         quality: crate::prefs::AudioQuality,
         normalize: bool,
     ) {
         let _ = self.cmd_tx.send(WorkerCommand::ConnectSpotifySession {
-            access_token,
             initial_volume,
             quality,
             normalize,
@@ -833,6 +878,15 @@ impl Worker {
         let _ = self
             .cmd_tx
             .send(WorkerCommand::FetchDevices { access_token });
+    }
+    pub fn start_lossless_engine(&self, access_token: String, resume: bool) {
+        let _ = self.cmd_tx.send(WorkerCommand::StartLosslessEngine {
+            access_token,
+            resume,
+        });
+    }
+    pub fn stop_lossless_engine(&self) {
+        let _ = self.cmd_tx.send(WorkerCommand::StopLosslessEngine);
     }
     pub fn transfer_playback(
         &self,
@@ -2699,22 +2753,43 @@ fn spawn_connect_session(
     session_slot: Arc<AsyncMutex<Option<Session>>>,
     spirc_slot: Arc<AsyncMutex<Option<Spirc>>>,
     local_ctx: Arc<std::sync::Mutex<Option<String>>>,
-    access_token: String,
     initial_volume: f32,
     quality: crate::prefs::AudioQuality,
     normalize: bool,
     eq: Arc<crate::audio_eq::EqShared>,
 ) {
     tokio::spawn(async move {
+        // The session authenticates with its own grant, not the Web API
+        // token — see `auth::streaming` for why the two can't be shared.
+        let streaming_token = match crate::auth::streaming::access_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                error!("streaming authorisation failed: {e}");
+                resp.send(WorkerResponse::SpotifySessionFailed {
+                    error: e.to_string(),
+                });
+                return;
+            }
+        };
+
         let s = spotify_session::new_session();
         *session_slot.lock().await = Some(s.clone());
 
-        let creds = Credentials::with_access_token(access_token);
+        let creds = Credentials::with_access_token(streaming_token);
         let boot =
             match spirc_bootstrap::start(s, creds, initial_volume, quality, normalize, eq).await {
                 Ok(b) => b,
                 Err(e) => {
                     error!("spirc bootstrap failed: {e}");
+                    // Credentials rejected → this grant is spent. Drop it so
+                    // the next attempt re-consents instead of replaying a
+                    // dead token. The Web API login is a separate grant and
+                    // stays untouched.
+                    if matches!(e, AuthError::Credentials(_))
+                        && let Err(e) = crate::auth::streaming::delete()
+                    {
+                        warn!("clearing streaming grant: {e}");
+                    }
                     resp.send(WorkerResponse::SpotifySessionFailed {
                         error: e.to_string(),
                     });
@@ -2876,6 +2951,176 @@ fn spawn_connect_session(
             device_id: self_id_for_connected,
         });
     });
+}
+
+/// How long to wait for the official client's Connect device to appear in
+/// `/me/player/devices` after its window shows up. Registration trails the
+/// UI by a second or two on a cold start.
+const ENGINE_DEVICE_WAIT: Duration = Duration::from_secs(25);
+/// Cadence for both the device poll and the re-hide watchdog.
+const ENGINE_POLL: Duration = Duration::from_secs(2);
+
+/// Bring up the official client, find its Connect device, and transfer
+/// playback to it.
+///
+/// Device identification: Spotify names the desktop client after the
+/// machine, so the hostname is the primary match. Anything already known to
+/// be *ours* (the librespot device named "Opal") is excluded outright, and a
+/// device that appeared since we started is preferred — that's decisive in
+/// the cold-launch case where the hostname might collide with another
+/// machine's entry.
+fn spawn_start_engine(
+    resp: Responder,
+    watchdog: Arc<AtomicBool>,
+    access_token: String,
+    resume: bool,
+) {
+    tokio::spawn(async move {
+        // Snapshot the device list first so a newly-registered client is
+        // identifiable by difference.
+        let before: Vec<String> = api::get_devices(&access_token)
+            .await
+            .map(|ds| ds.into_iter().map(|d| d.id).collect())
+            .unwrap_or_default();
+
+        // Launch/adopt + hide, unless we're already holding it (double
+        // toggle, or a re-request while it's up) — relaunching would spawn
+        // a second client and lose the ownership record. Blocking (process
+        // spawn, window poll), so it can't run on a runtime thread.
+        if official_app::is_active() {
+            debug!("lossless engine already held — reusing it");
+        } else {
+            // Its own thread, NOT the blocking pool: this mostly *waits*
+            // (up to WINDOW_WAIT for the client's window to appear), and the
+            // pool is deliberately capped — parking one of its threads for
+            // twenty seconds would stall the disk-cache reads and art
+            // decodes racing alongside it at cold start.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
+                .name("opal-engine-start".into())
+                .spawn(move || {
+                    let _ = tx.send(official_app::ensure_hidden());
+                })
+                .ok();
+            match rx.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    warn!("lossless engine: {e}");
+                    resp.send(WorkerResponse::LosslessEngineFailed { error: e });
+                    return;
+                }
+                Err(e) => {
+                    let error = format!("engine start thread: {e}");
+                    warn!("lossless engine: {error}");
+                    resp.send(WorkerResponse::LosslessEngineFailed { error });
+                    return;
+                }
+            }
+        }
+
+        let host = hostname();
+        let deadline = std::time::Instant::now() + ENGINE_DEVICE_WAIT;
+        // The device list the target was picked from — also tells us whether
+        // anything else currently holds playback.
+        let mut devices_snapshot;
+        let target = loop {
+            let devices = api::get_devices(&access_token).await.unwrap_or_default();
+            devices_snapshot = devices.clone();
+            let pick = devices
+                .iter()
+                // Never hand playback back to ourselves.
+                .filter(|d| d.name != "Opal" && d.kind == "Computer")
+                .max_by_key(|d| {
+                    // Rank: brand-new device beats hostname match beats
+                    // any other computer.
+                    let fresh = !before.contains(&d.id);
+                    let named = host.as_deref().is_some_and(|h| d.name == h);
+                    (fresh as u8) * 2 + named as u8
+                })
+                .cloned();
+            if let Some(d) = pick {
+                break Some(d);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(ENGINE_POLL).await;
+        };
+
+        let Some(device) = target else {
+            let error = "the Spotify client never registered as a Connect device".to_string();
+            warn!("lossless engine: {error}");
+            // Undo the launch/hide — leaving a hidden client behind with no
+            // way to reach it from Opal would strand it.
+            let _ =
+                tokio::task::spawn_blocking(|| official_app::release(official_app::Restore::Show))
+                    .await;
+            resp.send(WorkerResponse::LosslessEngineFailed { error });
+            return;
+        };
+
+        info!("lossless engine ready: '{}' ({})", device.name, device.id);
+        // Only transfer if it isn't already the active device. Transferring
+        // to the device that already holds playback makes Spotify tear down
+        // and re-establish it — audible as a pause-then-resume stutter, for
+        // no gain. The common case (client already open and playing when
+        // the engine comes up) hits this.
+        // Whether some *other* device currently holds playback. Read from
+        // the same list the target came from.
+        let other_active = devices_snapshot
+            .iter()
+            .any(|d| d.is_active && d.id != device.id);
+
+        if device.is_active {
+            debug!("engine device already active — no transfer needed");
+        } else if !resume && other_active {
+            // Startup restore while another device is playing: transferring
+            // here would yank playback off that device (and `play: false`
+            // would pause it outright). The engine stays up and ready; the
+            // user moves playback when they want it, via the devices popup.
+            info!("another device holds playback — engine ready, not taking over");
+        } else {
+            info!("transferring playback to the engine (resume={resume})");
+            if let Err(e) = api::transfer_playback(&access_token, &device.id, resume).await {
+                warn!("transfer to lossless engine failed: {e}");
+            }
+        }
+
+        // Keep it out of sight: an update prompt, a `spotify:` link, or a
+        // tray-icon click can put the window back on screen.
+        watchdog.store(true, Ordering::Relaxed);
+        let flag = watchdog.clone();
+        tokio::spawn(async move {
+            while flag.load(Ordering::Relaxed) {
+                tokio::time::sleep(ENGINE_POLL).await;
+                let _ = tokio::task::spawn_blocking(official_app::rehide_if_shown).await;
+            }
+        });
+
+        resp.send(WorkerResponse::LosslessEngineReady {
+            device_id: device.id,
+            device_name: device.name,
+        });
+    });
+}
+
+fn spawn_stop_engine(resp: Responder, watchdog: Arc<AtomicBool>) {
+    watchdog.store(false, Ordering::Relaxed);
+    tokio::spawn(async move {
+        // Turning the engine off is how the user reaches the client
+        // (its own audio-quality setting lives in there), so show it.
+        let _ = tokio::task::spawn_blocking(|| official_app::release(official_app::Restore::Show))
+            .await;
+        resp.send(WorkerResponse::LosslessEngineStopped);
+    });
+}
+
+/// This machine's name, which is what Spotify calls its desktop device.
+fn hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .filter(|s| !s.is_empty())
 }
 
 fn spawn_fetch_devices(resp: Responder, access_token: String) {
@@ -3239,7 +3484,14 @@ fn spawn_refresh_tokens(resp: Responder, refresh: String, client_id: String) {
             }
             Err(e) => {
                 warn!("proactive token refresh failed: {e}");
-                resp.send(WorkerResponse::TokensRefreshFailed);
+                // `invalid_grant` from the token endpoint = the refresh
+                // token itself is revoked/expired — retrying can never
+                // succeed. Anything else (network, 5xx) is transient.
+                let permanent = matches!(
+                    &e,
+                    AuthError::Api(body, _) if body.contains("invalid_grant")
+                );
+                resp.send(WorkerResponse::TokensRefreshFailed { permanent });
             }
         }
     });

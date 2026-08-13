@@ -32,6 +32,15 @@ fn land_pre_auth(state: &mut AppState, cx: &mut Cx) {
     }
 }
 
+/// The session's credentials are dead (revoked token, denied login) —
+/// wipe them and send the user back to the pre-auth screen. Mirrors the
+/// manual sign-out: the settings modal must not be up next sign-in.
+fn auth_dead(state: &mut AppState, cx: &mut Cx) {
+    state.auth.sign_out();
+    state.settings.overlay.reset();
+    land_pre_auth(state, cx);
+}
+
 pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: WorkerResponse) {
     match resp {
         WorkerResponse::PlaybackFailed { cmd } => {
@@ -59,7 +68,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             state.prefs.mark_dirty(cx.now);
         }
         WorkerResponse::OAuthStarted { auth_url } => {
-            log::info!("opening browser for OAuth");
+            log::info!("opening browser for OAuth: {auth_url}");
             if let Err(e) = webbrowser::open(&auth_url) {
                 log::error!("open browser: {e}");
             }
@@ -70,8 +79,13 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // running — the session authenticated once and stays up.
             state.auth.set(auth);
         }
-        WorkerResponse::TokensRefreshFailed => {
-            state.auth.refresh_failed();
+        WorkerResponse::TokensRefreshFailed { permanent } => {
+            if permanent {
+                log::warn!("refresh token rejected (invalid_grant) — signing out");
+                auth_dead(state, cx);
+            } else {
+                state.auth.refresh_failed();
+            }
         }
         WorkerResponse::OAuthComplete { auth } | WorkerResponse::TokensLoaded { auth } => {
             log::info!("auth ok — switching to Home");
@@ -94,12 +108,17 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 let p = &state.prefs.data;
                 (p.audio.volume, p.audio.quality, p.audio.normalize)
             };
-            worker.connect_spotify_session(
-                auth.access_token.clone(),
-                initial_volume,
-                quality,
-                normalize,
-            );
+            worker.connect_spotify_session(initial_volume, quality, normalize);
+            // Restore the lossless routing across restarts: the pref says
+            // playback belongs to the (hidden) official client, so bring it
+            // back up now that there's a token to find its device with.
+            if state.prefs.data.audio.lossless_engine && state.engine.installed {
+                state.engine.status = crate::model::EngineStatus::Starting;
+                // Never `resume` on a restore: routing audio to the client
+                // is not a request to start playing. Cold start is paused,
+                // and it stays paused.
+                worker.start_lossless_engine(auth.access_token.clone(), false);
+            }
             state.auth.set(auth);
             if state.router.view != View::Home {
                 state.router.view = View::Home;
@@ -363,18 +382,43 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // over the Web API — enable transport rather than leave it loading.
             state.player_ui.session_ready.set(true);
         }
+        WorkerResponse::LosslessEngineReady {
+            device_id,
+            device_name,
+        } => {
+            log::info!("playback routed to the Spotify client: '{device_name}' ({device_id})");
+            // Starting → Active: unlocks the toggle and lights the pill.
+            state.engine.status = crate::model::EngineStatus::Active;
+            // The cluster push from the transfer carries the authoritative
+            // state; nothing to sync here beyond letting the UI settle.
+            cx.rebuild();
+        }
+        WorkerResponse::LosslessEngineFailed { error } => {
+            log::warn!("lossless engine failed: {error}");
+            state.engine.status = crate::model::EngineStatus::Off;
+            // Put the switch back where the truth is — playback is still on
+            // whatever device had it.
+            state.settings.lossless_engine.set(false);
+            state.prefs.data.audio.lossless_engine = false;
+            state.prefs.mark_dirty(cx.now);
+            cx.rebuild();
+        }
+        WorkerResponse::LosslessEngineStopped => {
+            log::info!("lossless engine released");
+            state.engine.status = crate::model::EngineStatus::Off;
+            cx.rebuild();
+        }
         WorkerResponse::SpotifySessionLost => {
-            // The Connect device dropped (long session) — re-bootstrap it with
-            // the current (proactively-refreshed) token so playback recovers
-            // without an app restart. The worker already backed off.
-            if let Some(token) = state.auth.token() {
-                log::warn!("librespot session lost — reconnecting Connect device");
-                let (initial_volume, quality, normalize) = {
-                    let p = &state.prefs.data;
-                    (p.audio.volume, p.audio.quality, p.audio.normalize)
-                };
-                worker.connect_spotify_session(token, initial_volume, quality, normalize);
-            }
+            // The Connect device dropped (long session) — re-bootstrap it so
+            // playback recovers without an app restart. The streaming grant
+            // refreshes itself inside the worker; the worker already backed
+            // off before sending this.
+            log::warn!("librespot session lost — reconnecting Connect device");
+            let (initial_volume, quality, normalize) = {
+                let p = &state.prefs.data;
+                (p.audio.volume, p.audio.quality, p.audio.normalize)
+            };
+            worker.connect_spotify_session(initial_volume, quality, normalize);
         }
         WorkerResponse::PlayerState { mut player } => {
             // Overlay cached track details (artist) and request a fetch

@@ -93,6 +93,11 @@ pub struct SettingsPanel<'a> {
     pub on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     /// Persist the "Normalize volume" toggle after it flips.
     pub on_normalize: Rc<dyn Fn()>,
+    /// The lossless toggle flipped → start/stop the hidden official client.
+    pub on_lossless_engine: Rc<dyn Fn()>,
+    /// Engine lifecycle + client availability — drives the lossless row's
+    /// locked state and its hint.
+    pub engine: &'a crate::model::EngineModel,
     /// The backdrop-blur slider was released → persist (the drag already
     /// retuned the glass live).
     pub on_blur_commit: Rc<dyn Fn()>,
@@ -185,15 +190,50 @@ impl Component for SettingsPanel<'_> {
                                 self.quality,
                                 &self.backdrop.accent,
                                 self.on_quality.clone(),
+                                self.settings.lossless_engine.get(),
                             );
-                            setting_row(
+                            // Normalisation lives in librespot's player, which
+                            // isn't in the path once the official client is
+                            // the engine — same bypass as the EQ.
+                            let bypassed = self.engine.is_active();
+                            setting_row_locked(
                                 body,
                                 "Normalize volume",
-                                "Match loudness across tracks + prevent clipping (next launch)",
+                                if bypassed {
+                                    "Set in the Spotify app while Lossless is on"
+                                } else {
+                                    "Match loudness across tracks + prevent clipping (next launch)"
+                                },
                                 &self.settings.normalize,
                                 &self.backdrop.accent,
                                 self.on_normalize.clone(),
+                                bypassed,
                             );
+                            // Platforms without an engine implementation
+                            // don't get the row at all — an always-failing
+                            // switch is worse than no switch.
+                            if crate::official_app::SUPPORTED {
+                                // Three states, three subtitles: unavailable (no
+                                // client installed), in flight (the launch takes
+                                // seconds — say so rather than look dead), and
+                                // idle.
+                                let (lossless_hint, lossless_locked) = if !self.engine.installed {
+                                    ("Spotify desktop app not found", true)
+                                } else if self.engine.is_busy() {
+                                    ("Starting the Spotify app…", true)
+                                } else {
+                                    ("FLAC via the hidden Spotify app (no EQ)", false)
+                                };
+                                setting_row_locked(
+                                    body,
+                                    "Lossless (Spotify client)",
+                                    lossless_hint,
+                                    &self.settings.lossless_engine,
+                                    &self.backdrop.accent,
+                                    self.on_lossless_engine.clone(),
+                                    lossless_locked,
+                                );
+                            }
                             divider(body);
                             eq_section(
                                 body,
@@ -210,6 +250,10 @@ impl Component for SettingsPanel<'_> {
                                     rename_start: self.on_eq_rename_start.clone(),
                                     rename_commit: self.on_eq_rename_commit.clone(),
                                 },
+                                // Audio bypasses Opal's sink entirely once
+                                // the official client is the engine, so the
+                                // biquads have nothing to act on.
+                                self.engine.is_active(),
                             );
                             divider(body);
                             cache_section(
@@ -250,6 +294,11 @@ pub struct PresetActions {
 /// dropdown, a filled response graph with a draggable handle per band
 /// (over a dB axis and frequency labels), and a Reset. The body dims when
 /// the EQ is off so it reads as inactive without disappearing.
+/// `bypassed` = the EQ can't act on anything right now, because the audio
+/// isn't passing through Opal's sink (the official client is the engine).
+/// The section then collapses to its header: the graph and presets would be
+/// controls over a signal path that isn't there.
+#[allow(clippy::too_many_arguments)]
 fn eq_section(
     s: &mut Scene,
     eq: &EqModel,
@@ -258,6 +307,7 @@ fn eq_section(
     on_toggle: Rc<dyn Fn()>,
     on_commit: Rc<dyn Fn()>,
     presets: PresetActions,
+    bypassed: bool,
 ) {
     let enabled = eq.enabled.clone();
     let selected = eq.selected.clone();
@@ -278,15 +328,32 @@ fn eq_section(
         // Header + enable toggle.
         c.row(()).w(Len::Fill).align(Align::Center).child(|h| {
             h.col(()).gap(t::SP_0_5).child(|m| {
-                m.text((), "Equalizer", 14.0).color(t::TEXT);
-                m.text((), "10-band graphic EQ, applied live", t::TEXT_XS)
-                    .color(t::TEXT_DIM);
+                m.text((), "Equalizer", 14.0)
+                    .color(if bypassed { t::TEXT_DIM } else { t::TEXT });
+                m.text(
+                    (),
+                    if bypassed {
+                        "Not applied while Lossless is on"
+                    } else {
+                        "10-band graphic EQ, applied live"
+                    },
+                    t::TEXT_XS,
+                )
+                .color(t::TEXT_DIM);
             });
-            h.row(())
-                .push_end()
-                .align(Align::Center)
-                .child(|ctrl| toggle_switch(ctrl, &enabled, accent, on_toggle));
+            let mut ctrl = h.row(());
+            ctrl.push_end().align(Align::Center);
+            if bypassed {
+                ctrl.opacity(0.45);
+            }
+            ctrl.child(|ctrl| toggle_switch_locked(ctrl, &enabled, accent, on_toggle, bypassed));
         });
+
+        // Collapsed while bypassed — the header alone says the EQ exists and
+        // why it's inert, without a graph inviting edits that do nothing.
+        if bypassed {
+            return;
+        }
 
         // Everything below dims when the EQ is off.
         let dim = Computed::new((enabled.clone(),), |(on,)| if on { 1.0 } else { 0.4 });
@@ -901,18 +968,35 @@ fn blur_row(s: &mut Scene, blur: &Signal<f32>, accent: &Signal<[f32; 4]>, on_com
 /// active one accent-filled. Bitrate is baked into the librespot player
 /// at session start, so a change applies from the next launch — the
 /// caption says so rather than pretending it's instant.
+/// `disabled` greys the row out and drops its click handlers: while the
+/// official client is the playback engine this setting governs nothing
+/// (it configures librespot, which isn't in the path), and a live-looking
+/// control that does nothing is worse than a visibly inert one.
 fn quality_row(
     s: &mut Scene,
     current: crate::prefs::AudioQuality,
     accent: &Signal<[f32; 4]>,
     on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
+    disabled: bool,
 ) {
     use crate::prefs::AudioQuality as Q;
     s.col(()).w(Len::Fill).gap(t::SP_2).child(move |c| {
         c.col(()).gap(t::SP_0_5).child(|m| {
-            m.text((), "Streaming quality", 14.0).color(t::TEXT);
-            m.text((), "Applies on next launch", t::TEXT_XS)
-                .color(t::TEXT_DIM);
+            m.text((), "Streaming quality", 14.0).color(if disabled {
+                t::TEXT_DIM
+            } else {
+                t::TEXT
+            });
+            m.text(
+                (),
+                if disabled {
+                    "Set in the Spotify app while Lossless is on"
+                } else {
+                    "Applies on next launch"
+                },
+                t::TEXT_XS,
+            )
+            .color(t::TEXT_DIM);
         });
         c.row(()).gap(t::SP_2).child(move |row| {
             for (q, label) in [
@@ -926,7 +1010,13 @@ fn quality_row(
                     .pad_xy(t::SP_3_5, t::SP_0)
                     .center()
                     .radius(t::R_FULL);
-                if selected {
+                if disabled {
+                    // Inert: no hover, no click, and the selected chip loses
+                    // its accent so nothing reads as "currently in effect".
+                    chip.color(t::PANEL_HI).opacity(0.45).child(|x| {
+                        x.text((), label, 13.0).color(t::TEXT_DIM);
+                    });
+                } else if selected {
                     chip.color(accent.clone()).child(|x| {
                         x.text((), label, 13.0)
                             .color(crate::widgets::color::accent_fg(accent));
@@ -1123,15 +1213,37 @@ fn setting_row(
     accent: &Signal<[f32; 4]>,
     on_change: Rc<dyn Fn()>,
 ) {
-    s.row(()).w(Len::Fill).align(Align::Center).child(|r| {
-        r.col(()).gap(t::SP_0_5).child(|c| {
-            c.text((), title, t::TEXT_BASE).color(t::TEXT);
-            c.text((), subtitle, t::TEXT_XS).color(t::TEXT_DIM);
+    setting_row_locked(s, title, subtitle, state, accent, on_change, false);
+}
+
+/// [`setting_row`] with a `locked` state: the switch stops accepting clicks
+/// and the whole row dims. Used where a setting can't be acted on right now
+/// — mid-flight work, or a missing prerequisite — so the control reads as
+/// unavailable instead of silently ignoring the user.
+fn setting_row_locked(
+    s: &mut Scene,
+    title: &str,
+    subtitle: &str,
+    state: &Signal<bool>,
+    accent: &Signal<[f32; 4]>,
+    on_change: Rc<dyn Fn()>,
+    locked: bool,
+) {
+    s.row(()).w(Len::Fill).align(Align::Center).child(move |r| {
+        // Fill (not content-sized): the label column takes what's left after
+        // the switch, so a long subtitle wraps inside the panel instead of
+        // widening the row and pushing the switch past its edge.
+        r.col(()).w(Len::Fill).gap(t::SP_0_5).child(|c| {
+            c.text((), title, t::TEXT_BASE)
+                .color(if locked { t::TEXT_DIM } else { t::TEXT });
+            c.text((), subtitle, t::TEXT_XS).color(t::TEXT_DIM).wrap();
         });
-        r.row(())
-            .push_end()
-            .align(Align::Center)
-            .child(|ctrl| toggle_switch(ctrl, state, accent, on_change));
+        let mut ctrl = r.row(());
+        ctrl.push_end().align(Align::Center);
+        if locked {
+            ctrl.opacity(0.45);
+        }
+        ctrl.child(|ctrl| toggle_switch_locked(ctrl, state, accent, on_change, locked));
     });
 }
 
@@ -1142,11 +1254,14 @@ fn setting_row(
 /// knob (spacer-width bind) and track colour (`Computed` over `knob_t`)
 /// both follow, so the slide + colour fade are one smooth motion with no
 /// scene rebuild. The lib bubbles a click on the knob up to this handler.
-fn toggle_switch(
+/// `locked` drops the click handler entirely, so the knob can't be flipped
+/// and no callback fires.
+fn toggle_switch_locked(
     s: &mut Scene,
     state: &Signal<bool>,
     accent: &Signal<[f32; 4]>,
     on_change: Rc<dyn Fn()>,
+    locked: bool,
 ) {
     let knob_t = Signal::new(if state.get() { TOGGLE_TRAVEL } else { 0.0 });
     let track_col = Computed::new((knob_t.clone(), accent.clone()), |(x, acc)| {
@@ -1155,14 +1270,15 @@ fn toggle_switch(
     });
     let st = state.clone();
     let kt = knob_t.clone();
-    s.row(())
-        .w_px(TOGGLE_W)
+    let mut sw = s.row(());
+    sw.w_px(TOGGLE_W)
         .h_px(TOGGLE_H)
         .radius(t::R_FULL)
         .color(track_col)
         .align(Align::Center)
-        .pad_xy(TOGGLE_PAD, 0.0)
-        .on_click(move |ctx| {
+        .pad_xy(TOGGLE_PAD, 0.0);
+    if !locked {
+        sw.on_click(move |ctx| {
             let now_on = !st.get();
             st.set(now_on);
             on_change();
@@ -1174,20 +1290,21 @@ fn toggle_switch(
                 Duration::from_millis(TOGGLE_MS),
                 ctx.now,
             );
-        })
-        .child(|tr| {
-            // Spacer whose width tracks `knob_t` (0 → TRAVEL), pushing the
-            // knob from the left end to the right as the tween advances.
-            tr.rect(())
-                .width_px_bind(knob_t.clone())
-                .h_px(1.0)
-                .rgba(0.0, 0.0, 0.0, 0.0);
-            tr.rect(())
-                .w_px(TOGGLE_KNOB)
-                .h_px(TOGGLE_KNOB)
-                .radius(t::R_FULL)
-                .rgba(1.0, 1.0, 1.0, 1.0);
         });
+    }
+    sw.child(|tr| {
+        // Spacer whose width tracks `knob_t` (0 → TRAVEL), pushing the
+        // knob from the left end to the right as the tween advances.
+        tr.rect(())
+            .width_px_bind(knob_t.clone())
+            .h_px(1.0)
+            .rgba(0.0, 0.0, 0.0, 0.0);
+        tr.rect(())
+            .w_px(TOGGLE_KNOB)
+            .h_px(TOGGLE_KNOB)
+            .radius(t::R_FULL)
+            .rgba(1.0, 1.0, 1.0, 1.0);
+    });
 }
 
 /// Component-wise linear interpolation between two RGBA colours.

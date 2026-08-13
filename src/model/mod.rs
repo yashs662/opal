@@ -16,6 +16,7 @@
 //!   - [`auth`] — live OAuth session + token accessor.
 //!   - [`backdrop`] — album-art backdrop + accent crossfade.
 //!   - [`canvas`] — Spotify Canvas video decode + dim/hover.
+//!   - [`engine`] — official-client playback engine lifecycle.
 //!   - [`library`] — Home feed data + playlist loading/caching.
 //!   - [`player`] — reactive player-chrome + authoritative snapshot.
 //!   - [`prefs`] — persisted preferences + panel widths + debounced save.
@@ -27,6 +28,7 @@ pub mod auth;
 pub mod backdrop;
 pub mod canvas;
 pub mod devices;
+pub mod engine;
 pub mod eq;
 pub mod library;
 pub mod membership;
@@ -42,6 +44,7 @@ pub use auth::AuthModel;
 pub use backdrop::BackdropModel;
 pub use canvas::CanvasModel;
 pub use devices::DevicesModel;
+pub use engine::{EngineModel, EngineStatus};
 pub use eq::EqModel;
 pub use library::LibraryModel;
 pub use membership::MembershipModel;

@@ -79,6 +79,9 @@ openh264 = "0.9.3"
 subsecond = { version = "0.7.9", optional = true }
 dioxus-devtools = { version = "0.7.9", optional = true }
 souvlaki = "0.8.3"
+# Process discovery for the official-client engine (src/official_app.rs).
+# Already in the tree via librespot, so this pulls in nothing new.
+sysinfo = "0.36"
 
 # OS-native credential stores for keyring-core, one per platform. Registered
 # at startup. NOTE: keyutils on Linux is process/session-scoped and does NOT
@@ -86,6 +89,13 @@ souvlaki = "0.8.3"
 # feature. Swap to a secret-service store crate if reboot-persistence is wanted.
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = "1.1.0"
+# Window/process control for the official-client playback engine
+# (src/official_app.rs). Same major as winit's, so no second copy is built.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
