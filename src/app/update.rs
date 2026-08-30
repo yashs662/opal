@@ -34,24 +34,41 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         Msg::Navigate(nav) => navigate(state, cx, worker, nav),
         Msg::NavBack => crate::views::home::navigate_back(state, cx, worker),
         Msg::NavForward => crate::views::home::navigate_forward(state, cx, worker),
+        Msg::QueueToggle => {
+            if matches!(state.router.nav, crate::views::MainNav::Queue) {
+                // Leave the queue the way it was entered. With no history
+                // behind it (queue opened as the first page) fall back to
+                // the feed rather than dead-ending on the icon.
+                if state.router.can_back.get() {
+                    crate::views::home::navigate_back(state, cx, worker);
+                } else {
+                    navigate(state, cx, worker, crate::views::MainNav::Home);
+                }
+            } else {
+                navigate(state, cx, worker, crate::views::MainNav::Queue);
+            }
+        }
 
         Msg::Transport(action) => {
             // Ignore transport until the Connect session is ready — on cold
             // start there's no device to act on, so an early press would be a
             // silent no-op (the play button shows a loading pulse meanwhile).
-            if !state.player_ui.session_ready.get() {
+            if !state.player_ui.transport_ready() {
                 return;
             }
             let Some(token) = state.auth.token() else {
                 log::warn!("playback action ignored — no auth token");
                 return;
             };
+            // The engine's device, when the hidden client is our player —
+            // lets the worker reclaim it if Spotify dropped it as active.
+            let engine = state.engine.target_device();
             let cmd = match action {
                 PlayerAction::PlayPause => {
                     let was_playing = state.player_ui.toggle_play();
                     let local = state.devices.playing_on_self.get();
                     if was_playing {
-                        worker.playback(token, PlaybackCmd::Pause, local);
+                        worker.playback(token, PlaybackCmd::Pause, local, engine);
                         return;
                     }
                     // Resume. On cold start nothing is actually playing on any
@@ -82,11 +99,12 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                                     context_uri,
                                 }),
                                 false,
+                                engine,
                             );
                             return;
                         }
                     }
-                    worker.playback(token, PlaybackCmd::Play, local);
+                    worker.playback(token, PlaybackCmd::Play, local, engine);
                     return;
                 }
                 PlayerAction::Next => PlaybackCmd::Next,
@@ -100,10 +118,15 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             // Drive our own Spirc directly when Opal is the active device
             // (instant + reliable; the Web API relay to self can go stale).
             let local = state.devices.playing_on_self.get();
-            worker.playback(token, cmd, local);
+            worker.playback(token, cmd, local, engine);
         }
 
         Msg::Play(target) => {
+            // Same gate as `Transport`: no device to load a context onto
+            // until the session (and any startup lossless handover) settles.
+            if !state.player_ui.transport_ready() {
+                return;
+            }
             let Some(token) = state.auth.token() else {
                 log::warn!("play ignored — no auth token");
                 return;
@@ -111,7 +134,12 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             state.player_ui.is_playing.set(true);
             // PlayContext is a context load, not a transport verb — it always
             // takes the Web API path, so `false` here is the documented default.
-            worker.playback(token, PlaybackCmd::PlayContext(target), false);
+            worker.playback(
+                token,
+                PlaybackCmd::PlayContext(target),
+                false,
+                state.engine.target_device(),
+            );
         }
 
         Msg::RequestCover(url) => state.art.dispatch_cover(worker, url),
@@ -415,6 +443,18 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             }
         }
 
+        Msg::ToggleLosslessWindow => {
+            // The toggle already flipped the signal. Publish the policy, then
+            // let the worker apply it to the live window off the UI thread
+            // (the `EnumWindows` scan + `ShowWindow` must not run on the
+            // frame). The engine's periodic tick keeps it there.
+            let on = state.settings.lossless_window.get();
+            crate::official_app::set_show_window(on);
+            state.prefs.data.audio.lossless_show_window = on;
+            state.prefs.mark_dirty(cx.now);
+            worker.apply_engine_window();
+        }
+
         Msg::BackdropBlurCommitted => {
             state.prefs.data.backdrop_blur = state.backdrop.blur.get();
             state.prefs.mark_dirty(cx.now);
@@ -532,7 +572,8 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             state.search.overlay.morph_close(cx.tl, cx.now);
             match entry.kind.as_str() {
                 "track" => {
-                    if let Some(token) = state.auth.token() {
+                    let ready = state.player_ui.transport_ready();
+                    if let Some(token) = state.auth.token().filter(|_| ready) {
                         state.player_ui.is_playing.set(true);
                         worker.playback(
                             token,
@@ -541,6 +582,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                                 offset: 0,
                             }),
                             false,
+                            state.engine.target_device(),
                         );
                     }
                     cx.rebuild();
@@ -587,14 +629,23 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             }
             cx.rebuild();
         }
-        Msg::Skip(count) => {
+        Msg::QueueJump(index) => {
             let Some(token) = state.auth.token() else {
                 return;
             };
-            // Local (Spirc) skip when Opal is the active device — instant +
-            // reliable; else repeated Web API next on the remote device.
-            let local = state.devices.playing_on_self.get();
-            worker.skip_forward(token, count, local);
+            let Some(entry) = state.library.queue.as_ref().and_then(|q| q.get(index)) else {
+                return;
+            };
+            // `local` = Opal's own Spirc is the player, the one case the
+            // connect-state command can't serve (see `spawn_queue_jump`).
+            worker.queue_jump(
+                token,
+                state.devices.active_id.clone(),
+                entry.track.uri.clone(),
+                entry.uid.clone(),
+                index as u32,
+                state.devices.playing_on_self.get(),
+            );
         }
 
         Msg::OpenContextMenu { pos, target } => {

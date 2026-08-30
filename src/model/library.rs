@@ -105,7 +105,7 @@ pub struct LibraryModel {
     /// The active device's play queue (currently playing first), for the
     /// queue page. `None` = not loaded / loading; refetched on every
     /// open (live state, no cache).
-    pub queue: Option<Vec<PlaylistTrack>>,
+    pub queue: Option<Vec<crate::api::QueueEntry>>,
     /// Skeleton-row pulse opacity, ping-pong tweened while the open
     /// detail page is still streaming (driven by `app::frame::tick`).
     pub skeleton_pulse: Signal<f32>,

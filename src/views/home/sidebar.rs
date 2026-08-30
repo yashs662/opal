@@ -253,20 +253,5 @@ fn library_row(
 
 /// The signature purple Liked-Songs tile (a gradient stand-in + heart).
 fn liked_thumb(s: &mut Scene, icons: &IconSet, size: f32, radius: f32) {
-    s.col(()).w_px(size).h_px(size).child(|b| {
-        b.rect(())
-            .abs(0.0, 0.0)
-            .w(Len::Fill)
-            .h(Len::Fill)
-            .rgba(0.36, 0.20, 0.78, 1.0)
-            .radius(radius);
-        b.row(())
-            .abs(0.0, 0.0)
-            .w(Len::Fill)
-            .h(Len::Fill)
-            .center()
-            .child(|c| {
-                icons.render(c, Icon::Heart, t::ICON_SM, t::TEXT);
-            });
-    });
+    crate::widgets::thumb::liked_tile(s, icons, size, radius, t::ICON_SM);
 }

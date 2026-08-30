@@ -18,6 +18,7 @@ use crate::api::PlayTarget;
 use crate::views::MainNav;
 use crate::views::home::{NavFn, PlayFn};
 use crate::widgets::icon::IconSet;
+use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
 use crate::widgets::track_row::{TrackRow, TrackRowActions, track_row};
 
@@ -97,31 +98,7 @@ pub fn view(
                 .gap(t::SP_5)
                 .align(Align::End)
                 .child(|hero| {
-                    hero.col(())
-                        .w_px(t::THUMB_2XL)
-                        .h_px(t::THUMB_2XL)
-                        .child(|b| {
-                            if let Some(sig) = data.image.clone() {
-                                b.image_bound((), sig)
-                                    .abs(0.0, 0.0)
-                                    .w(Len::Fill)
-                                    .h(Len::Fill)
-                                    .radius(t::R_FULL)
-                                    .placeholder_fill(t::PLACEHOLDER);
-                            } else {
-                                b.rect(())
-                                    .abs(0.0, 0.0)
-                                    .w(Len::Fill)
-                                    .h(Len::Fill)
-                                    .rgba(
-                                        t::PLACEHOLDER[0],
-                                        t::PLACEHOLDER[1],
-                                        t::PLACEHOLDER[2],
-                                        1.0,
-                                    )
-                                    .radius(t::R_FULL);
-                            }
-                        });
+                    thumb(hero, data.image.clone(), t::THUMB_2XL, t::R_FULL);
                     hero.col(()).gap(t::SP_2).justify(Justify::End).child(|m| {
                         m.text((), "Artist", 12.0).color(t::TEXT_DIM);
                         let title = if data.name.is_empty() && data.loading {

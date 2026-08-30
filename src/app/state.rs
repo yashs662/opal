@@ -104,6 +104,9 @@ impl AppState {
                 context_uri: p.context_uri.clone(),
                 context_name: p.context_name.clone(),
             });
+        // Seed the engine's window policy before anything can start it: the
+        // worker reads it off the UI thread when it acquires the client.
+        crate::official_app::set_show_window(prefs.audio.lossless_show_window);
         Self {
             router: RouterModel::new(),
             auth: AuthModel::new(),
@@ -120,7 +123,11 @@ impl AppState {
                 prefs.audio.volume,
                 restored,
             ),
-            settings: SettingsModel::new(prefs.audio.normalize, prefs.audio.lossless_engine),
+            settings: SettingsModel::new(
+                prefs.audio.normalize,
+                prefs.audio.lossless_engine,
+                prefs.audio.lossless_show_window,
+            ),
             engine: crate::model::EngineModel::new(),
             devices: DevicesModel::new(),
             menu: MenuModel::new(),

@@ -114,6 +114,10 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // back up now that there's a token to find its device with.
             if state.prefs.data.audio.lossless_engine && state.engine.installed {
                 state.engine.status = crate::model::EngineStatus::Starting;
+                // Hold transport (loading overlay on the play button) until
+                // the client registers: until then there is no device to
+                // hand playback to, and a press would land on the wrong one.
+                state.player_ui.engine_pending.set(true);
                 // Never `resume` on a restore: routing audio to the client
                 // is not a request to start playing. Cold start is paused,
                 // and it stays paused.
@@ -231,27 +235,22 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 cx.rebuild();
             }
         }
-        WorkerResponse::QueueLoaded { tracks } => {
-            // Create the reactive cover signals + dispatch fetches HERE
-            // (not in the view build — builds are pure reads of `art`).
-            for tr in &tracks {
-                if let Some(url) = &tr.album_image_url {
-                    state.art.or_signal(album_art::cache_key(url));
-                    state.art.dispatch_cover(worker, url.clone());
-                }
-            }
-            // Cluster context/autoplay entries often arrive as bare uris
-            // (no title/duration/cover) — resolve them in one batched
-            // metadata request; `TracksHydrated` patches the rows in.
-            let bare: Vec<String> = tracks
+        WorkerResponse::QueueLoaded { entries } => {
+            queue_art(state, worker, &entries);
+            // Cluster entries arrive underfilled: context/autoplay ones as
+            // bare uris, and the playing / user-queued ones with a title +
+            // cover but no `duration` / `artist_name` metadata keys (a
+            // permanent "0:00" and a blank artist line). Resolve the lot in
+            // one batched metadata request; `TracksHydrated` patches them in.
+            let bare: Vec<String> = entries
                 .iter()
-                .filter(|t| t.name.is_empty())
-                .map(|t| t.uri.clone())
+                .filter(|e| incomplete(&e.track))
+                .map(|e| e.track.uri.clone())
                 .collect();
             if !bare.is_empty() {
                 worker.hydrate_tracks(bare);
             }
-            state.library.queue = Some(tracks);
+            state.library.queue = Some(entries);
             if matches!(state.router.nav, crate::views::MainNav::Queue) {
                 cx.rebuild();
             }
@@ -263,22 +262,28 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             let Some(queue) = state.library.queue.as_mut() else {
                 return;
             };
-            // Patch resolved rows into the live queue by uri (still-blank
+            // Patch resolved rows into the live queue by uri (incomplete
             // entries only — a fresher QueueLoaded may have landed since).
             let mut patched = false;
-            for row in queue.iter_mut().filter(|r| r.name.is_empty()) {
+            for row in queue
+                .iter_mut()
+                .map(|e| &mut e.track)
+                .filter(|t| incomplete(t))
+            {
                 if let Some(full) = tracks.iter().find(|t| t.uri == row.uri) {
+                    // Never trade a known duration for a zero one.
+                    let known_duration = row.duration_ms;
                     *row = full.clone();
+                    if row.duration_ms == 0 {
+                        row.duration_ms = known_duration;
+                    }
                     patched = true;
                 }
             }
             if patched {
-                for tr in state.library.queue.as_deref().unwrap_or_default() {
-                    if let Some(url) = &tr.album_image_url {
-                        state.art.or_signal(album_art::cache_key(url));
-                        state.art.dispatch_cover(worker, url.clone());
-                    }
-                }
+                let entries = std::mem::take(&mut state.library.queue);
+                queue_art(state, worker, entries.as_deref().unwrap_or_default());
+                state.library.queue = entries;
                 if matches!(state.router.nav, crate::views::MainNav::Queue) {
                     cx.rebuild();
                 }
@@ -389,6 +394,12 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             log::info!("playback routed to the Spotify client: '{device_name}' ({device_id})");
             // Starting → Active: unlocks the toggle and lights the pill.
             state.engine.status = crate::model::EngineStatus::Active;
+            // Remember which device that is — transport re-targets it when
+            // Spotify drops the active device after an idle spell (the
+            // worker re-sends this response if the client came back with a
+            // fresh id).
+            state.engine.device_id = Some(device_id);
+            state.player_ui.engine_pending.set(false);
             // The cluster push from the transfer carries the authoritative
             // state; nothing to sync here beyond letting the UI settle.
             cx.rebuild();
@@ -396,6 +407,10 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         WorkerResponse::LosslessEngineFailed { error } => {
             log::warn!("lossless engine failed: {error}");
             state.engine.status = crate::model::EngineStatus::Off;
+            state.engine.device_id = None;
+            // Release the startup hold — playback falls back to Opal's own
+            // device rather than staying locked behind a dead handover.
+            state.player_ui.engine_pending.set(false);
             // Put the switch back where the truth is — playback is still on
             // whatever device had it.
             state.settings.lossless_engine.set(false);
@@ -406,6 +421,8 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         WorkerResponse::LosslessEngineStopped => {
             log::info!("lossless engine released");
             state.engine.status = crate::model::EngineStatus::Off;
+            state.engine.device_id = None;
+            state.player_ui.engine_pending.set(false);
             cx.rebuild();
         }
         WorkerResponse::SpotifySessionLost => {
@@ -1086,4 +1103,22 @@ fn refresh_artist_card(state: &mut AppState, worker: &Worker, cx: &mut Cx, artis
     }
     state.player_ui.np_about_inflight = Some(artist_id.to_string());
     worker.fetch_artist_card(token, artist_id.to_string());
+}
+
+/// A queue row Spotify shipped without the display metadata the page
+/// needs — worth one batched `TRACK_V4` lookup.
+fn incomplete(t: &crate::api::PlaylistTrack) -> bool {
+    t.name.is_empty() || t.duration_ms == 0 || t.artists.is_empty()
+}
+
+/// Signal + fetch every queue cover. Signals are created HERE (not in the
+/// view build — builds are pure reads of `art`).
+fn queue_art(state: &mut AppState, worker: &Rc<Worker>, entries: &[crate::api::QueueEntry]) {
+    for url in entries
+        .iter()
+        .filter_map(|e| e.track.album_image_url.as_ref())
+    {
+        state.art.or_signal(album_art::cache_key(url));
+        state.art.dispatch_cover(worker, url.clone());
+    }
 }

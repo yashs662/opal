@@ -17,6 +17,7 @@ use crate::model::MenuTarget;
 use crate::views::MainNav;
 use crate::views::home::{CtxMenuFn, NavFn, PlayFn};
 use crate::widgets::icon::{Icon, IconSet};
+use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
 
 const SESSION_H: f32 = t::SP_14;
@@ -150,23 +151,7 @@ fn session(
         }
     }
     row.child(|r| {
-        r.col(()).w_px(t::THUMB_MD).h_px(t::THUMB_MD).child(|b| {
-            if let Some(sig) = sess.thumb.clone() {
-                b.image_bound((), sig)
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .radius(radius)
-                    .placeholder_fill(t::PLACEHOLDER);
-            } else {
-                b.rect(())
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                    .radius(radius);
-            }
-        });
+        thumb(r, sess.thumb.clone(), t::THUMB_MD, radius);
         r.col(())
             .w(Len::Fill)
             .h(Len::Fill)
@@ -226,23 +211,7 @@ fn track(s: &mut Scene, tr: &RecentTrackRow, play: &PlayFn, on_context_menu: &Ct
         .on_click(move |_| play(target.clone()));
     crate::views::home::attach_context_menu(&mut row, on_context_menu, tr.menu.clone());
     row.child(|r| {
-        r.col(()).w_px(t::THUMB_SM).h_px(t::THUMB_SM).child(|b| {
-            if let Some(sig) = tr.thumb.clone() {
-                b.image_bound((), sig)
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .radius(t::R_SM)
-                    .placeholder_fill(t::PLACEHOLDER);
-            } else {
-                b.rect(())
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                    .radius(t::R_SM);
-            }
-        });
+        thumb(r, tr.thumb.clone(), t::THUMB_SM, t::R_SM);
         r.col(())
             .w(Len::Fill)
             .h(Len::Fill)

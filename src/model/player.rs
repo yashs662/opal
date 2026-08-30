@@ -142,8 +142,14 @@ pub struct PlayerModel {
     /// player bar shows a pulsing "loading" play button and swallows clicks
     /// until then, so an early press isn't a silent no-op.
     pub session_ready: Signal<bool>,
+    /// The lossless engine is coming up as part of *startup* restore, so
+    /// playback must not be dispatched yet: the official client is about to
+    /// take the transfer, and a press before it registers either plays on the
+    /// wrong device or is swallowed by the handover. Same overlay as
+    /// `session_ready`, cleared when the engine settles (ready or failed).
+    pub engine_pending: Signal<bool>,
     /// Opacity of the black "loading" overlay (black circle + brand logo) that
-    /// sits over the play button while `!session_ready`. 1 while loading, then
+    /// sits over the play button while transport isn't ready. 1 while loading, then
     /// tweened to 0 so the black background + logo dissolve out together,
     /// revealing the real play/pause button beneath.
     pub loading_fade: Signal<f32>,
@@ -228,6 +234,7 @@ impl PlayerModel {
             snapshot: restored,
             live: false,
             session_ready: Signal::new(false),
+            engine_pending: Signal::new(false),
             // 0 = overlay hidden; armed to 1 on the first loading tick, so a
             // session that's already ready when Home mounts shows no overlay.
             loading_fade: Signal::new(0.0),
@@ -348,6 +355,14 @@ impl PlayerModel {
         }
     }
 
+    /// Transport can act: the Connect session registered (or fell back to the
+    /// Web API) **and** no startup engine handover is still in flight. The
+    /// single predicate behind both the loading overlay and the click guard,
+    /// so they can never disagree.
+    pub fn transport_ready(&self) -> bool {
+        self.session_ready.get() && !self.engine_pending.get()
+    }
+
     /// Nothing playing on any device. Don't wipe the chrome to a dash —
     /// keep the last track visible, just mark stopped and freeze the bar.
     pub fn stopped(&self, tl: &mut Timeline) {
@@ -360,7 +375,7 @@ impl PlayerModel {
     /// session isn't ready yet; park at 1.0 otherwise. Edge-guarded so it
     /// doesn't re-arm (or keep the loop awake) once settled.
     pub fn tick_loading(&mut self, relevant: bool, tl: &mut Timeline, now: Instant) {
-        let loading = relevant && !self.session_ready.get();
+        let loading = relevant && !self.transport_ready();
         if loading == self.loading_anim_on {
             return;
         }

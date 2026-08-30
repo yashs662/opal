@@ -4,7 +4,9 @@
 //! endpoint, librespot included, gets Ogg Vorbis 320 regardless of account
 //! tier. So for lossless, Opal runs the real client with its window hidden
 //! and drives it over Connect like any other device: Opal is the UI, the
-//! official client is the audio pipeline.
+//! official client is the audio pipeline. The hiding is a policy, not a
+//! requirement — see [`set_show_window`] for the "show the Spotify window"
+//! setting.
 //!
 //! Nothing here modifies Spotify. It is process launch plus `ShowWindow` —
 //! the same calls a taskbar utility makes.
@@ -16,6 +18,7 @@
 //! theirs, so we only ever restore the window we hid. See [`Ownership`].
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The engine we're currently holding, if any.
 ///
@@ -29,6 +32,24 @@ static ENGINE: Mutex<Option<EngineState>> = Mutex::new(None);
 /// Whether the engine is currently held (drives the exit hook + UI truth).
 pub fn is_active() -> bool {
     ENGINE.lock().is_ok_and(|g| g.is_some())
+}
+
+/// User policy for the engine's window: hidden (the default — Opal is the
+/// UI) or on screen. Read by [`acquire`] and by the worker's periodic
+/// [`enforce_window_state`] tick, both off the UI thread, so it lives in an
+/// atomic rather than the app state.
+static SHOW_WINDOW: AtomicBool = AtomicBool::new(false);
+
+/// Whether the user asked to see the client's own window.
+pub fn show_window() -> bool {
+    SHOW_WINDOW.load(Ordering::Relaxed)
+}
+
+/// Set the window policy. Takes effect on the next [`enforce_window_state`]
+/// (the worker applies it immediately on a toggle) and on the next
+/// [`acquire`].
+pub fn set_show_window(show: bool) {
+    SHOW_WINDOW.store(show, Ordering::Relaxed);
 }
 
 /// Who started the client, which decides the teardown.
@@ -78,9 +99,9 @@ pub const SUPPORTED: bool = cfg!(windows);
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{ensure_hidden, locate, rehide_if_shown, release};
+pub use windows::{acquire, enforce_window_state, locate, release};
 
 #[cfg(not(windows))]
 mod unsupported;
 #[cfg(not(windows))]
-pub use unsupported::{ensure_hidden, locate, rehide_if_shown, release};
+pub use unsupported::{acquire, enforce_window_state, locate, release};

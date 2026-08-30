@@ -17,6 +17,7 @@ use crate::model::MenuTarget;
 use crate::views::MainNav;
 use crate::views::home::{CtxMenuFn, NavFn, PlayFn};
 use crate::widgets::icon::{Icon, IconSet};
+use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
 
 /// Full-width row height.
@@ -144,23 +145,7 @@ fn show_all_row(
     }
     r.child(|r| {
         // Thumb.
-        r.col(()).w_px(t::THUMB_MD).h_px(t::THUMB_MD).child(|b| {
-            if let Some(sig) = row.thumb.clone() {
-                b.image_bound((), sig)
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .radius(radius)
-                    .placeholder_fill(t::PLACEHOLDER);
-            } else {
-                b.rect(())
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                    .radius(radius);
-            }
-        });
+        thumb(r, row.thumb.clone(), t::THUMB_MD, radius);
         // Title + subtitle.
         r.col(())
             .w(Len::Fill)

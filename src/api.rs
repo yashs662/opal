@@ -2162,11 +2162,32 @@ pub async fn set_track_saved(token: &str, track_id: &str, saved: bool) -> Result
     Err(AuthError::Api(body, Some(status.as_u16())))
 }
 
+/// One entry of the active device's play queue. The `uid` is
+/// connect-state's identity for *this* occurrence of the track (the same
+/// track can sit in the queue twice), and it's what a skip-to-item
+/// command targets. Empty for Web-API-sourced queues — that endpoint
+/// doesn't expose it — in which case the uri identifies the entry.
+#[derive(Clone, Debug)]
+pub struct QueueEntry {
+    pub track: PlaylistTrack,
+    pub uid: String,
+}
+
+/// Is this queue uri a real playable item? Connect-state pads the queue
+/// with non-track markers — `spotify:delimiter` between context loops,
+/// ad/meta entries — which carry no metadata and render as blank "0:00"
+/// rows that no hydration can ever fill.
+pub fn is_playable_queue_uri(uri: &str) -> bool {
+    uri.starts_with("spotify:track:")
+        || uri.starts_with("spotify:episode:")
+        || uri.starts_with("spotify:local:")
+}
+
 /// The active device's play queue: the playing track + what's next, in
 /// order. Never cached — it changes with every skip/enqueue. When
 /// Opal is the active device this still works: Spirc publishes its
 /// queue to connect-state and the endpoint reads from there.
-pub async fn get_queue(token: &str) -> Result<Vec<PlaylistTrack>, AuthError> {
+pub async fn get_queue(token: &str) -> Result<Vec<QueueEntry>, AuthError> {
     #[derive(Deserialize)]
     struct R {
         #[serde(default)]
@@ -2174,11 +2195,25 @@ pub async fn get_queue(token: &str) -> Result<Vec<PlaylistTrack>, AuthError> {
         #[serde(default)]
         queue: Vec<RawTrack>,
     }
-    let r: R = get_json(token, &format!("{API}/me/player/queue"), ttl::NONE).await?;
+    let mut r: R = get_json(token, &format!("{API}/me/player/queue"), ttl::NONE).await?;
+    // The endpoint repeats the playing track as `queue[0]` (undocumented,
+    // and it doesn't when the cluster feeds us the queue instead), which
+    // rendered as the current song sitting under its own "Next up".
+    // Only the leading repeat is dropped — a track legitimately queued
+    // twice further down must stay.
+    if let Some(now) = r.currently_playing.as_ref()
+        && r.queue.first().is_some_and(|t| t.uri == now.uri)
+    {
+        r.queue.remove(0);
+    }
     Ok(r.currently_playing
         .into_iter()
         .chain(r.queue)
-        .map(RawTrack::into_track)
+        .filter(|t| is_playable_queue_uri(&t.uri))
+        .map(|t| QueueEntry {
+            track: t.into_track(),
+            uid: String::new(),
+        })
         .collect())
 }
 

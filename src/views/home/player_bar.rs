@@ -15,7 +15,7 @@ use opal_gfx::{Align, Computed, CursorIcon, Curve, Justify, Len, Scene, Signal};
 use crate::model::{BackdropModel, DevicesModel, MembershipModel, PlayerModel};
 use crate::views::MainNav;
 use crate::views::home::{NavFn, PlayerAction};
-use crate::widgets::color::{accent_fg, accent_hover_color};
+use crate::widgets::color::{accent_fg, toggle_tint};
 use crate::widgets::component::Component;
 use crate::widgets::crossfade::crossfaded_art;
 use crate::widgets::icon::{Icon, IconSet};
@@ -40,6 +40,11 @@ pub struct PlayerBar<'a> {
     pub on_devices_open: Rc<dyn Fn()>,
     /// Queue icon → the queue page.
     pub on_navigate: NavFn,
+    /// Whether the centre pane is showing the queue page — lights the icon
+    /// like the now-playing toggle.
+    pub queue_open: bool,
+    /// Open the queue page, or leave it again when it is already open.
+    pub on_queue_toggle: Rc<dyn Fn()>,
     /// Library-membership slice — fills the heart (Liked OR any playlist),
     /// drives the hover hint, and owns the playlist-picker overlay.
     pub membership: &'a MembershipModel,
@@ -244,7 +249,14 @@ impl Component for PlayerBar<'_> {
                                 // frame tick (`PlayerModel::tick_loading`).
                                 let loading_fade = self.player.loading_fade.clone();
                                 let loading_pulse = self.player.loading_pulse.clone();
-                                tr.row(())
+                                // Play/pause disc with the "loading" state
+                                // stacked over it. One rounded stack, not two
+                                // rounded siblings: stacked circles would each
+                                // anti-alias their own edge and the accent
+                                // would ring the black disc. The group rounds
+                                // once at composite (see `Scene::stack`), so
+                                // the children draw square and blend cleanly.
+                                tr.stack(())
                                     .w_px(t::SP_9)
                                     .h_px(t::SP_9)
                                     .color(self.backdrop.accent.clone())
@@ -257,18 +269,14 @@ impl Component for PlayerBar<'_> {
                                             .w_px(t::SP_4)
                                             .h_px(t::SP_4)
                                             .color(accent_fg(&self.backdrop.accent));
-                                    })
-                                    // Black "loading" disc + breathing brand logo
-                                    // over the play button while the session comes
-                                    // up; dissolves out (revealing play/pause)
-                                    // once ready. Clicks fall through to the row's
-                                    // `on_click` (gated in `app::update`).
-                                    .child(|ov| {
-                                        ov.row(())
-                                            .abs(0.0, 0.0)
-                                            .w_px(t::SP_9)
-                                            .h_px(t::SP_9)
-                                            .radius(t::R_FULL)
+                                        // Black "loading" disc + breathing brand
+                                        // logo over the play button while the
+                                        // session (or a startup lossless
+                                        // handover) comes up; dissolves out once
+                                        // ready. Clicks fall through to the
+                                        // group's `on_click` (gated in
+                                        // `app::update`).
+                                        p.stack(())
                                             .rgba(0.0, 0.0, 0.0, 1.0)
                                             .center()
                                             .opacity_bind(loading_fade)
@@ -330,22 +338,7 @@ impl Component for PlayerBar<'_> {
                         // Now-playing pane toggle — accent-lit while the
                         // pane is open, so the state reads at a glance.
                         let np_hover = Signal::new(false);
-                        let np_tint = Computed::new(
-                            (
-                                np_hover.clone(),
-                                self.np_open.clone(),
-                                self.backdrop.accent.clone(),
-                            ),
-                            |(h, open, acc)| {
-                                if h {
-                                    accent_hover_color(&acc)
-                                } else if open {
-                                    acc
-                                } else {
-                                    t::TEXT_DIM
-                                }
-                            },
-                        );
+                        let np_tint = toggle_tint(&np_hover, self.np_open, &self.backdrop.accent);
                         let on_np = self.on_np_toggle.clone();
                         icon_btn(
                             r,
@@ -357,40 +350,24 @@ impl Component for PlayerBar<'_> {
                         );
                         // Queue page.
                         let q_hover = Signal::new(false);
-                        let q_tint = Computed::new(
-                            (q_hover.clone(), self.backdrop.accent.clone()),
-                            |(h, acc)| {
-                                if h {
-                                    accent_hover_color(&acc)
-                                } else {
-                                    t::TEXT_DIM
-                                }
-                            },
+                        let q_tint = toggle_tint(
+                            &q_hover,
+                            &Signal::new(self.queue_open),
+                            &self.backdrop.accent,
                         );
-                        let nav = self.on_navigate.clone();
-                        icon_btn(r, icons, Icon::Queue, q_tint.into(), q_hover, move |ctx| {
-                            nav(ctx, MainNav::Queue)
+                        let on_queue = self.on_queue_toggle.clone();
+                        icon_btn(r, icons, Icon::Queue, q_tint.into(), q_hover, move |_| {
+                            on_queue()
                         });
                         // Devices popup — accent-lit only when another device
                         // is the active player (Spotify's "connected to a
                         // device" cue); plain while Opal itself plays or
                         // nothing is active.
                         let dev_hover = Signal::new(false);
-                        let dev_tint = Computed::new(
-                            (
-                                dev_hover.clone(),
-                                self.devices.remote_active.clone(),
-                                self.backdrop.accent.clone(),
-                            ),
-                            |(h, remote, acc)| {
-                                if h {
-                                    accent_hover_color(&acc)
-                                } else if remote {
-                                    acc
-                                } else {
-                                    t::TEXT_DIM
-                                }
-                            },
+                        let dev_tint = toggle_tint(
+                            &dev_hover,
+                            &self.devices.remote_active,
+                            &self.backdrop.accent,
                         );
                         let dev_overlay = self.devices.overlay.clone();
                         let on_devices_open = self.on_devices_open.clone();

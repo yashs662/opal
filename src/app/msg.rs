@@ -66,6 +66,9 @@ pub enum Msg {
     /// Step back / forward through the nav history (top-bar arrows).
     NavBack,
     NavForward,
+    /// Player-bar queue icon — opens the queue page, or leaves it again
+    /// (back to the previous page) when it is already open.
+    QueueToggle,
     /// A transport control from the player bar (play/pause, next, shuffle, …).
     Transport(PlayerAction),
     /// Start playback of a resolved context (tile / row click).
@@ -104,6 +107,9 @@ pub enum Msg {
     /// "Lossless (Spotify client)" flipped — start or stop the hidden
     /// official client as the playback engine.
     ToggleLosslessEngine,
+    /// "Show the Spotify window" flipped — show or re-hide the engine's
+    /// own window.
+    ToggleLosslessWindow,
     /// The backdrop-blur slider was released — persist the signal's value
     /// (the drag itself already retuned the glass live via the blur bind).
     BackdropBlurCommitted,
@@ -135,8 +141,9 @@ pub enum Msg {
     SearchClearHistory(Option<usize>),
     /// Expand/collapse a Recents session group (by its stable key).
     ToggleRecentSession(String),
-    /// Skip forward `count` tracks (queue "play this next-N").
-    Skip(u32),
+    /// Play the queue entry at `index` (0 = the playing track), consuming
+    /// the entries before it — the queue page's row click.
+    QueueJump(usize),
     /// Open the track-row right-click menu at `pos` (logical px).
     OpenContextMenu {
         pos: [f32; 2],

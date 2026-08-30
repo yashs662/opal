@@ -2,6 +2,7 @@
 
 use opal_gfx::{ImageHandle, Len, Scene, Signal};
 
+use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
 
 /// Renders the resolved cover when the signal carries `Some(handle)`
@@ -31,4 +32,20 @@ pub fn thumb(s: &mut Scene, art: Option<Signal<Option<ImageHandle>>>, size: f32,
             }
         }
     });
+}
+
+/// The signature purple Liked-Songs tile — a gradient stand-in with a
+/// centred heart, at whatever size the caller's list/hero needs. A rounded
+/// `stack`, so the heart rides *inside* the group's single rounded corner
+/// instead of the tile's corner anti-aliasing against a sibling.
+pub fn liked_tile(s: &mut Scene, icons: &IconSet, size: f32, radius: f32, icon_px: f32) {
+    s.stack(())
+        .w_px(size)
+        .h_px(size)
+        .radius(radius)
+        .rgba(0.36, 0.20, 0.78, 1.0)
+        .center()
+        .child(|b| {
+            icons.render(b, Icon::Heart, icon_px, t::TEXT);
+        });
 }

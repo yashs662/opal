@@ -10,7 +10,7 @@ use librespot_protocol::player::ProvidedTrack;
 use log::{debug, info, warn};
 use protobuf::Message as _;
 
-use crate::api::{CurrentlyPlaying, PlaylistTrack, RepeatMode, TrackArtist};
+use crate::api::{CurrentlyPlaying, PlaylistTrack, QueueEntry, RepeatMode, TrackArtist};
 
 /// Drain the dealer `hm://connect-state/v1/cluster` subscription forever,
 /// emitting our domain `CurrentlyPlaying` (plus the active device's
@@ -38,13 +38,7 @@ use crate::api::{CurrentlyPlaying, PlaylistTrack, RepeatMode, TrackArtist};
 /// dead transport.
 pub async fn run<F>(mut sub: Subscription, mut on_update: F)
 where
-    F: FnMut(
-        Option<CurrentlyPlaying>,
-        Option<f32>,
-        Option<String>,
-        Option<Vec<PlaylistTrack>>,
-        bool,
-    ),
+    F: FnMut(Option<CurrentlyPlaying>, Option<f32>, Option<String>, Option<Vec<QueueEntry>>, bool),
 {
     info!("cluster listener started — awaiting connect-state pushes");
     // Hash of the last emitted queue (revision + track uris) — see the
@@ -134,7 +128,11 @@ where
             if let Some(now) = state.track.as_ref() {
                 now.uri.hash(&mut h);
             }
-            for t in &state.next_tracks {
+            for t in state
+                .next_tracks
+                .iter()
+                .filter(|t| crate::api::is_playable_queue_uri(&t.uri))
+            {
                 t.uri.hash(&mut h);
                 t.metadata.get("title").hash(&mut h);
                 t.metadata.get("duration").hash(&mut h);
@@ -145,9 +143,22 @@ where
             last_queue_sig = Some(signature);
             let mut q = Vec::with_capacity(1 + state.next_tracks.len());
             if let Some(now) = state.track.as_ref() {
-                q.push(provided_to_track(now));
+                let mut e = provided_to_entry(now);
+                // The playing entry's metadata often omits `duration` —
+                // the player_state carries it instead (same value the
+                // transport bar uses).
+                if e.track.duration_ms == 0 && state.duration > 0 {
+                    e.track.duration_ms = state.duration as u64;
+                }
+                q.push(e);
             }
-            q.extend(state.next_tracks.iter().map(provided_to_track));
+            q.extend(
+                state
+                    .next_tracks
+                    .iter()
+                    .filter(|t| crate::api::is_playable_queue_uri(&t.uri))
+                    .map(provided_to_entry),
+            );
             info!("  -> cluster queue: {} tracks (content changed)", q.len());
             Some(q)
         } else {
@@ -165,11 +176,11 @@ where
 }
 
 /// Map a connect-state `ProvidedTrack` (a queue entry) to our domain
-/// [`PlaylistTrack`]. Mirrors the metadata-key reading in
+/// [`QueueEntry`]. Mirrors the metadata-key reading in
 /// [`into_currently_playing`]; the artist *name* is in the metadata but the
 /// artist *id* only as `artist_uri` (so the clickable line resolves the
 /// first artist; later artists get a name but no id until detail-fetched).
-fn provided_to_track(pt: &ProvidedTrack) -> PlaylistTrack {
+fn provided_to_entry(pt: &ProvidedTrack) -> QueueEntry {
     let md = &pt.metadata;
     let name = md.get("title").cloned().unwrap_or_default();
     let artist_id = id_from_uri(&pt.artist_uri);
@@ -193,18 +204,21 @@ fn provided_to_track(pt: &ProvidedTrack) -> PlaylistTrack {
         .unwrap_or_default()
         .to_string();
 
-    PlaylistTrack {
-        id,
-        uri: pt.uri.clone(),
-        name,
-        artist,
-        album: String::new(),
-        album_image_url,
-        duration_ms,
-        artists,
-        album_id,
-        artist_id,
-        playable: true,
+    QueueEntry {
+        track: PlaylistTrack {
+            id,
+            uri: pt.uri.clone(),
+            name,
+            artist,
+            album: String::new(),
+            album_image_url,
+            duration_ms,
+            artists,
+            album_id,
+            artist_id,
+            playable: true,
+        },
+        uid: pt.uid.clone(),
     }
 }
 

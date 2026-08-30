@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 const WINDOW_WAIT: Duration = Duration::from_secs(20);
 const WINDOW_POLL: Duration = Duration::from_millis(250);
 
-use super::{ENGINE, EngineState, Ownership, Restore};
+use super::{ENGINE, EngineState, Ownership, Restore, show_window};
 
 /// Where the desktop client lives. The Microsoft Store build lands in
 /// `WindowsApps` under a versioned package dir and is launched through its
@@ -162,7 +162,8 @@ fn pids() -> Vec<u32> {
         .collect()
 }
 
-/// Bring the engine up, whatever state it's in, and hide its window.
+/// Bring the engine up, whatever state it's in, and put its window in the
+/// state [`show_window`] asks for (hidden by default).
 ///
 /// The four cases, all reachable in normal use:
 /// - **not running** → launch, wait for the window, hide it (`Launched`)
@@ -172,7 +173,7 @@ fn pids() -> Vec<u32> {
 /// - **running, no window yet** (mid-startup) → wait for it, then hide
 ///
 /// Returns the state the worker must hold to undo this later.
-pub fn ensure_hidden() -> Result<EngineState, String> {
+pub fn acquire() -> Result<EngineState, String> {
     let already_running = is_running();
 
     if !already_running {
@@ -205,11 +206,16 @@ pub fn ensure_hidden() -> Result<EngineState, String> {
     if already_running && win::main_window(false).is_some() {
         let state = match win::main_window(true) {
             Some(h) => {
-                win::hide(h);
-                log::info!("official client hidden ({ownership:?})");
+                let hidden_by_us = !show_window();
+                if hidden_by_us {
+                    win::hide(h);
+                    log::info!("official client hidden ({ownership:?})");
+                } else {
+                    log::info!("official client adopted, window left on screen ({ownership:?})");
+                }
                 EngineState {
                     ownership,
-                    hidden_by_us: true,
+                    hidden_by_us,
                 }
             }
             None => {
@@ -222,6 +228,11 @@ pub fn ensure_hidden() -> Result<EngineState, String> {
                 log::info!(
                     "official client running but hidden — orphan from a previous session, claiming it"
                 );
+                if show_window()
+                    && let Some(h) = win::main_window(false)
+                {
+                    win::show(h);
+                }
                 EngineState {
                     ownership: Ownership::Launched,
                     hidden_by_us: false,
@@ -247,11 +258,17 @@ pub fn ensure_hidden() -> Result<EngineState, String> {
 
     match hwnd {
         Some(h) => {
-            win::hide(h);
-            log::info!("official client hidden ({ownership:?})");
+            let hidden_by_us = !show_window();
+            if hidden_by_us {
+                win::hide(h);
+                log::info!("official client hidden ({ownership:?})");
+            } else {
+                win::show(h);
+                log::info!("official client up, window left on screen ({ownership:?})");
+            }
             let state = EngineState {
                 ownership,
-                hidden_by_us: true,
+                hidden_by_us,
             };
             *ENGINE.lock().unwrap() = Some(state);
             Ok(state)
@@ -277,7 +294,7 @@ pub fn ensure_hidden() -> Result<EngineState, String> {
     }
 }
 
-/// Undo [`ensure_hidden`]: bring back a window we hid, and close a process we
+/// Undo [`acquire`]: bring back a window we hid, and close a process we
 /// started. A client the user was already running keeps running.
 ///
 /// Idempotent — releasing when nothing is held does nothing, so the exit
@@ -324,18 +341,51 @@ pub fn release(restore: Restore) {
     }
 }
 
-/// Re-hide a window that came back on its own — an update prompt, a
-/// `spotify:` link handoff, or the user clicking the tray icon. Called from
-/// the worker's periodic tick while the engine is active. Cheap: one
-/// `EnumWindows` pass, and it no-ops unless a *visible* window exists.
-pub fn rehide_if_shown() -> bool {
-    match win::main_window(true) {
-        Some(h) => {
-            log::debug!("official client re-showed its window — hiding again");
-            win::hide(h);
-            true
+/// Drive the client's window to whatever [`show_window`] currently asks
+/// for, and report whether anything had to move.
+///
+/// Two jobs, one `EnumWindows` pass: re-hide a window that came back on its
+/// own (an update prompt, a `spotify:` link handoff, a tray-icon click) and
+/// apply a flip of the "show the Spotify window" setting. Called from the
+/// worker's periodic tick while the engine is active, and once directly on
+/// a toggle so the change is immediate. No-ops when the window already
+/// matches the policy.
+pub fn enforce_window_state() -> bool {
+    if show_window() {
+        // Only a *hidden* window needs acting on; `main_window(true)` is the
+        // visible-only scan, so "has a window but not a visible one" is the
+        // one case to fix.
+        if win::main_window(true).is_some() {
+            return false;
         }
-        None => false,
+        match win::main_window(false) {
+            Some(h) => {
+                log::debug!("showing the official client's window");
+                win::show(h);
+                // We no longer owe the user a re-show on release.
+                if let Ok(mut g) = ENGINE.lock()
+                    && let Some(state) = g.as_mut()
+                {
+                    state.hidden_by_us = false;
+                }
+                true
+            }
+            None => false,
+        }
+    } else {
+        match win::main_window(true) {
+            Some(h) => {
+                log::debug!("official client window on screen — hiding it");
+                win::hide(h);
+                if let Ok(mut g) = ENGINE.lock()
+                    && let Some(state) = g.as_mut()
+                {
+                    state.hidden_by_us = true;
+                }
+                true
+            }
+            None => false,
+        }
     }
 }
 

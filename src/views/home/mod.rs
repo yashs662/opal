@@ -266,6 +266,7 @@ pub struct HomeView {
     on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
     on_normalize: Rc<dyn Fn()>,
     on_lossless_engine: Rc<dyn Fn()>,
+    on_lossless_window: Rc<dyn Fn()>,
     on_blur_commit: Rc<dyn Fn()>,
     /// EQ settings: band-drag release (persist), enable toggle, preset
     /// apply (by index), save-current-as-custom.
@@ -277,11 +278,13 @@ pub struct HomeView {
     on_eq_delete: Rc<dyn Fn(usize)>,
     on_eq_rename_start: Rc<dyn Fn(usize)>,
     on_eq_rename_commit: Rc<dyn Fn(usize)>,
-    on_skip: Rc<dyn Fn(u32)>,
+    on_queue_jump: Rc<dyn Fn(usize)>,
     on_context_menu: CtxMenuFn,
     on_add_queue: Rc<dyn Fn(String)>,
     on_menu_close: Rc<dyn Fn()>,
     on_np_toggle: Rc<dyn Fn()>,
+    /// Player-bar queue icon — open the queue page, or leave it again.
+    on_queue_toggle: Rc<dyn Fn()>,
     /// Open the like picker targeted at an arbitrary track (row hearts +
     /// the context menu's "Add to playlist…").
     on_like_for: LikeForFn,
@@ -363,6 +366,10 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::ToggleLosslessEngine))
         };
+        let on_lossless_window: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::ToggleLosslessWindow))
+        };
         let on_blur_commit: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::BackdropBlurCommitted))
@@ -399,9 +406,9 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move |i| dispatch.send(Msg::EqCommitRename(i)))
         };
-        let on_skip: Rc<dyn Fn(u32)> = {
+        let on_queue_jump: Rc<dyn Fn(usize)> = {
             let dispatch = dispatch.clone();
-            Rc::new(move |count| dispatch.send(Msg::Skip(count)))
+            Rc::new(move |index| dispatch.send(Msg::QueueJump(index)))
         };
         let on_context_menu: CtxMenuFn = {
             let dispatch = dispatch.clone();
@@ -424,6 +431,10 @@ impl HomeView {
         let on_np_toggle: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::NowPlayingToggle))
+        };
+        let on_queue_toggle: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::QueueToggle))
         };
         let on_like_for: LikeForFn = {
             let dispatch = dispatch.clone();
@@ -513,6 +524,7 @@ impl HomeView {
             on_quality,
             on_normalize,
             on_lossless_engine,
+            on_lossless_window,
             on_blur_commit,
             on_eq_commit,
             on_eq_toggle,
@@ -522,11 +534,12 @@ impl HomeView {
             on_eq_delete,
             on_eq_rename_start,
             on_eq_rename_commit,
-            on_skip,
+            on_queue_jump,
             on_context_menu,
             on_add_queue,
             on_menu_close,
             on_np_toggle,
+            on_queue_toggle,
             on_like_for,
             on_show_all_library,
             on_nav_back,
@@ -693,6 +706,8 @@ impl HomeView {
             on_like_open: self.on_like_open.clone(),
             np_open: &state.prefs.now_playing_open,
             on_np_toggle: self.on_np_toggle.clone(),
+            queue_open: matches!(nav, MainNav::Queue),
+            on_queue_toggle: self.on_queue_toggle.clone(),
             icons,
         };
         let sidebar = sidebar::Sidebar {
@@ -726,8 +741,9 @@ impl HomeView {
             recents: recents_data.as_ref(),
             on_toggle_recent: self.on_toggle_recent.clone(),
             queue: queue_ref.as_deref(),
+            membership: &state.membership,
             pulse: &state.library.skeleton_pulse,
-            on_skip: self.on_skip.clone(),
+            on_queue_jump: self.on_queue_jump.clone(),
             on_context_menu: self.on_context_menu.clone(),
             main_t: &state.router.main_t,
             detail_collapse: &state.router.detail_collapse,
@@ -767,6 +783,7 @@ impl HomeView {
             on_quality: self.on_quality.clone(),
             on_normalize: self.on_normalize.clone(),
             on_lossless_engine: self.on_lossless_engine.clone(),
+            on_lossless_window: self.on_lossless_window.clone(),
             engine: &state.engine,
             on_blur_commit: self.on_blur_commit.clone(),
             eq: &state.eq,

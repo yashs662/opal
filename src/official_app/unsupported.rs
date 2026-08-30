@@ -13,12 +13,12 @@ pub fn locate() -> Option<PathBuf> {
     None
 }
 
-pub fn ensure_hidden() -> Result<EngineState, String> {
+pub fn acquire() -> Result<EngineState, String> {
     Err("the Spotify-client engine is only supported on Windows".to_string())
 }
 
 pub fn release(_restore: Restore) {}
 
-pub fn rehide_if_shown() -> bool {
+pub fn enforce_window_state() -> bool {
     false
 }

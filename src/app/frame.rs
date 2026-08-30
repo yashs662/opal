@@ -185,7 +185,12 @@ pub fn tick(
         && let Some(token) = state.auth.token()
     {
         let local = state.devices.playing_on_self.get();
-        worker.playback(token, crate::worker::PlaybackCmd::Seek(ms), local);
+        worker.playback(
+            token,
+            crate::worker::PlaybackCmd::Seek(ms),
+            local,
+            state.engine.target_device(),
+        );
     }
     // Proactively refresh the access token before it expires — a long
     // listening session must never start 401-ing mid-flight. Two Cell

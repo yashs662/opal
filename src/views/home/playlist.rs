@@ -575,42 +575,11 @@ fn cover_art(
     art: Option<Signal<Option<ImageHandle>>>,
     liked: bool,
 ) {
-    s.col(()).w_px(t::THUMB_2XL).h_px(t::THUMB_2XL).child(|b| {
-        if liked {
-            b.rect(())
-                .abs(0.0, 0.0)
-                .w(Len::Fill)
-                .h(Len::Fill)
-                .rgba(0.36, 0.20, 0.78, 1.0)
-                .radius(t::R_LG);
-            b.row(())
-                .abs(0.0, 0.0)
-                .w(Len::Fill)
-                .h(Len::Fill)
-                .center()
-                .child(|c| {
-                    icons.render(c, Icon::Heart, t::ICON_XL, t::TEXT);
-                });
-            return;
-        }
-        // One node — the cover paints its own rounded loading fill, no rect
-        // stacked behind it to leak through the corner.
-        if let Some(sig) = art {
-            b.image_bound((), sig)
-                .abs(0.0, 0.0)
-                .w(Len::Fill)
-                .h(Len::Fill)
-                .radius(t::R_LG)
-                .placeholder_fill(t::PLACEHOLDER);
-        } else {
-            b.rect(())
-                .abs(0.0, 0.0)
-                .w(Len::Fill)
-                .h(Len::Fill)
-                .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                .radius(t::R_LG);
-        }
-    });
+    if liked {
+        crate::widgets::thumb::liked_tile(s, icons, t::THUMB_2XL, t::R_LG, t::ICON_XL);
+    } else {
+        crate::widgets::thumb::thumb(s, art, t::THUMB_2XL, t::R_LG);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

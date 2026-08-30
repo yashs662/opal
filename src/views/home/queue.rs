@@ -11,28 +11,30 @@ use std::rc::Rc;
 
 use opal_gfx::{Align, CursorIcon, Justify, Len, Overflow, Scene, Signal};
 
-use crate::api::PlaylistTrack;
+use crate::api::{PlaylistTrack, QueueEntry};
 use crate::model::ArtModel;
 use crate::views::home::{CtxMenuFn, NavFn};
 use crate::widgets::icon::IconSet;
+use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
 
 /// Full-width row height (matches the show-all rows).
 const ROW_H: f32 = t::SP_14;
 
 /// Render the queue page into `s` (the caller's transition wrapper).
-/// `queue = None` → still loading (pulsing placeholder rows). `on_skip(n)`
-/// skips forward `n` tracks — clicking the N-th up-next row plays it
-/// (consuming the ones before it, like Spotify's own "click in queue").
+/// `queue = None` → still loading (pulsing placeholder rows).
+/// `on_queue_jump(i)` plays the i-th entry, consuming the ones before it
+/// — Spotify's own "click in queue" semantics.
 #[allow(clippy::too_many_arguments)]
 pub fn view(
     s: &mut Scene,
     icons: &Rc<IconSet>,
-    queue: Option<&[PlaylistTrack]>,
+    queue: Option<&[QueueEntry]>,
+    membership: &crate::model::MembershipModel,
     art: &ArtModel,
     pulse: &Signal<f32>,
     on_navigate: NavFn,
-    on_skip: Rc<dyn Fn(u32)>,
+    on_queue_jump: Rc<dyn Fn(usize)>,
     on_context_menu: CtxMenuFn,
     on_like: crate::views::home::LikeForFn,
     accent: Signal<[f32; 4]>,
@@ -69,14 +71,15 @@ pub fn view(
                         e.text((), "Nothing queued", 14.0).color(t::TEXT_DIM);
                     });
                 }
-                Some(tracks) => {
-                    let mut it = tracks.iter().enumerate();
+                Some(entries) => {
+                    let mut it = entries.iter().enumerate();
                     if let Some((_, now)) = it.next() {
                         section_label(c, "Now playing");
                         queue_row(
                             c,
                             icons,
-                            now,
+                            &now.track,
+                            membership,
                             art,
                             None,
                             &on_context_menu,
@@ -86,17 +89,15 @@ pub fn view(
                         );
                     }
                     section_label(c, "Next up");
-                    for (i, tr) in it {
-                        // Clicking the i-th item (1-based from the playing
-                        // track) skips forward `i` tracks to reach it.
-                        let on_skip = on_skip.clone();
-                        let n = i as u32;
+                    for (i, e) in it {
+                        let on_queue_jump = on_queue_jump.clone();
                         queue_row(
                             c,
                             icons,
-                            tr,
+                            &e.track,
+                            membership,
                             art,
-                            Some(Rc::new(move || on_skip(n))),
+                            Some(Rc::new(move || on_queue_jump(i))),
                             &on_context_menu,
                             &nav_rows,
                             &on_like,
@@ -120,13 +121,14 @@ fn section_label(s: &mut Scene, label: &str) {
 }
 
 /// One queue row: thumb + title/artist + heart + duration. Up-next rows
-/// are clickable (`on_click` skips to them); all rows render at full
+/// are clickable (`on_click` jumps to them); all rows render at full
 /// opacity.
 #[allow(clippy::too_many_arguments)]
 fn queue_row(
     s: &mut Scene,
     icons: &Rc<IconSet>,
     tr: &PlaylistTrack,
+    membership: &crate::model::MembershipModel,
     art: &ArtModel,
     on_click: Option<Rc<dyn Fn()>>,
     on_context_menu: &CtxMenuFn,
@@ -160,23 +162,7 @@ fn queue_row(
         crate::model::MenuTarget::for_track(tr),
     );
     row.child(|r| {
-        r.col(()).w_px(t::THUMB_MD).h_px(t::THUMB_MD).child(|b| {
-            if let Some(sig) = cover {
-                b.image_bound((), sig)
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .radius(t::R_SM)
-                    .placeholder_fill(t::PLACEHOLDER);
-            } else {
-                b.rect(())
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                    .radius(t::R_SM);
-            }
-        });
+        thumb(r, cover, t::THUMB_MD, t::R_SM);
         r.col(())
             .w(Len::Fill)
             .h(Len::Fill)
@@ -199,6 +185,9 @@ fn queue_row(
         // Trailing group: heart (opens the like picker for this row) +
         // duration — the shared affordance every flat list carries.
         let heart_track = tr.clone();
+        // Same `is_saved` (liked ∪ playlist membership) every other list's
+        // heart reads — the queue used to hardcode "unsaved".
+        let saved = membership.is_saved(&tr.uri);
         let duration = crate::views::home::playlist::fmt_duration(tr.duration_ms);
         let icons = icons.clone();
         let accent = accent.clone();
@@ -213,7 +202,7 @@ fn queue_row(
                     &icons,
                     &accent,
                     heart_track,
-                    false,
+                    saved,
                     on_like,
                 );
                 end.row(()).w_px(t::SP_10).justify(Justify::End).child(|d| {

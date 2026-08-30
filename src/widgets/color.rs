@@ -120,6 +120,29 @@ pub fn accent_hover_color(a: &[f32; 4]) -> [f32; 4] {
     [c[0], c[1], c[2], a[3]]
 }
 
+/// Tint for an accent-lit icon toggle: hover brightens (see
+/// [`accent_hover_color`]), the plain accent marks the "on" state, and
+/// everything else rests dim. Shared by every player-bar toggle so the
+/// three states stay identical across them.
+pub fn toggle_tint(
+    hover: &Signal<bool>,
+    lit: &Signal<bool>,
+    accent: &Signal<[f32; 4]>,
+) -> Computed<[f32; 4]> {
+    Computed::new(
+        (hover.clone(), lit.clone(), accent.clone()),
+        |(h, on, acc)| {
+            if h {
+                accent_hover_color(&acc)
+            } else if on {
+                acc
+            } else {
+                crate::widgets::tokens::TEXT_DIM
+            }
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

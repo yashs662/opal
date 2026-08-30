@@ -23,6 +23,14 @@ pub enum EngineStatus {
 
 pub struct EngineModel {
     pub status: EngineStatus,
+    /// The client's Connect device id, learned when it registered. Kept
+    /// because "which device plays" decays: after a long idle Spotify drops
+    /// the active device, and a transport command then 404s
+    /// `NO_ACTIVE_DEVICE` even though the engine is right there, holding the
+    /// audio pipeline. With the id, playback re-targets the engine instead
+    /// of dead-ending (or, worse, silently landing on Opal's own device) —
+    /// see the reclaim path in `worker::spawn_playback`.
+    pub device_id: Option<String>,
     /// Whether the desktop client is installed at all. Probed once at
     /// startup (a file-exists check); without it the toggle is inert and
     /// says why, rather than failing after the user flips it.
@@ -35,6 +43,7 @@ impl EngineModel {
     pub fn new() -> Self {
         Self {
             status: EngineStatus::Off,
+            device_id: None,
             installed: crate::official_app::SUPPORTED && crate::official_app::locate().is_some(),
         }
     }
@@ -42,6 +51,12 @@ impl EngineModel {
     /// The engine is holding playback.
     pub fn is_active(&self) -> bool {
         self.status == EngineStatus::Active
+    }
+
+    /// The device to aim playback at: the client, while it's the engine
+    /// holding playback. `None` means ordinary "active device" routing.
+    pub fn target_device(&self) -> Option<String> {
+        self.is_active().then(|| self.device_id.clone()).flatten()
     }
 
     /// Work is in flight — the toggle must not accept another click.

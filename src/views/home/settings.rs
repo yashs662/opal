@@ -95,6 +95,9 @@ pub struct SettingsPanel<'a> {
     pub on_normalize: Rc<dyn Fn()>,
     /// The lossless toggle flipped → start/stop the hidden official client.
     pub on_lossless_engine: Rc<dyn Fn()>,
+    /// The "Show the Spotify window" sub-toggle flipped — un-hide/re-hide
+    /// the engine's own window.
+    pub on_lossless_window: Rc<dyn Fn()>,
     /// Engine lifecycle + client availability — drives the lossless row's
     /// locked state and its hint.
     pub engine: &'a crate::model::EngineModel,
@@ -233,6 +236,19 @@ impl Component for SettingsPanel<'_> {
                                     self.on_lossless_engine.clone(),
                                     lossless_locked,
                                 );
+                                // Only meaningful while the client is the
+                                // engine — with lossless off there is no
+                                // window of ours to show or hide.
+                                if self.settings.lossless_engine.get() {
+                                    setting_row(
+                                        body,
+                                        "Show the Spotify window",
+                                        "Its own quality, device and account settings live in there",
+                                        &self.settings.lossless_window,
+                                        &self.backdrop.accent,
+                                        self.on_lossless_window.clone(),
+                                    );
+                                }
                             }
                             divider(body);
                             eq_section(
@@ -1236,7 +1252,13 @@ fn setting_row_locked(
         r.col(()).w(Len::Fill).gap(t::SP_0_5).child(|c| {
             c.text((), title, t::TEXT_BASE)
                 .color(if locked { t::TEXT_DIM } else { t::TEXT });
-            c.text((), subtitle, t::TEXT_XS).color(t::TEXT_DIM).wrap();
+            // `.w(Fill)` is what makes `.wrap()` flow to the column: an
+            // Auto-width text node sizes to its content and wraps at
+            // nothing, so a long subtitle would run under the switch.
+            c.text((), subtitle, t::TEXT_XS)
+                .color(t::TEXT_DIM)
+                .w(Len::Fill)
+                .wrap();
         });
         let mut ctrl = r.row(());
         ctrl.push_end().align(Align::Center);

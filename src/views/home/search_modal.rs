@@ -15,6 +15,7 @@ use crate::model::MembershipModel;
 use crate::model::search::{SearchHistoryEntry, SearchModel};
 use crate::views::home::CtxMenuFn;
 use crate::widgets::icon::{Icon, IconSet};
+use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
 use crate::widgets::track_row::{TrackRow, TrackRowActions};
 
@@ -371,23 +372,7 @@ fn results_section(
             .cursor(opal_gfx::CursorIcon::Pointer)
             .on_click(move |_| sel(click_entry.clone()))
             .child(move |row| {
-                row.col(()).w_px(t::SP_12).h_px(t::SP_12).child(|b| {
-                    if let Some(sig) = cover.clone() {
-                        b.image_bound((), sig)
-                            .abs(0.0, 0.0)
-                            .w(Len::Fill)
-                            .h(Len::Fill)
-                            .radius(t::R_FULL)
-                            .placeholder_fill(t::PLACEHOLDER);
-                    } else {
-                        b.rect(())
-                            .abs(0.0, 0.0)
-                            .w(Len::Fill)
-                            .h(Len::Fill)
-                            .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                            .radius(t::R_FULL);
-                    }
-                });
+                thumb(row, cover.clone(), t::SP_12, t::R_FULL);
                 row.col(()).gap(t::SP_0_5).child(|m| {
                     m.text((), &entry.name, 18.0)
                         .color(t::TEXT)

@@ -27,6 +27,10 @@ pub struct SettingsModel {
     /// live action — flipping it starts/stops the hidden official client —
     /// so it's flipped back by the reducer if the engine fails to come up.
     pub lossless_engine: Signal<bool>,
+    /// "Show the Spotify window" toggle — only offered while the engine is
+    /// on. Like `lossless_engine` it acts immediately (the worker applies
+    /// the new window state), and the pref survives restarts.
+    pub lossless_window: Signal<bool>,
     /// Folder picked by the off-thread (blocking) cache-relocation dialog,
     /// awaiting pickup on the UI thread in the frame loop.
     pub pending_cache_dir: Arc<Mutex<Option<PathBuf>>>,
@@ -40,7 +44,7 @@ pub struct SettingsModel {
 }
 
 impl SettingsModel {
-    pub fn new(normalize: bool, lossless_engine: bool) -> Self {
+    pub fn new(normalize: bool, lossless_engine: bool, lossless_window: bool) -> Self {
         Self {
             // Height-morphing: the overlay springs the panel collapsed → full
             // on open (and back on close/dismiss) with no per-open plumbing.
@@ -48,6 +52,7 @@ impl SettingsModel {
             cache_usage: CacheUsage::default(),
             normalize: Signal::new(normalize),
             lossless_engine: Signal::new(lossless_engine),
+            lossless_window: Signal::new(lossless_window),
             pending_cache_dir: Arc::new(Mutex::new(None)),
             pending_usage: Arc::new(Mutex::new(None)),
             wake: None,
@@ -132,6 +137,6 @@ impl SettingsModel {
 
 impl Default for SettingsModel {
     fn default() -> Self {
-        Self::new(true, false)
+        Self::new(true, false, false)
     }
 }

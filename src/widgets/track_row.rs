@@ -96,23 +96,7 @@ pub fn track_row(s: &mut Scene, row: TrackRow, actions: &TrackRowActions) {
                 c.text((), format!("{i}"), 13.0).color(t::TEXT_DIM);
             });
         }
-        r.col(()).w_px(t::THUMB_SM).h_px(t::THUMB_SM).child(|b| {
-            if let Some(sig) = row.cover.clone() {
-                b.image_bound((), sig)
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .radius(t::R_SM)
-                    .placeholder_fill(t::PLACEHOLDER);
-            } else {
-                b.rect(())
-                    .abs(0.0, 0.0)
-                    .w(Len::Fill)
-                    .h(Len::Fill)
-                    .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                    .radius(t::R_SM);
-            }
-        });
+        crate::widgets::thumb::thumb(r, row.cover.clone(), t::THUMB_SM, t::R_SM);
         // Title + artist(s).
         r.col(())
             .w(Len::Fill)

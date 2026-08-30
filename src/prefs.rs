@@ -230,6 +230,12 @@ pub struct AudioPrefs {
     /// Off by default — it launches another application.
     #[serde(default)]
     pub lossless_engine: bool,
+    /// Show the lossless engine's own window instead of hiding it. The
+    /// client is normally invisible (Opal is the UI), but its own settings
+    /// — audio quality, devices, account — only live in there, so this
+    /// leaves it on screen. Only meaningful while `lossless_engine` is on.
+    #[serde(default)]
+    pub lossless_show_window: bool,
 }
 
 /// Persisted equaliser state. `bands` is the ten ISO-octave gains in dB
@@ -269,6 +275,7 @@ impl Default for AudioPrefs {
             normalize: default_normalize(),
             eq: EqPrefs::default(),
             lossless_engine: false,
+            lossless_show_window: false,
         }
     }
 }

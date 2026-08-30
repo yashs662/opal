@@ -52,11 +52,13 @@ pub struct MainPane<'a> {
     /// Expand/collapse a Recents session group.
     pub on_toggle_recent: Rc<dyn Fn(String)>,
     /// The active device's queue (`None` while loading; `nav` is Queue).
-    pub queue: Option<&'a [crate::api::PlaylistTrack]>,
+    pub queue: Option<&'a [crate::api::QueueEntry]>,
+    /// Saved-state source of truth for the queue rows' hearts.
+    pub membership: &'a crate::model::MembershipModel,
     /// Skeleton pulse signal (queue loading placeholders).
     pub pulse: &'a Signal<f32>,
-    /// Skip forward N tracks — clicking a queue row jumps to it.
-    pub on_skip: Rc<dyn Fn(u32)>,
+    /// Play the queue entry at this index — the queue page's row click.
+    pub on_queue_jump: Rc<dyn Fn(usize)>,
     /// Right-click a track row → open the context menu.
     pub on_context_menu: crate::views::home::CtxMenuFn,
     /// 0 → 1 entrance transition progress on nav change.
@@ -159,10 +161,11 @@ impl Component for MainPane<'_> {
                                 content,
                                 self.icons,
                                 self.queue,
+                                self.membership,
                                 self.art,
                                 self.pulse,
                                 self.on_navigate.clone(),
-                                self.on_skip.clone(),
+                                self.on_queue_jump.clone(),
                                 self.on_context_menu.clone(),
                                 self.row_actions.on_like.clone(),
                                 self.row_actions.accent.clone(),
@@ -544,26 +547,7 @@ pub(crate) fn tile(
         crate::views::home::attach_context_menu(&mut b, on_ctx, menu);
     }
     b.child(|card| {
-        card.col(())
-            .w_px(t::TILE_THUMB)
-            .h_px(t::TILE_THUMB)
-            .child(|b| {
-                if let Some(sig) = art {
-                    b.image_bound((), sig)
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .radius(t::R_MD)
-                        .placeholder_fill(t::PLACEHOLDER);
-                } else {
-                    b.rect(())
-                        .abs(0.0, 0.0)
-                        .w(Len::Fill)
-                        .h(Len::Fill)
-                        .rgba(t::PLACEHOLDER[0], t::PLACEHOLDER[1], t::PLACEHOLDER[2], 1.0)
-                        .radius(t::R_MD);
-                }
-            });
+        thumb(card, art, t::TILE_THUMB, t::R_MD);
         card.text((), title, 13.0)
             .color(t::TEXT)
             .max_width_px(t::TILE_TEXT_MAX);
