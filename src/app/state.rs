@@ -19,6 +19,8 @@ pub struct AppState {
     /// Library slice: Home feed data, the open centre-pane playlist (live
     /// streaming buffer), playlist TTL cache + in-flight gate.
     pub library: LibraryModel,
+    /// Which row wears the now-playing field (and the one it's leaving).
+    pub now_field: crate::model::now_field::NowFieldModel,
     /// Timed-lyrics slice: the playing track's lines + the reactive
     /// active-line index the lyrics page highlights from.
     pub lyrics: crate::model::lyrics::LyricsModel,
@@ -114,6 +116,7 @@ impl AppState {
             router: RouterModel::new(),
             auth: AuthModel::new(),
             library: LibraryModel::new(),
+            now_field: Default::default(),
             lyrics: Default::default(),
             canvas: CanvasModel::new(prefs.show_canvas),
             art: ArtModel::new(),

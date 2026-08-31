@@ -178,16 +178,12 @@ impl Component for MainPane<'_> {
                         MainNav::Queue => {
                             crate::views::home::queue::view(
                                 content,
-                                self.icons,
                                 self.queue,
                                 self.membership,
                                 self.art,
                                 self.pulse,
-                                self.on_navigate.clone(),
                                 self.on_queue_jump.clone(),
-                                self.on_context_menu.clone(),
-                                self.row_actions.on_like.clone(),
-                                self.row_actions.accent.clone(),
+                                &self.row_actions,
                             );
                         }
                     });

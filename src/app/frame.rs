@@ -93,6 +93,12 @@ pub fn tick(
             state.router.detail_collapse.set(0.0);
         }
     }
+    // Drop the row the now-playing field just faded out of. Without this
+    // the dead field stays in the scene at zero alpha — invisible, but
+    // still an animated effect, so the loop would keep rendering forever.
+    if state.now_field.tick(cx.now) {
+        cx.rebuild();
+    }
     // Lyrics page: light the line at the playhead and keep it centred.
     // The highlight itself is a signal write (colour binds repaint, no
     // rebuild); only the *change* edge does any work, so a frame inside

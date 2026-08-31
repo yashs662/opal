@@ -565,13 +565,20 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     .player_ui
                     .with_snapshot(|prev| prev.track_id != p.track_id)
                     .unwrap_or(true);
-                if track_changed {
-                    // Track rows draw the now-playing field for whichever
-                    // row is the playing track, so the row set has to be
-                    // rebuilt when that moves. Once per song — the field
-                    // itself then animates on the shader clock with no
-                    // further rebuilds.
+                // Hand the now-playing field to the playing row. Asserted
+                // on every push, not just the change edge: a cold start
+                // restores the snapshot the live push then matches, so the
+                // edge never fires and no row would wear the field. The
+                // model dedups, so this only moves on a real change — and
+                // when it does, both rows are drawn for the length of the
+                // handover (one fading out, one in).
+                if state
+                    .now_field
+                    .set_current(Some(p.track_id.clone()), cx.now)
+                {
                     cx.rebuild();
+                }
+                if track_changed {
                     state.player_ui.liked.set(false);
                     if let Some(id) = track_id_from_uri(&p.track_id)
                         && let Some(token) = state.auth.token()

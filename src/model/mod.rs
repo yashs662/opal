@@ -34,6 +34,7 @@ pub mod library;
 pub mod lyrics;
 pub mod membership;
 pub mod menu;
+pub mod now_field;
 pub mod player;
 pub mod prefs;
 pub mod router;

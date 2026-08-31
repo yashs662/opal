@@ -28,18 +28,21 @@ const ROW_H: f32 = t::SP_14;
 #[allow(clippy::too_many_arguments)]
 pub fn view(
     s: &mut Scene,
-    icons: &Rc<IconSet>,
     queue: Option<&[QueueEntry]>,
     membership: &crate::model::MembershipModel,
     art: &ArtModel,
     pulse: &Signal<f32>,
-    on_navigate: NavFn,
     on_queue_jump: Rc<dyn Fn(usize)>,
-    on_context_menu: CtxMenuFn,
-    on_like: crate::views::home::LikeForFn,
-    accent: Signal<[f32; 4]>,
+    // The same bundle every other flat list renders from — context menu,
+    // heart, artist spans, and the now-playing field's handover.
+    actions: &crate::widgets::track_row::TrackRowActions,
 ) {
-    let nav_rows = on_navigate.clone();
+    let icons = &actions.icons;
+    let accent = actions.accent.clone();
+    let nav_rows = actions.on_navigate.clone();
+    let on_context_menu = actions.on_context_menu.clone();
+    let on_like = actions.on_like.clone();
+    let row_actions = actions.clone();
     s.col("queue_scroll")
         .w(Len::Fill)
         .h(Len::Fill)
@@ -86,7 +89,7 @@ pub fn view(
                             &nav_rows,
                             &on_like,
                             &accent,
-                            true,
+                            row_actions.field_for(&now.track.uri),
                         );
                     }
                     section_label(c, "Next up");
@@ -103,7 +106,10 @@ pub fn view(
                             &nav_rows,
                             &on_like,
                             &accent,
-                            false,
+                            // Never on a queued *copy* of the playing
+                            // track: the field marks what's playing, and
+                            // "Next up" by definition isn't.
+                            None,
                         );
                     }
                 }
@@ -137,9 +143,9 @@ fn queue_row(
     on_navigate: &NavFn,
     on_like: &crate::views::home::LikeForFn,
     accent: &Signal<[f32; 4]>,
-    // `now_playing`: this row is the playing track (the "Now playing"
-    // entry) — same animated field it gets in every other list.
-    now_playing: bool,
+    // This row's part in the now-playing handover, if any — the same
+    // animated field it gets in every other list.
+    field: Option<crate::widgets::track_row::NowFieldRow>,
 ) {
     // Signals exist (created + dispatched in the reducer's `QueueLoaded`
     // arm — view builds stay pure reads); this just binds them.
@@ -169,8 +175,8 @@ fn queue_row(
     let uri = tr.uri.clone();
     let accent_field = accent.clone();
     row.child(move |r| {
-        if now_playing {
-            crate::widgets::track_row::now_playing_field(r, &uri, &accent_field);
+        if let Some(field) = field {
+            crate::widgets::track_row::now_playing_field(r, &uri, field, &accent_field);
         }
         thumb(r, cover, t::THUMB_MD, t::R_SM);
         r.col(())

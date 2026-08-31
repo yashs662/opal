@@ -129,6 +129,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new("Opal", win_w, win_h, app_state)
         .decorations(false)
+        // Every animated-effect frame is a full recomposite of the window,
+        // and the now-playing field drifts rather than snaps — half the
+        // frames look identical and cost half as much.
+        .effect_frame_rate(30)
         .window_corner_radius(tokens::R_XL)
         // CPU splash painted before the GPU back-end loads — fills the
         // blank ~2 s cold-start gap with the brand logo + wordmark (same

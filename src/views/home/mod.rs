@@ -614,7 +614,9 @@ impl HomeView {
             on_navigate: self.on_navigate.clone(),
             icons: self.icons.clone(),
             accent: state.backdrop.accent.clone(),
-            now_uri: state.player_ui.current_track_uri(),
+            now_uri: state.now_field.current.clone(),
+            leaving_uri: state.now_field.leaving.clone(),
+            field_elapsed: state.now_field.elapsed(std::time::Instant::now()),
         };
         let playlist: Option<playlist::PlaylistViewData> = match nav {
             MainNav::Playlist { .. } | MainNav::Album { .. } => {

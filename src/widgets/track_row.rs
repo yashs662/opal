@@ -31,13 +31,24 @@ const NOW_PLAYING_INTENSITY: f32 = 0.55;
 /// Absolute + filling, so it sits under the columns without disturbing
 /// them, and rounded to the row's own radius. Shared by every list that
 /// renders a track row (the playlist pipeline, the queue page).
-pub fn now_playing_field(s: &mut Scene, uri: &str, accent: &Signal<[f32; 4]>) {
-    s.now_playing_waves((), now_playing_seed(uri), NOW_PLAYING_INTENSITY)
-        .abs(0.0, 0.0)
-        .w(Len::Fill)
-        .h(Len::Fill)
-        .radius(t::R_MD)
-        .color(accent.clone());
+pub fn now_playing_field(s: &mut Scene, uri: &str, field: NowFieldRow, accent: &Signal<[f32; 4]>) {
+    s.now_playing_waves(
+        (),
+        opal_gfx::NowPlaying {
+            seed: now_playing_seed(uri),
+            intensity: NOW_PLAYING_INTENSITY,
+            elapsed: field.elapsed,
+            leaving: field.leaving,
+        },
+    )
+    // Rows pad their content vertically; the field spans the whole
+    // row instead, so the bands have the full height to move in
+    // rather than a slim strip between the paddings.
+    .abs(0.0, -t::SP_1)
+    .w(Len::Fill)
+    .h_px(ROW_H)
+    .radius(t::R_MD)
+    .color(accent.clone());
 }
 
 /// Stable per-track phase offset for the now-playing field, so the same
@@ -78,6 +89,14 @@ pub struct TrackRow {
     pub playable: bool,
 }
 
+/// Where a row stands in the now-playing handover: how long ago the
+/// field arrived (or started leaving) and which end it is.
+#[derive(Copy, Clone, Debug)]
+pub struct NowFieldRow {
+    pub elapsed: f32,
+    pub leaving: bool,
+}
+
 /// Shared emitter bundle — clone-cheap, built once per surface.
 #[derive(Clone)]
 pub struct TrackRowActions {
@@ -93,6 +112,30 @@ pub struct TrackRowActions {
     /// now-playing field behind it. Lives here (not on the row) because
     /// it's one fact per surface, not per row.
     pub now_uri: Option<String>,
+    /// The row the field is fading *out* of, for the length of the
+    /// handover, plus how long ago the swap happened.
+    pub leaving_uri: Option<String>,
+    pub field_elapsed: f32,
+}
+
+impl TrackRowActions {
+    /// This row's part in the handover, if it has one: the incoming row
+    /// fades in, the outgoing one fades out, everything else has none.
+    pub fn field_for(&self, uri: &str) -> Option<NowFieldRow> {
+        if self.now_uri.as_deref() == Some(uri) {
+            Some(NowFieldRow {
+                elapsed: self.field_elapsed,
+                leaving: false,
+            })
+        } else if self.leaving_uri.as_deref() == Some(uri) {
+            Some(NowFieldRow {
+                elapsed: self.field_elapsed,
+                leaving: true,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 /// Render one row into `s`. The single row renderer for every flat track
@@ -126,15 +169,12 @@ pub fn track_row(s: &mut Scene, row: TrackRow, actions: &TrackRowActions) {
     // that row appears. Sits under the columns (emitted first, absolute so
     // it doesn't disturb them) and animates on the shader clock, so it
     // costs no per-frame CPU and no rebuild.
-    let now_playing = actions
-        .now_uri
-        .as_deref()
-        .is_some_and(|u| u == row.track.uri);
+    let field = actions.field_for(&row.track.uri);
     let uri = row.track.uri.clone();
     let accent = actions.accent.clone();
     node.child(move |r| {
-        if now_playing {
-            now_playing_field(r, &uri, &accent);
+        if let Some(field) = field {
+            now_playing_field(r, &uri, field, &accent);
         }
         if let Some(i) = row.index {
             r.row(()).w_px(t::SP_7).center().child(|c| {
