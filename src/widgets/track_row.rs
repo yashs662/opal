@@ -22,6 +22,33 @@ use crate::views::home::{CtxMenuFn, NavFn};
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
 
+/// How strongly the now-playing field paints behind its row. Enough to
+/// read as motion, low enough that the title stays the brightest thing in
+/// the row.
+const NOW_PLAYING_INTENSITY: f32 = 0.55;
+
+/// Paint the now-playing field behind the row currently being built.
+/// Absolute + filling, so it sits under the columns without disturbing
+/// them, and rounded to the row's own radius. Shared by every list that
+/// renders a track row (the playlist pipeline, the queue page).
+pub fn now_playing_field(s: &mut Scene, uri: &str, accent: &Signal<[f32; 4]>) {
+    s.now_playing_waves((), now_playing_seed(uri), NOW_PLAYING_INTENSITY)
+        .abs(0.0, 0.0)
+        .w(Len::Fill)
+        .h(Len::Fill)
+        .radius(t::R_MD)
+        .color(accent.clone());
+}
+
+/// Stable per-track phase offset for the now-playing field, so the same
+/// song always animates the same way and two rows never sync.
+fn now_playing_seed(uri: &str) -> f32 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    uri.hash(&mut h);
+    (h.finish() % 1000) as f32 * 0.1
+}
+
 /// Row height (logical px) — the one geometry both the playlist page's
 /// column header and every flat list agree on.
 pub const ROW_H: f32 = t::SP_14;
@@ -52,6 +79,7 @@ pub struct TrackRow {
 }
 
 /// Shared emitter bundle — clone-cheap, built once per surface.
+#[derive(Clone)]
 pub struct TrackRowActions {
     pub on_context_menu: CtxMenuFn,
     /// Open the like picker targeted at this row (the handler opens the
@@ -61,6 +89,10 @@ pub struct TrackRowActions {
     pub on_navigate: NavFn,
     pub icons: Rc<IconSet>,
     pub accent: Signal<[f32; 4]>,
+    /// The playing track's uri, so whichever row *is* that track gets the
+    /// now-playing field behind it. Lives here (not on the row) because
+    /// it's one fact per surface, not per row.
+    pub now_uri: Option<String>,
 }
 
 /// Render one row into `s`. The single row renderer for every flat track
@@ -90,7 +122,20 @@ pub fn track_row(s: &mut Scene, row: TrackRow, actions: &TrackRowActions) {
         &actions.on_context_menu,
         MenuTarget::for_track(&row.track),
     );
-    node.child(|r| {
+    // The playing track gets an animated field behind its row, wherever
+    // that row appears. Sits under the columns (emitted first, absolute so
+    // it doesn't disturb them) and animates on the shader clock, so it
+    // costs no per-frame CPU and no rebuild.
+    let now_playing = actions
+        .now_uri
+        .as_deref()
+        .is_some_and(|u| u == row.track.uri);
+    let uri = row.track.uri.clone();
+    let accent = actions.accent.clone();
+    node.child(move |r| {
+        if now_playing {
+            now_playing_field(r, &uri, &accent);
+        }
         if let Some(i) = row.index {
             r.row(()).w_px(t::SP_7).center().child(|c| {
                 c.text((), format!("{i}"), 13.0).color(t::TEXT_DIM);

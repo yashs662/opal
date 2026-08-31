@@ -566,6 +566,12 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     .with_snapshot(|prev| prev.track_id != p.track_id)
                     .unwrap_or(true);
                 if track_changed {
+                    // Track rows draw the now-playing field for whichever
+                    // row is the playing track, so the row set has to be
+                    // rebuilt when that moves. Once per song — the field
+                    // itself then animates on the shader clock with no
+                    // further rebuilds.
+                    cx.rebuild();
                     state.player_ui.liked.set(false);
                     if let Some(id) = track_id_from_uri(&p.track_id)
                         && let Some(token) = state.auth.token()

@@ -122,7 +122,6 @@ impl Component for MainPane<'_> {
                                     self.detail_collapse,
                                     &scroll_node,
                                     self.on_play.clone(),
-                                    self.on_navigate.clone(),
                                 );
                             }
                         }

@@ -604,6 +604,18 @@ impl HomeView {
             }
             _ => "Playlist",
         };
+        // One bundle of row affordances per rebuild, shared by every flat
+        // list (playlist page, artist page, queue, search results) — the
+        // now-playing uri included, so the animated field follows the
+        // track into whichever list it appears in.
+        let row_actions = crate::widgets::track_row::TrackRowActions {
+            on_context_menu: self.on_context_menu.clone(),
+            on_like: self.on_like_for.clone(),
+            on_navigate: self.on_navigate.clone(),
+            icons: self.icons.clone(),
+            accent: state.backdrop.accent.clone(),
+            now_uri: state.player_ui.current_track_uri(),
+        };
         let playlist: Option<playlist::PlaylistViewData> = match nav {
             MainNav::Playlist { .. } | MainNav::Album { .. } => {
                 state.library.open_playlist.as_ref().map(|o| {
@@ -623,8 +635,7 @@ impl HomeView {
                         rows: o.rows.clone(),
                         request_cover: self.request_cover.clone(),
                         pulse: state.library.skeleton_pulse.clone(),
-                        on_context_menu: self.on_context_menu.clone(),
-                        on_like: self.on_like_for.clone(),
+                        row_actions: row_actions.clone(),
                     }
                 })
             }
@@ -793,13 +804,7 @@ impl HomeView {
             detail_collapse: &state.router.detail_collapse,
             on_play: self.on_play.clone(),
             on_navigate: self.on_navigate.clone(),
-            row_actions: crate::widgets::track_row::TrackRowActions {
-                on_context_menu: self.on_context_menu.clone(),
-                on_like: self.on_like_for.clone(),
-                on_navigate: self.on_navigate.clone(),
-                icons: self.icons.clone(),
-                accent: state.backdrop.accent.clone(),
-            },
+            row_actions,
             on_show_all_library: self.on_show_all_library.clone(),
         };
         let search_modal = search_modal::SearchModal {

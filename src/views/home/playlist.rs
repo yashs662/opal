@@ -140,11 +140,10 @@ pub struct PlaylistViewData {
     /// Skeleton pulse opacity — ping-pong tweened while pages are still
     /// streaming (`LibraryModel::skeleton_pulse`), parked at 1.0 after.
     pub pulse: Signal<f32>,
-    /// Right-click a track row → context menu.
-    pub on_context_menu: crate::views::home::CtxMenuFn,
-    /// Row heart → the like picker targeted at that row (same affordance
-    /// as every other flat list).
-    pub on_like: crate::views::home::LikeForFn,
+    /// The shared row affordances (context menu, heart, artist spans,
+    /// now-playing field) — built once per rebuild by the surface, so
+    /// every flat list feeds `track_row` from the same bundle.
+    pub row_actions: crate::widgets::track_row::TrackRowActions,
 }
 
 /// Render the centre-pane content for the open playlist. Children are
@@ -168,7 +167,6 @@ pub fn view(
     // the name. `app::frame::tick` reads the offset under the same name.
     scroll_node: &str,
     on_play: PlayFn,
-    on_navigate: NavFn,
 ) {
     let loaded = data.rows.borrow().len() as u32;
     let count = data.total.max(loaded);
@@ -194,11 +192,7 @@ pub fn view(
     let empty_loading = data.loading;
     let collapse_rows = collapse.clone();
     let pulse = data.pulse.clone();
-    let on_ctx_menu = data.on_context_menu.clone();
-    let nav_rows = on_navigate.clone();
-    let on_like_rows = data.on_like.clone();
-    let icons_rows = icons.clone();
-    let accent_rows = accent.clone();
+    let row_actions = data.row_actions.clone();
     // Liked Songs: every row is by definition saved, so hearts render
     // filled. Other pages resolve per-track state in the picker itself.
     s.lazy_list(scroll_node, track_n + 2, ROW_H, move |sc, i| match i {
@@ -217,11 +211,7 @@ pub fn view(
                     &ctx,
                     &rows,
                     &request_cover,
-                    &on_ctx_menu,
-                    &nav_rows,
-                    &icons_rows,
-                    &accent_rows,
-                    &on_like_rows,
+                    &row_actions,
                 );
             } else if count > 0 || empty_loading {
                 skeleton_row(sc, ti, &pulse);
@@ -591,11 +581,7 @@ fn track_row(
     context_uri: &Option<String>,
     rows: &RowBuf,
     request_cover: &CoverFn,
-    on_context_menu: &crate::views::home::CtxMenuFn,
-    on_navigate: &NavFn,
-    icons: &Rc<IconSet>,
-    accent: &Signal<[f32; 4]>,
-    on_like: &crate::views::home::LikeForFn,
+    actions: &crate::widgets::track_row::TrackRowActions,
 ) {
     // Lazily fetch this row's cover the first time it materializes (and
     // isn't resolved yet). The consumer gates on inflight/resolved, so
@@ -624,13 +610,7 @@ fn track_row(
             in_library: r.in_library,
             playable: r.playable,
         },
-        &crate::widgets::track_row::TrackRowActions {
-            on_context_menu: on_context_menu.clone(),
-            on_like: on_like.clone(),
-            on_navigate: on_navigate.clone(),
-            icons: icons.clone(),
-            accent: accent.clone(),
-        },
+        actions,
     );
 }
 

@@ -86,6 +86,7 @@ pub fn view(
                             &nav_rows,
                             &on_like,
                             &accent,
+                            true,
                         );
                     }
                     section_label(c, "Next up");
@@ -102,6 +103,7 @@ pub fn view(
                             &nav_rows,
                             &on_like,
                             &accent,
+                            false,
                         );
                     }
                 }
@@ -135,6 +137,9 @@ fn queue_row(
     on_navigate: &NavFn,
     on_like: &crate::views::home::LikeForFn,
     accent: &Signal<[f32; 4]>,
+    // `now_playing`: this row is the playing track (the "Now playing"
+    // entry) — same animated field it gets in every other list.
+    now_playing: bool,
 ) {
     // Signals exist (created + dispatched in the reducer's `QueueLoaded`
     // arm — view builds stay pure reads); this just binds them.
@@ -161,7 +166,12 @@ fn queue_row(
         on_context_menu,
         crate::model::MenuTarget::for_track(tr),
     );
-    row.child(|r| {
+    let uri = tr.uri.clone();
+    let accent_field = accent.clone();
+    row.child(move |r| {
+        if now_playing {
+            crate::widgets::track_row::now_playing_field(r, &uri, &accent_field);
+        }
         thumb(r, cover, t::THUMB_MD, t::R_SM);
         r.col(())
             .w(Len::Fill)
