@@ -31,6 +31,7 @@ pub mod devices;
 pub mod engine;
 pub mod eq;
 pub mod library;
+pub mod lyrics;
 pub mod membership;
 pub mod menu;
 pub mod player;

@@ -255,6 +255,12 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 cx.rebuild();
             }
         }
+        WorkerResponse::LyricsLoaded { track_id, lyrics } => {
+            state.lyrics.resolve(&track_id, lyrics);
+            if matches!(state.router.nav, crate::views::MainNav::Lyrics) {
+                cx.rebuild();
+            }
+        }
         WorkerResponse::TracksHydrated { tracks } => {
             if tracks.is_empty() {
                 return;
@@ -540,6 +546,12 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                     // first so a stale heart doesn't linger until the answer.
                     state.membership.set_current(Vec::new(), false);
                     worker.query_membership(p.track_id.clone());
+                    // Lyrics follow the playing track: pull the new one's
+                    // while the page is open (cached tracks resolve off disk).
+                    if matches!(state.router.nav, crate::views::MainNav::Lyrics) {
+                        crate::views::home::request_lyrics(state, worker, &p.track_id);
+                        cx.rebuild();
+                    }
                     // Self-play has no cluster queue echo, so the queue page
                     // would freeze on a stale list as autoplay advances. While
                     // it's open and we're the active player, re-pull the Web

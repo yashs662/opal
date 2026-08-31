@@ -51,6 +51,14 @@ pub struct MainPane<'a> {
     pub recents: Option<&'a crate::views::home::recents::RecentsViewData>,
     /// Expand/collapse a Recents session group.
     pub on_toggle_recent: Rc<dyn Fn(String)>,
+    /// Player chrome — the lyrics page names the track it's showing.
+    pub player: &'a crate::model::player::PlayerModel,
+    /// The playing track's timed lyrics (`nav` is Lyrics).
+    pub lyrics: &'a crate::model::lyrics::LyricsModel,
+    /// Seek to a clicked lyric line.
+    pub on_seek_to: Rc<dyn Fn(u32)>,
+    /// Re-engage lyric auto-scroll (the "Jump to current" pill).
+    pub on_lyrics_sync: Rc<dyn Fn()>,
     /// The active device's queue (`None` while loading; `nav` is Queue).
     pub queue: Option<&'a [crate::api::QueueEntry]>,
     /// Saved-state source of truth for the queue rows' hearts.
@@ -155,6 +163,18 @@ impl Component for MainPane<'_> {
                                     self.on_context_menu.clone(),
                                 );
                             }
+                        }
+                        MainNav::Lyrics => {
+                            crate::views::home::lyrics::view(
+                                content,
+                                self.icons,
+                                self.lyrics,
+                                self.accent,
+                                self.player,
+                                self.on_seek_to.clone(),
+                                self.on_lyrics_sync.clone(),
+                                self.on_navigate.clone(),
+                            );
                         }
                         MainNav::Queue => {
                             crate::views::home::queue::view(

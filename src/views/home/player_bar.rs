@@ -45,6 +45,9 @@ pub struct PlayerBar<'a> {
     pub queue_open: bool,
     /// Open the queue page, or leave it again when it is already open.
     pub on_queue_toggle: Rc<dyn Fn()>,
+    /// The lyrics page is the open one — lights the mic icon.
+    pub lyrics_open: bool,
+    pub on_lyrics_toggle: Rc<dyn Fn()>,
     /// Library-membership slice — fills the heart (Liked OR any playlist),
     /// drives the hover hint, and owns the playlist-picker overlay.
     pub membership: &'a MembershipModel,
@@ -277,6 +280,13 @@ impl Component for PlayerBar<'_> {
                                         // group's `on_click` (gated in
                                         // `app::update`).
                                         p.stack(())
+                                            // Covers the whole button — an
+                                            // `Auto` stack child with content
+                                            // of its own hugs that content
+                                            // (the logo), which is not what a
+                                            // cover wants.
+                                            .w(Len::Fill)
+                                            .h(Len::Fill)
                                             .rgba(0.0, 0.0, 0.0, 1.0)
                                             .center()
                                             .opacity_bind(loading_fade)
@@ -335,6 +345,17 @@ impl Component for PlayerBar<'_> {
                     .align(Align::Center)
                     .justify(Justify::End)
                     .child(|r| {
+                        // Queue page.
+                        let q_hover = Signal::new(false);
+                        let q_tint = toggle_tint(
+                            &q_hover,
+                            &Signal::new(self.queue_open),
+                            &self.backdrop.accent,
+                        );
+                        let on_queue = self.on_queue_toggle.clone();
+                        icon_btn(r, icons, Icon::Queue, q_tint.into(), q_hover, move |_| {
+                            on_queue()
+                        });
                         // Now-playing pane toggle — accent-lit while the
                         // pane is open, so the state reads at a glance.
                         let np_hover = Signal::new(false);
@@ -348,17 +369,22 @@ impl Component for PlayerBar<'_> {
                             np_hover,
                             move |_| on_np(),
                         );
-                        // Queue page.
-                        let q_hover = Signal::new(false);
-                        let q_tint = toggle_tint(
-                            &q_hover,
-                            &Signal::new(self.queue_open),
+                        // Lyrics page.
+                        let ly_hover = Signal::new(false);
+                        let ly_tint = toggle_tint(
+                            &ly_hover,
+                            &Signal::new(self.lyrics_open),
                             &self.backdrop.accent,
                         );
-                        let on_queue = self.on_queue_toggle.clone();
-                        icon_btn(r, icons, Icon::Queue, q_tint.into(), q_hover, move |_| {
-                            on_queue()
-                        });
+                        let on_lyrics = self.on_lyrics_toggle.clone();
+                        icon_btn(
+                            r,
+                            icons,
+                            Icon::Lyrics,
+                            ly_tint.into(),
+                            ly_hover,
+                            move |_| on_lyrics(),
+                        );
                         // Devices popup — accent-lit only when another device
                         // is the active player (Spotify's "connected to a
                         // device" cue); plain while Opal itself plays or

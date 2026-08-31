@@ -5,11 +5,14 @@ use crate::auth::token_manager::{self, StoredTokens};
 use crate::disk_cache;
 use crate::errors::AuthError;
 use crate::extracted_color;
+use crate::model::lyrics::{LyricLine, TrackLyrics};
 use crate::widgets::{color, tokens};
 use crate::{cluster_listener, official_app, spirc_bootstrap, spotify_session};
 use librespot_connect::{LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::Session;
+use librespot_core::SpotifyId;
 use librespot_core::authentication::Credentials;
+use librespot_metadata::lyrics::{Lyrics, SyncType};
 use librespot_protocol::autoplay_context_request::AutoplayContextRequest;
 use librespot_protocol::extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery};
 use librespot_protocol::extension_kind::ExtensionKind;
@@ -124,6 +127,12 @@ pub enum WorkerCommand {
     /// `i.scdn.co/image/<hex>` trailing hash (our cache key).
     FetchAccent {
         image_hex: String,
+    },
+    /// Fetch the playing track's timed lyrics (`color-lyrics`). `track_id`
+    /// echoes back so a response for a track the user already skipped past
+    /// can be dropped.
+    FetchLyrics {
+        track_id: String,
     },
     /// Fetch the Spotify Canvas (looping video) URL for a track via the
     /// librespot extended-metadata endpoint (`CANVAZ`). `track_uri` is the
@@ -466,6 +475,12 @@ pub enum WorkerResponse {
         track_id: String,
         path: std::path::PathBuf,
     },
+    /// A lyrics fetch settled. `lyrics: None` = this track has none (or
+    /// the endpoint refused); the page shows its empty state.
+    LyricsLoaded {
+        track_id: String,
+        lyrics: Option<TrackLyrics>,
+    },
     /// No Canvas for the track (or fetch/download failed) — UI keeps the
     /// album art.
     CanvasNone {
@@ -649,6 +664,9 @@ impl Worker {
                             track_uri,
                             track_id,
                         } => spawn_fetch_canvas(resp.clone(), session.clone(), track_uri, track_id),
+                        WorkerCommand::FetchLyrics { track_id } => {
+                            spawn_fetch_lyrics(resp.clone(), session.clone(), track_id)
+                        }
                         WorkerCommand::ConnectSpotifySession {
                             initial_volume,
                             quality,
@@ -853,6 +871,9 @@ impl Worker {
     }
     pub fn fetch_accent(&self, image_hex: String) {
         let _ = self.cmd_tx.send(WorkerCommand::FetchAccent { image_hex });
+    }
+    pub fn fetch_lyrics(&self, track_id: String) {
+        let _ = self.cmd_tx.send(WorkerCommand::FetchLyrics { track_id });
     }
     pub fn fetch_canvas(&self, track_uri: String, track_id: String) {
         let _ = self.cmd_tx.send(WorkerCommand::FetchCanvas {
@@ -1285,6 +1306,86 @@ async fn fetch_extracted_color(
 struct CanvasMeta {
     /// Canvas video URL, or empty for "no video canvas".
     url: String,
+}
+
+/// Timed lyrics for a track, from Spotify's own `color-lyrics` service —
+/// the endpoint the official client's lyrics page reads, so the lines and
+/// timings are the ones the user already knows.
+///
+/// Cached to disk forever in practice ([`ttl::PERMANENT`]): lyrics are
+/// authored once and don't drift, so a track opened a second time costs no
+/// network at all. A track *without* lyrics is not negative-cached — they
+/// get added later — the model just remembers it for the session.
+fn spawn_fetch_lyrics(
+    resp: Responder,
+    session_slot: Arc<AsyncMutex<Option<Session>>>,
+    track_id: String,
+) {
+    tokio::spawn(async move {
+        let key = format!("lyrics_{track_id}");
+        if let Some(lyrics) = tokio::task::spawn_blocking({
+            let key = key.clone();
+            move || disk_cache::read_json::<TrackLyrics>(&key, api::ttl::PERMANENT)
+        })
+        .await
+        .ok()
+        .flatten()
+        {
+            debug!("lyrics cache hit {track_id}");
+            resp.send(WorkerResponse::LyricsLoaded {
+                track_id,
+                lyrics: Some(lyrics),
+            });
+            return;
+        }
+        let session = { session_slot.lock().await.clone() };
+        let (Some(session), Ok(id)) = (session, SpotifyId::from_base62(&track_id)) else {
+            debug!("lyrics fetch skipped — no session yet ({track_id})");
+            resp.send(WorkerResponse::LyricsLoaded {
+                track_id,
+                lyrics: None,
+            });
+            return;
+        };
+        let lyrics = match Lyrics::get(&session, &id).await {
+            Ok(l) => l,
+            Err(e) => {
+                // 404 is the ordinary "this track has no lyrics" answer.
+                debug!("no lyrics for {track_id}: {e}");
+                resp.send(WorkerResponse::LyricsLoaded {
+                    track_id,
+                    lyrics: None,
+                });
+                return;
+            }
+        };
+        let parsed = TrackLyrics {
+            synced: matches!(lyrics.lyrics.sync_type, SyncType::LineSynced),
+            provider: lyrics.lyrics.provider_display_name.clone(),
+            lines: lyrics
+                .lyrics
+                .lines
+                .iter()
+                .map(|l| LyricLine {
+                    start_ms: l.start_time_ms.parse().unwrap_or(0),
+                    text: l.words.clone(),
+                })
+                .collect(),
+        };
+        info!(
+            "lyrics for {track_id}: {} lines (synced={})",
+            parsed.lines.len(),
+            parsed.synced
+        );
+        let write = parsed.clone();
+        tokio::task::spawn_blocking(move || disk_cache::write_json(&key, &write))
+            .await
+            .ok();
+        resp.send(WorkerResponse::LyricsLoaded {
+            track_id,
+            lyrics: Some(parsed),
+        });
+    });
 }
 
 /// How long a track→canvas mapping stays valid. Canvas rarely changes for

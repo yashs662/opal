@@ -7,6 +7,7 @@ pub mod artist;
 pub mod context_menu;
 pub mod devices;
 pub mod like_menu;
+pub mod lyrics;
 pub mod main_pane;
 pub mod now_playing;
 pub mod player_bar;
@@ -190,7 +191,7 @@ fn render(s: &mut Scene, v: &Layout) {
         // calibrated against. Reactive colour bind riding the slow
         // crossfade tween — re-tints once per track change.
         let glass_tint = Computed::new((v.art_luma.clone(),), |(l,)| {
-            [0.0, 0.0, 0.0, 0.25 + 0.40 * l.clamp(0.0, 1.0)]
+            [0.0, 0.0, 0.0, 0.16 + 0.34 * l.clamp(0.0, 1.0)]
         });
         root.glass(())
             .abs(0.0, 0.0)
@@ -285,6 +286,12 @@ pub struct HomeView {
     on_np_toggle: Rc<dyn Fn()>,
     /// Player-bar queue icon — open the queue page, or leave it again.
     on_queue_toggle: Rc<dyn Fn()>,
+    /// Player-bar lyrics icon — open the lyrics page, or leave it again.
+    on_lyrics_toggle: Rc<dyn Fn()>,
+    /// Seek to a clicked lyric line's timestamp.
+    on_seek_to: Rc<dyn Fn(u32)>,
+    /// Re-engage lyric auto-scroll (the "Jump to current" pill).
+    on_lyrics_sync: Rc<dyn Fn()>,
     /// Open the like picker targeted at an arbitrary track (row hearts +
     /// the context menu's "Add to playlist…").
     on_like_for: LikeForFn,
@@ -436,6 +443,18 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::QueueToggle))
         };
+        let on_lyrics_toggle: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::LyricsToggle))
+        };
+        let on_seek_to: Rc<dyn Fn(u32)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |ms| dispatch.send(Msg::SeekTo(ms)))
+        };
+        let on_lyrics_sync: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::LyricsSync))
+        };
         let on_like_for: LikeForFn = {
             let dispatch = dispatch.clone();
             Rc::new(move |_ctx, track| dispatch.send(Msg::LikeOpenFor(Box::new(track))))
@@ -540,6 +559,9 @@ impl HomeView {
             on_menu_close,
             on_np_toggle,
             on_queue_toggle,
+            on_lyrics_toggle,
+            on_seek_to,
+            on_lyrics_sync,
             on_like_for,
             on_show_all_library,
             on_nav_back,
@@ -593,9 +615,11 @@ impl HomeView {
                     }
                 })
             }
-            MainNav::Home | MainNav::Artist { .. } | MainNav::ShowAll { .. } | MainNav::Queue => {
-                None
-            }
+            MainNav::Home
+            | MainNav::Artist { .. }
+            | MainNav::ShowAll { .. }
+            | MainNav::Queue
+            | MainNav::Lyrics => None,
         };
         // Artist page view data: bake album cover signals + lazily dispatch
         // their fetches (idempotent), mirroring how playlist rows resolve.
@@ -708,6 +732,8 @@ impl HomeView {
             on_np_toggle: self.on_np_toggle.clone(),
             queue_open: matches!(nav, MainNav::Queue),
             on_queue_toggle: self.on_queue_toggle.clone(),
+            lyrics_open: matches!(nav, MainNav::Lyrics),
+            on_lyrics_toggle: self.on_lyrics_toggle.clone(),
             icons,
         };
         let sidebar = sidebar::Sidebar {
@@ -720,6 +746,7 @@ impl HomeView {
             icons,
         };
         let top_bar = top_bar::TopBar {
+            accent: &state.backdrop.accent,
             on_settings_open: self.on_settings_open.clone(),
             can_back: &state.router.can_back,
             can_forward: &state.router.can_forward,
@@ -741,6 +768,10 @@ impl HomeView {
             recents: recents_data.as_ref(),
             on_toggle_recent: self.on_toggle_recent.clone(),
             queue: queue_ref.as_deref(),
+            player: &state.player_ui,
+            lyrics: &state.lyrics,
+            on_seek_to: self.on_seek_to.clone(),
+            on_lyrics_sync: self.on_lyrics_sync.clone(),
             membership: &state.membership,
             pulse: &state.library.skeleton_pulse,
             on_queue_jump: self.on_queue_jump.clone(),
@@ -1112,6 +1143,19 @@ fn build_recents(state: &AppState) -> recents::RecentsViewData {
     }
 }
 
+/// Ask for the playing track's lyrics unless they're already loaded (or
+/// known to be missing). Called on opening the page and on each track
+/// change while it's open.
+pub(crate) fn request_lyrics(state: &mut AppState, worker: &Worker, track_uri: &str) {
+    let Some(id) = crate::api::track_id_from_uri(track_uri).map(str::to_string) else {
+        return;
+    };
+    if state.lyrics.needs_fetch(&id) {
+        state.lyrics.begin(&id);
+        worker.fetch_lyrics(id);
+    }
+}
+
 /// Switch the centre pane to `nav`. Ensures the target playlist is loaded
 /// (TTL cache → fetch on miss/stale) via the library slice, flips the nav
 /// state + entrance transition via the router (recording history for the
@@ -1203,6 +1247,19 @@ fn prepare_nav(state: &mut AppState, worker: &Worker, nav: &MainNav) {
         MainNav::Home => {
             state.library.open_playlist = None;
             state.library.open_artist = None;
+        }
+        MainNav::Lyrics => {
+            state.library.open_playlist = None;
+            state.library.open_artist = None;
+            // Lyrics follow the *playing* track, so the page fetches on
+            // open and again on every track change while it's open (see
+            // `app::frame::tick`).
+            // The player snapshot is the source of truth for "what's
+            // playing" here; on a track change the reducer passes the new
+            // uri directly (the snapshot hasn't been swapped in yet).
+            if let Some(uri) = state.player_ui.current_track_uri() {
+                request_lyrics(state, worker, &uri);
+            }
         }
         MainNav::Queue => {
             state.library.open_playlist = None;

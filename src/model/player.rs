@@ -481,6 +481,17 @@ impl PlayerModel {
         }
     }
 
+    /// Snap the bar to an absolute position (ms) and hold it there — a
+    /// jump that didn't come from dragging the bar (a lyric line click).
+    /// The tween restarts on the next live push.
+    pub fn seek_to(&self, ms: u32, tl: &mut Timeline) {
+        let dur = self.duration_ms.get();
+        if dur > 0.0 {
+            self.progress.set((ms as f32 / dur).clamp(0.0, 1.0));
+            tl.stop_for(&self.progress);
+        }
+    }
+
     /// Run from the frame loop. On the release edge of a seek drag (the
     /// `seeking` signal falling true→false), snap the bar to the previewed
     /// position (so it doesn't jump back to the live tween mid-flight) and

@@ -46,6 +46,9 @@ pub enum MainNav {
     /// The active device's play queue (now playing + next up). Fetched
     /// fresh on every open — live state, no cache.
     Queue,
+    /// The playing track's timed lyrics, highlighting the line at the
+    /// playhead. Follows the track: skipping while it's open reloads it.
+    Lyrics,
 }
 
 impl MainNav {
@@ -59,9 +62,11 @@ impl MainNav {
             MainNav::Playlist { id, .. } | MainNav::Album { id } => {
                 Some(format!("detail_scroll:{id}"))
             }
-            MainNav::Home | MainNav::Artist { .. } | MainNav::ShowAll { .. } | MainNav::Queue => {
-                None
-            }
+            MainNav::Home
+            | MainNav::Artist { .. }
+            | MainNav::ShowAll { .. }
+            | MainNav::Queue
+            | MainNav::Lyrics => None,
         }
     }
 }

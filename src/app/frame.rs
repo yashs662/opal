@@ -93,6 +93,37 @@ pub fn tick(
             state.router.detail_collapse.set(0.0);
         }
     }
+    // Lyrics page: light the line at the playhead and keep it centred.
+    // The highlight itself is a signal write (colour binds repaint, no
+    // rebuild); only the *change* edge does any work, so a frame inside
+    // one line costs a compare.
+    if matches!(state.router.nav, crate::views::MainNav::Lyrics) {
+        use crate::views::home::lyrics as ly;
+        let p = &state.player_ui;
+        let pos = (p.progress.get() * p.duration_ms.get()).max(0.0) as u32;
+        state.lyrics.tick(pos, cx.tl, cx.now);
+        if let Some(scroller) = ctx.node(ly::SCROLL_NODE) {
+            // A scroll target we didn't set is the user's wheel/drag — stop
+            // following and offer the pill instead of fighting them for the
+            // viewport. Checked *before* this frame's own re-centre, or our
+            // write would erase the evidence. Skipped on the frame the sync
+            // pill was pressed: that press is consent to jump, and the
+            // position it jumps from is by definition not ours.
+            let resync = state.lyrics.take_resync();
+            let drifted =
+                (ctx.tree.scroll_target(scroller)[1] - state.lyrics.commanded_y).abs() > 1.0;
+            if state.lyrics.follow && drifted && !resync {
+                state.lyrics.set_follow(false, cx.tl, cx.now);
+            }
+            // Re-centre every following frame, not just when the highlight
+            // moves: the lit line grows into its emphasis over ~220ms and
+            // the lines above it reflow as it does, so a once-per-line
+            // target would leave it drifting off-centre as it settles.
+            if state.lyrics.follow {
+                centre_active_line(ctx, state, scroller);
+            }
+        }
+    }
     // Publish a background cache-usage scan (settings open / clear /
     // relocate dispatched it off-thread) and repaint the storage bar.
     if let Some(usage) = state.settings.take_pending_usage() {
@@ -182,15 +213,8 @@ pub fn tick(
     // Resume then starts there (see `Msg::Transport`).
     if let Some(ms) = state.player_ui.tick_seek(cx.tl)
         && state.player_ui.live
-        && let Some(token) = state.auth.token()
     {
-        let local = state.devices.playing_on_self.get();
-        worker.playback(
-            token,
-            crate::worker::PlaybackCmd::Seek(ms),
-            local,
-            state.engine.target_device(),
-        );
+        crate::app::update::dispatch_seek(state, worker, ms);
     }
     // Proactively refresh the access token before it expires — a long
     // listening session must never start 401-ing mid-flight. Two Cell
@@ -294,4 +318,33 @@ pub fn tick(
         cx.tl,
         cx.now,
     );
+}
+
+/// Scroll the lit lyric line to the middle of the page and record the
+/// target the engine settled on. Read-back matters: `set_scroll_target`
+/// clamps to the scrollable range and snaps, so the stored value is what
+/// the next frame must compare against to tell our own scroll from the
+/// user's.
+fn centre_active_line(ctx: &mut SceneCtx, state: &mut AppState, scroller: opal_gfx::NodeId) {
+    use crate::views::home::lyrics as ly;
+    let idx = state.lyrics.active.get();
+    if idx == usize::MAX {
+        // Nothing lit yet (the intro): adopt the current position so the
+        // drift check has a baseline.
+        state.lyrics.commanded_y = ctx.tree.scroll_target(scroller)[1];
+        return;
+    }
+    let Some(line) = ctx.node(&ly::line_node(idx)) else {
+        return;
+    };
+    let (Some(view), Some(line)) = (ctx.tree.get(scroller), ctx.tree.get(line)) else {
+        return;
+    };
+    // Layout rects don't carry the scroll offset, so the line's distance
+    // from the top of the content is a plain subtraction; centring it is
+    // that minus half a viewport.
+    let content_y = line.rect[1] - view.rect[1];
+    let target = content_y + line.rect[3] * 0.5 - view.rect[3] * 0.5;
+    ctx.tree.set_scroll_target(scroller, [0.0, target]);
+    state.lyrics.commanded_y = ctx.tree.scroll_target(scroller)[1];
 }

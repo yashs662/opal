@@ -1,11 +1,12 @@
-//! Top chrome bar — window drag region, nav arrows, search, settings/bell,
-//! and the min/max/close window buttons. A [`Component`].
+//! Top chrome bar — window drag region, nav arrows, search, settings, and
+//! the min/max/close window buttons. A [`Component`].
 
 use std::rc::Rc;
 
 use opal_gfx::{Align, Computed, Len, Scene, Signal, WindowAction};
 
 use crate::widgets::chrome::chrome_btn;
+use crate::widgets::color::hover_tint;
 use crate::widgets::component::Component;
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
@@ -25,6 +26,8 @@ pub struct TopBar<'a> {
     /// Open the Spotlight-style search modal (the pill is a button, not a
     /// live field — the modal owns the real input).
     pub on_search_open: Rc<dyn Fn()>,
+    /// Live album accent — the chrome glyphs light with it on hover.
+    pub accent: &'a Signal<[f32; 4]>,
     pub icons: &'a Rc<IconSet>,
 }
 
@@ -41,12 +44,13 @@ impl Component for TopBar<'_> {
             .window_action(WindowAction::DragMove)
             .child(|t_row| {
                 let on_home = self.on_home.clone();
-                topbar_icon_btn_click(t_row, icons, Icon::Home, move |_| on_home());
+                topbar_icon_btn_click(t_row, icons, Icon::Home, self.accent, move |_| on_home());
                 nav_arrow(
                     t_row,
                     icons,
                     Icon::ChevronLeft,
                     self.can_back,
+                    self.accent,
                     self.on_back.clone(),
                 );
                 nav_arrow(
@@ -54,6 +58,7 @@ impl Component for TopBar<'_> {
                     icons,
                     Icon::ChevronRight,
                     self.can_forward,
+                    self.accent,
                     self.on_forward.clone(),
                 );
 
@@ -87,10 +92,9 @@ impl Component for TopBar<'_> {
                 // The handler (`Msg::SettingsOpen`) opens the overlay + starts
                 // the morph spring together, so the panel never flashes at
                 // full height before collapsing (mirrors the search modal).
-                topbar_icon_btn_click(t_row, icons, Icon::Settings, move |_| {
+                topbar_icon_btn_click(t_row, icons, Icon::Settings, self.accent, move |_| {
                     on_settings_open();
                 });
-                topbar_icon_btn(t_row, icons, Icon::Bell);
 
                 chrome_btn(
                     t_row,
@@ -128,49 +132,64 @@ fn topbar_icon_btn_click(
     s: &mut Scene,
     icons: &IconSet,
     icon: Icon,
+    accent: &Signal<[f32; 4]>,
     on_click: impl Fn(&mut opal_gfx::EventCtx) + 'static,
 ) {
+    let hover = Signal::new(false);
+    let tint = hover_tint(&hover, accent, t::TEXT);
     s.row(())
         .w_px(t::TOPBAR_BTN)
         .h_px(t::TOPBAR_BTN)
         .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)
+        // Before `hover_color`: the sugar reuses an already-set hover
+        // signal, but a later `on_hover` would *replace* the one it
+        // allocated and leave the fill bound to a signal nothing drives.
+        .on_hover(hover)
         .hover_color(t::PANEL_HI)
         .radius(t::R_FULL)
         .center()
         .on_click(on_click)
         .child(|c| {
-            icons.render(c, icon, t::ICON_MD, t::TEXT);
+            icons.render(c, icon, t::ICON_MD, tint);
         });
 }
 
 /// A history arrow — the glyph dims to inert when its direction is
 /// empty; clicks always emit (the handler no-ops on empty history).
-fn nav_arrow(s: &mut Scene, icons: &IconSet, icon: Icon, can: &Signal<bool>, go: Rc<dyn Fn()>) {
-    let tint = Computed::new((can.clone(),), |(c,)| {
-        if c { t::TEXT } else { [1.0, 1.0, 1.0, 0.25] }
-    });
+fn nav_arrow(
+    s: &mut Scene,
+    icons: &IconSet,
+    icon: Icon,
+    can: &Signal<bool>,
+    accent: &Signal<[f32; 4]>,
+    go: Rc<dyn Fn()>,
+) {
+    // Three states, so this can't ride `hover_tint`: hover lights the
+    // accent, a live direction rests bright, an empty one stays inert.
+    let hover = Signal::new(false);
+    let tint = Computed::new(
+        (hover.clone(), can.clone(), accent.clone()),
+        |(h, c, acc)| {
+            if h {
+                crate::widgets::color::accent_hover_color(&acc)
+            } else if c {
+                t::TEXT
+            } else {
+                [1.0, 1.0, 1.0, 0.25]
+            }
+        },
+    );
     s.row(())
         .w_px(t::TOPBAR_BTN)
         .h_px(t::TOPBAR_BTN)
         .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)
+        // Must precede `hover_color` — see `topbar_icon_btn_click`.
+        .on_hover(hover)
         .hover_color(t::PANEL_HI)
         .radius(t::R_FULL)
         .center()
         .on_click(move |_| go())
         .child(|c| {
             icons.render(c, icon, t::ICON_MD, tint.clone());
-        });
-}
-
-fn topbar_icon_btn(s: &mut Scene, icons: &IconSet, icon: Icon) {
-    s.row(())
-        .w_px(t::TOPBAR_BTN)
-        .h_px(t::TOPBAR_BTN)
-        .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)
-        .hover_color(t::PANEL_HI)
-        .radius(t::R_FULL)
-        .center()
-        .child(|c| {
-            icons.render(c, icon, t::ICON_MD, t::TEXT);
         });
 }

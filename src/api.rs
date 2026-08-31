@@ -33,6 +33,9 @@ pub mod ttl {
     /// Immutable resources keyed by id (track + album metadata): never
     /// change, so the long bound just caps growth.
     pub const IMMUTABLE: Duration = Duration::from_secs(30 * DAY);
+    /// Authored once and then fixed — lyrics. Long enough to count as
+    /// permanent while still bounding cache growth.
+    pub const PERMANENT: Duration = Duration::from_secs(365 * DAY);
     /// Slowly-changing user data: profile, top artists/tracks (recomputed
     /// ~weekly), artist discography (catch new releases within a day).
     pub const SLOW: Duration = Duration::from_secs(DAY);

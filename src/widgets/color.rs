@@ -90,6 +90,47 @@ pub fn lift_for_chrome(c: [f32; 4]) -> [f32; 4] {
     mix(hi)
 }
 
+/// Push a colour up to saturation/brightness floors (HSV), keeping its
+/// hue. The extracted accent can come back washed out or muddy — fine as
+/// a small tint on an icon, not fine where the accent *is* the emphasis
+/// (a lit lyric line against dimmed ones), because a desaturated mid-tone
+/// reads as "slightly different grey" rather than "this is the one".
+/// Already-vivid colours pass through untouched.
+pub fn vivid(c: [f32; 4], min_sat: f32, min_val: f32) -> [f32; 4] {
+    let (r, g, b) = (c[0], c[1], c[2]);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let sat = if max <= 0.0 { 0.0 } else { delta / max };
+    let val = max.max(min_val);
+    let sat = sat.max(min_sat);
+    // A greyscale source has no hue to saturate — brightening is all
+    // that's available (and enough: it separates from the dim rest).
+    if delta <= f32::EPSILON {
+        return [val, val, val, c[3]];
+    }
+    // Hue in sixths, then the standard HSV → RGB reconstruction.
+    let hue = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    let cc = val * sat;
+    let x = cc * (1.0 - ((hue % 2.0) - 1.0).abs());
+    let m = val - cc;
+    let (rr, gg, bb) = match hue as u32 {
+        0 => (cc, x, 0.0),
+        1 => (x, cc, 0.0),
+        2 => (0.0, cc, x),
+        3 => (0.0, x, cc),
+        4 => (x, 0.0, cc),
+        _ => (cc, 0.0, x),
+    };
+    [rr + m, gg + m, bb + m, c[3]]
+}
+
 /// Foreground colour (icon/text) that contrasts with the live accent:
 /// whichever of white / near-black has the higher WCAG contrast against
 /// it. Reactive — follows the accent crossfade.
@@ -129,15 +170,38 @@ pub fn toggle_tint(
     lit: &Signal<bool>,
     accent: &Signal<[f32; 4]>,
 ) -> Computed<[f32; 4]> {
+    accent_tint(hover, lit, accent, crate::widgets::tokens::TEXT_DIM)
+}
+
+/// Accent-on-hover for a glyph with no "on" state — the top-bar chrome
+/// (home, history arrows, settings), which rests at `rest` and lights to
+/// the album accent under the cursor like every other icon in the app.
+pub fn hover_tint(
+    hover: &Signal<bool>,
+    accent: &Signal<[f32; 4]>,
+    rest: [f32; 4],
+) -> Computed<[f32; 4]> {
+    accent_tint(hover, &Signal::new(false), accent, rest)
+}
+
+/// The shared three-state rule behind [`toggle_tint`] and [`hover_tint`]:
+/// hover brightens the accent, `lit` is the plain accent, everything else
+/// rests at `rest`.
+fn accent_tint(
+    hover: &Signal<bool>,
+    lit: &Signal<bool>,
+    accent: &Signal<[f32; 4]>,
+    rest: [f32; 4],
+) -> Computed<[f32; 4]> {
     Computed::new(
         (hover.clone(), lit.clone(), accent.clone()),
-        |(h, on, acc)| {
+        move |(h, on, acc)| {
             if h {
                 accent_hover_color(&acc)
             } else if on {
                 acc
             } else {
-                crate::widgets::tokens::TEXT_DIM
+                rest
             }
         },
     )
@@ -145,6 +209,34 @@ pub fn toggle_tint(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vivid_raises_a_washed_accent_and_keeps_its_hue() {
+        // A muddy blue-grey: saturation and value both below the floors.
+        let c = vivid([0.35, 0.38, 0.45, 1.0], 0.55, 0.95);
+        let max = c[0].max(c[1]).max(c[2]);
+        let min = c[0].min(c[1]).min(c[2]);
+        assert!((max - 0.95).abs() < 0.01, "value floor: {max}");
+        assert!((max - min) / max >= 0.54, "saturation floor");
+        // Blue still dominates — the hue survived.
+        assert!(c[2] > c[1] && c[1] > c[0]);
+    }
+
+    #[test]
+    fn vivid_leaves_an_already_vivid_colour_alone() {
+        let c = [1.0, 0.15, 0.15, 1.0];
+        let out = vivid(c, 0.55, 0.95);
+        // Round-trips through HSV, so compare within float slop.
+        for (a, b) in out.iter().zip(c.iter()) {
+            assert!((a - b).abs() < 1e-4, "{out:?} != {c:?}");
+        }
+    }
+
+    #[test]
+    fn vivid_only_brightens_greyscale() {
+        let c = vivid([0.4, 0.4, 0.4, 1.0], 0.55, 0.95);
+        assert_eq!(c, [0.95, 0.95, 0.95, 1.0]);
+    }
+
     use super::*;
     use crate::extracted_color::ExtractedColors;
 

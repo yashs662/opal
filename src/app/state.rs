@@ -19,6 +19,9 @@ pub struct AppState {
     /// Library slice: Home feed data, the open centre-pane playlist (live
     /// streaming buffer), playlist TTL cache + in-flight gate.
     pub library: LibraryModel,
+    /// Timed-lyrics slice: the playing track's lines + the reactive
+    /// active-line index the lyrics page highlights from.
+    pub lyrics: crate::model::lyrics::LyricsModel,
     /// Spotify Canvas slice: cached clip path, off-thread decode session,
     /// frame sink + live target node, dim/hover overlay, `show_canvas`.
     pub canvas: CanvasModel,
@@ -111,6 +114,7 @@ impl AppState {
             router: RouterModel::new(),
             auth: AuthModel::new(),
             library: LibraryModel::new(),
+            lyrics: Default::default(),
             canvas: CanvasModel::new(prefs.show_canvas),
             art: ArtModel::new(),
             backdrop: BackdropModel::new(prefs.backdrop_blur),

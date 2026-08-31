@@ -69,6 +69,13 @@ pub enum Msg {
     /// Player-bar queue icon — opens the queue page, or leaves it again
     /// (back to the previous page) when it is already open.
     QueueToggle,
+    /// Player-bar lyrics icon — same open/leave behaviour as
+    /// [`Self::QueueToggle`], for the lyrics page.
+    LyricsToggle,
+    /// Seek playback to an absolute position (ms) — a lyric line click.
+    SeekTo(u32),
+    /// Re-engage lyrics auto-scroll after a manual scroll dropped it.
+    LyricsSync,
     /// A transport control from the player bar (play/pause, next, shuffle, …).
     Transport(PlayerAction),
     /// Start playback of a resolved context (tile / row click).

@@ -29,24 +29,48 @@ pub fn drain(state: &mut AppState, worker: &Worker, msgs: &MsgQueue, cx: &mut Cx
 
 /// Apply one view intent to the models. `cx` carries the timeline / instant /
 /// rebuild token for intents that animate or restructure the scene.
+/// Open `nav` from a player-bar toggle, or leave it again when it's
+/// already showing. Leaving returns the way the page was entered; with no
+/// history behind it (opened as the first page) it falls back to the feed
+/// rather than dead-ending on the icon.
+fn toggle_page(state: &mut AppState, cx: &mut Cx, worker: &Worker, nav: crate::views::MainNav) {
+    if state.router.nav != nav {
+        navigate(state, cx, worker, nav);
+    } else if state.router.can_back.get() {
+        crate::views::home::navigate_back(state, cx, worker);
+    } else {
+        navigate(state, cx, worker, crate::views::MainNav::Home);
+    }
+}
+
+/// Send an absolute seek to whatever device is playing. Shared by the
+/// progress bar's release edge (`app::frame`) and the lyrics page's
+/// click-a-line, so both route identically.
+pub(crate) fn dispatch_seek(state: &AppState, worker: &Worker, ms: u32) {
+    let Some(token) = state.auth.token() else {
+        return;
+    };
+    worker.playback(
+        token,
+        crate::worker::PlaybackCmd::Seek(ms),
+        state.devices.playing_on_self.get(),
+        state.engine.target_device(),
+    );
+}
+
 pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
     match msg {
         Msg::Navigate(nav) => navigate(state, cx, worker, nav),
         Msg::NavBack => crate::views::home::navigate_back(state, cx, worker),
         Msg::NavForward => crate::views::home::navigate_forward(state, cx, worker),
-        Msg::QueueToggle => {
-            if matches!(state.router.nav, crate::views::MainNav::Queue) {
-                // Leave the queue the way it was entered. With no history
-                // behind it (queue opened as the first page) fall back to
-                // the feed rather than dead-ending on the icon.
-                if state.router.can_back.get() {
-                    crate::views::home::navigate_back(state, cx, worker);
-                } else {
-                    navigate(state, cx, worker, crate::views::MainNav::Home);
-                }
-            } else {
-                navigate(state, cx, worker, crate::views::MainNav::Queue);
-            }
+        Msg::QueueToggle => toggle_page(state, cx, worker, crate::views::MainNav::Queue),
+        Msg::LyricsToggle => toggle_page(state, cx, worker, crate::views::MainNav::Lyrics),
+        Msg::LyricsSync => state.lyrics.set_follow(true, cx.tl, cx.now),
+        Msg::SeekTo(ms) => {
+            // A lyric line click: move the bar first (the cluster echo is
+            // ~a second out), then command the device.
+            state.player_ui.seek_to(ms, cx.tl);
+            dispatch_seek(state, worker, ms);
         }
 
         Msg::Transport(action) => {
