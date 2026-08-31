@@ -4,7 +4,8 @@
 //! full-window transparent scrim captures the next click/right-click to
 //! dismiss, and a small menu box is anchored at the cursor with the
 //! track's actions: Add to queue (works on any device, remote included),
-//! and Go to album / Go to artist when those ids are known.
+//! Go to song radio, and Go to album / Go to artist when those ids are
+//! known.
 
 use std::rc::Rc;
 
@@ -28,6 +29,7 @@ pub fn view(
     on_add_queue: Rc<dyn Fn(String)>,
     on_navigate: NavFn,
     on_add_playlist: crate::views::home::LikeForFn,
+    on_song_radio: crate::views::home::LikeForFn,
     on_close: Rc<dyn Fn()>,
 ) {
     if !menu.open {
@@ -67,6 +69,15 @@ pub fn view(
                 add(uri.clone());
                 close();
             });
+            // Go to song radio — a station seeded on this track.
+            if let Some(track) = target.track.clone() {
+                let radio = on_song_radio.clone();
+                let close = on_close.clone();
+                item(m, "Go to song radio", move |ctx| {
+                    radio(ctx, (*track).clone());
+                    close();
+                });
+            }
             // Go to album.
             if !target.album_id.is_empty() {
                 let nav = on_navigate.clone();

@@ -59,6 +59,17 @@ pub struct OpenPlaylist {
     pub complete: bool,
 }
 
+/// The header of a synthetic (in-memory) list page — a song radio or the
+/// artist "in your library" listing. `liked_page` says every row is in the
+/// library by construction; a station's rows are not and must read their
+/// real saved state.
+pub struct SyntheticPage {
+    pub name: String,
+    pub owner: String,
+    pub image_url: Option<String>,
+    pub liked_page: bool,
+}
+
 /// The artist page open in the centre pane: profile + popular + library +
 /// discography.
 pub struct OpenArtist {
@@ -106,6 +117,9 @@ pub struct LibraryModel {
     /// queue page. `None` = not loaded / loading; refetched on every
     /// open (live state, no cache).
     pub queue: Option<Vec<crate::api::QueueEntry>>,
+    /// The track uri the open song-radio page was seeded from — a
+    /// `SongRadioLoaded` for anything else is a stale response.
+    pub radio_seed: Option<String>,
     /// Skeleton-row pulse opacity, ping-pong tweened while the open
     /// detail page is still streaming (driven by `app::frame::tick`).
     pub skeleton_pulse: Signal<f32>,
@@ -137,6 +151,7 @@ impl LibraryModel {
             playlist_inflight: HashSet::new(),
             rows_appended: false,
             queue: None,
+            radio_seed: None,
             skeleton_pulse: Signal::new(1.0),
             pulse_on: false,
             greeting_bucket: Cell::new(u8::MAX),
@@ -305,23 +320,49 @@ impl LibraryModel {
     pub fn open_synthetic(
         &mut self,
         art: &mut ArtModel,
-        name: String,
+        page: SyntheticPage,
         tracks: Vec<PlaylistTrack>,
         membership: &crate::model::membership::MembershipModel,
     ) {
         let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-        self.build_rows(art, &buf, &tracks, true, membership);
+        self.build_rows(art, &buf, &tracks, page.liked_page, membership);
         self.open_artist = None;
         self.open_playlist = Some(OpenPlaylist {
             liked: false,
-            name,
-            owner: String::new(),
-            image_url: None,
+            name: page.name,
+            owner: page.owner,
+            image_url: page.image_url,
             context_uri: None,
             total: tracks.len() as u32,
             rows: buf,
             loading: false,
             complete: true,
+        });
+    }
+
+    /// A synthetic page whose rows are still being fetched — the header
+    /// (name, cover) renders immediately and the list pulses until
+    /// [`Self::open_synthetic`] replaces it with the resolved rows.
+    pub fn open_synthetic_pending(
+        &mut self,
+        art: &mut ArtModel,
+        worker: &Worker,
+        page: SyntheticPage,
+    ) {
+        if let Some(u) = page.image_url.clone() {
+            art.dispatch_cover(worker, u);
+        }
+        self.open_artist = None;
+        self.open_playlist = Some(OpenPlaylist {
+            liked: false,
+            name: page.name,
+            owner: page.owner,
+            image_url: page.image_url,
+            context_uri: None,
+            total: 0,
+            rows: Rc::new(RefCell::new(Vec::new())),
+            loading: true,
+            complete: false,
         });
     }
 

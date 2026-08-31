@@ -255,6 +255,37 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 cx.rebuild();
             }
         }
+        WorkerResponse::SongRadioLoaded {
+            track_uri,
+            name,
+            tracks,
+        } => {
+            // Dropped when the user moved on: the page was left, or a
+            // second radio was opened while this one was in flight.
+            if state.library.radio_seed.as_deref() != Some(track_uri.as_str()) {
+                return;
+            }
+            // Keep the header the pending page already put up.
+            let Some(open) = state.library.open_playlist.as_ref() else {
+                return;
+            };
+            // Spotify's own radio playlist names itself; without one,
+            // keep the seed-derived header already on screen.
+            let page = crate::model::library::SyntheticPage {
+                name: if name.is_empty() {
+                    open.name.clone()
+                } else {
+                    name
+                },
+                owner: open.owner.clone(),
+                image_url: open.image_url.clone(),
+                liked_page: false,
+            };
+            state
+                .library
+                .open_synthetic(&mut state.art, page, tracks, &state.membership);
+            cx.rebuild();
+        }
         WorkerResponse::LyricsLoaded { track_id, lyrics } => {
             state.lyrics.resolve(&track_id, lyrics);
             if matches!(state.router.nav, crate::views::MainNav::Lyrics) {

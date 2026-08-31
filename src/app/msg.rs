@@ -76,6 +76,8 @@ pub enum Msg {
     SeekTo(u32),
     /// Re-engage lyrics auto-scroll after a manual scroll dropped it.
     LyricsSync,
+    /// Open the song radio seeded on this track (context menu).
+    OpenSongRadio(Box<crate::api::PlaylistTrack>),
     /// A transport control from the player bar (play/pause, next, shuffle, …).
     Transport(PlayerAction),
     /// Start playback of a resolved context (tile / row click).

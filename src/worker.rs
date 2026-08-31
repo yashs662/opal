@@ -10,9 +10,10 @@ use crate::widgets::{color, tokens};
 use crate::{cluster_listener, official_app, spirc_bootstrap, spotify_session};
 use librespot_connect::{LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::Session;
-use librespot_core::SpotifyId;
 use librespot_core::authentication::Credentials;
+use librespot_core::{SpotifyId, SpotifyUri};
 use librespot_metadata::lyrics::{Lyrics, SyncType};
+use librespot_metadata::{Metadata, Playlist};
 use librespot_protocol::autoplay_context_request::AutoplayContextRequest;
 use librespot_protocol::extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery};
 use librespot_protocol::extension_kind::ExtensionKind;
@@ -127,6 +128,11 @@ pub enum WorkerCommand {
     /// `i.scdn.co/image/<hex>` trailing hash (our cache key).
     FetchAccent {
         image_hex: String,
+    },
+    /// Build a song radio (the station Spotify seeds off one track) for
+    /// the "Go to song radio" page.
+    FetchSongRadio {
+        track_uri: String,
     },
     /// Fetch the playing track's timed lyrics (`color-lyrics`). `track_id`
     /// echoes back so a response for a track the user already skipped past
@@ -475,6 +481,15 @@ pub enum WorkerResponse {
         track_id: String,
         path: std::path::PathBuf,
     },
+    /// A song radio resolved to its track rows (empty = the station
+    /// couldn't be built; the page shows its empty state). `name` and
+    /// `name` is Spotify's own radio-playlist title when it resolved —
+    /// the page keeps its seed-derived one when empty.
+    SongRadioLoaded {
+        track_uri: String,
+        name: String,
+        tracks: Vec<api::PlaylistTrack>,
+    },
     /// A lyrics fetch settled. `lyrics: None` = this track has none (or
     /// the endpoint refused); the page shows its empty state.
     LyricsLoaded {
@@ -666,6 +681,9 @@ impl Worker {
                         } => spawn_fetch_canvas(resp.clone(), session.clone(), track_uri, track_id),
                         WorkerCommand::FetchLyrics { track_id } => {
                             spawn_fetch_lyrics(resp.clone(), session.clone(), track_id)
+                        }
+                        WorkerCommand::FetchSongRadio { track_uri } => {
+                            spawn_fetch_song_radio(resp.clone(), session.clone(), track_uri)
                         }
                         WorkerCommand::ConnectSpotifySession {
                             initial_volume,
@@ -871,6 +889,11 @@ impl Worker {
     }
     pub fn fetch_accent(&self, image_hex: String) {
         let _ = self.cmd_tx.send(WorkerCommand::FetchAccent { image_hex });
+    }
+    pub fn fetch_song_radio(&self, track_uri: String) {
+        let _ = self
+            .cmd_tx
+            .send(WorkerCommand::FetchSongRadio { track_uri });
     }
     pub fn fetch_lyrics(&self, track_id: String) {
         let _ = self.cmd_tx.send(WorkerCommand::FetchLyrics { track_id });
@@ -1306,6 +1329,100 @@ async fn fetch_extracted_color(
 struct CanvasMeta {
     /// Canvas video URL, or empty for "no video canvas".
     url: String,
+}
+
+/// The song radio for one track: the same station Spotify's own "Go to
+/// song radio" opens, resolved to full display rows. Seeded through
+/// [`autoplay_station`] (the endpoint that also feeds autoplay), then
+/// hydrated in one batched metadata request.
+fn spawn_fetch_song_radio(
+    resp: Responder,
+    session_slot: Arc<AsyncMutex<Option<Session>>>,
+    track_uri: String,
+) {
+    tokio::spawn(async move {
+        let session = { session_slot.lock().await.clone() };
+        let Some(session) = session else {
+            debug!("song radio skipped — no session yet ({track_uri})");
+            resp.send(WorkerResponse::SongRadioLoaded {
+                track_uri,
+                name: String::new(),
+                tracks: Vec::new(),
+            });
+            return;
+        };
+        // Spotify's own "<track> Radio" playlist, so the page shows the
+        // same 50 songs (and the same mosaic cover) the official client
+        // opens. The autoplay station is the fallback: same track pool,
+        // different ordering, and no playlist identity.
+        let (name, uris) = match radio_playlist(&session, &track_uri).await {
+            Some(r) => r,
+            None => {
+                warn!("radio playlist unavailable for {track_uri} — falling back to the station");
+                (String::new(), autoplay_station(&session, &track_uri).await)
+            }
+        };
+        let tracks = fetch_tracks_v4(&session, &uris).await;
+        info!(
+            "song radio for {track_uri}: {} tracks ({name})",
+            tracks.len()
+        );
+        resp.send(WorkerResponse::SongRadioLoaded {
+            track_uri,
+            name,
+            tracks,
+        });
+    });
+}
+
+/// Resolve a track to Spotify's own radio playlist for it — the
+/// `inspiredby-mix` seed→playlist mapping the official client's "Go to
+/// song radio" uses — and read that playlist's name and track list.
+/// `None` if any step fails (the caller falls back to the station).
+///
+/// No cover comes back with it: a radio playlist carries no picture, and
+/// its annotation (where a normal playlist's image lives) 404s. The page
+/// keeps the seed track's art, which is what the radio is "based on"
+/// anyway.
+async fn radio_playlist(session: &Session, track_uri: &str) -> Option<(String, Vec<String>)> {
+    let seed = SpotifyUri::from_uri(track_uri).ok()?;
+    let body = match session.spclient().get_radio_for_track(&seed).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("seed_to_playlist failed for {track_uri}: {e}");
+            return None;
+        }
+    };
+    let json: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let playlist_uri = find_playlist_uri(&json)?;
+    let playlist = match Playlist::get(session, &SpotifyUri::from_uri(&playlist_uri).ok()?).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("radio playlist {playlist_uri} failed to load: {e}");
+            return None;
+        }
+    };
+    let uris: Vec<String> = playlist
+        .tracks()
+        .map(|u| u.to_uri())
+        .filter(|u| api::is_playable_queue_uri(u))
+        .collect();
+    if uris.is_empty() {
+        return None;
+    }
+    Some((playlist.name().to_string(), uris))
+}
+
+/// The first `spotify:playlist:…` uri anywhere in a JSON document. The
+/// seed→playlist response nests it under a key that isn't documented (and
+/// has moved before), so search rather than pin a path.
+fn find_playlist_uri(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => s.starts_with("spotify:playlist:").then(|| s.clone()),
+        serde_json::Value::Array(a) => a.iter().find_map(find_playlist_uri),
+        serde_json::Value::Object(o) => o.values().find_map(find_playlist_uri),
+        _ => None,
+    }
 }
 
 /// Timed lyrics for a track, from Spotify's own `color-lyrics` service —

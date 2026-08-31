@@ -27,6 +27,11 @@ pub fn drain(state: &mut AppState, worker: &Worker, msgs: &MsgQueue, cx: &mut Cx
     }
 }
 
+/// Synthetic-page id prefix for a song radio — like the artist-library
+/// one, it marks a page whose rows live only in memory (nothing to
+/// re-fetch on a history step).
+pub(crate) const RADIO_PREFIX: &str = "__radio__";
+
 /// Apply one view intent to the models. `cx` carries the timeline / instant /
 /// rebuild token for intents that animate or restructure the scene.
 /// Open `nav` from a player-bar toggle, or leave it again when it's
@@ -358,6 +363,34 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             cx.rebuild();
         }
 
+        Msg::OpenSongRadio(track) => {
+            // Same synthetic-page pipeline as the artist library, but the
+            // rows arrive async (the station is built server-side), so the
+            // header goes up straight away and `SongRadioLoaded` fills in.
+            let name = format!("{} radio", track.name);
+            state.library.open_synthetic_pending(
+                &mut state.art,
+                worker,
+                crate::model::library::SyntheticPage {
+                    name,
+                    owner: format!("Based on {}", track.name),
+                    image_url: track.album_image_url.clone(),
+                    liked_page: false,
+                },
+            );
+            state.library.radio_seed = Some(track.uri.clone());
+            worker.fetch_song_radio(track.uri.clone());
+            state.router.go(
+                crate::views::MainNav::Playlist {
+                    id: format!("{RADIO_PREFIX}{}", track.id),
+                    liked: false,
+                },
+                cx.tl,
+                cx.now,
+            );
+            cx.rebuild();
+        }
+
         Msg::OpenArtistLibrary => {
             // Synthetic playlist page from the open artist's aggregated
             // library rows — reuses the whole playlist pipeline (view,
@@ -378,9 +411,17 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
             }
             let id = format!("__library__{artist}");
             let name = format!("{artist} in your library");
-            state
-                .library
-                .open_synthetic(&mut state.art, name, rows, &state.membership);
+            state.library.open_synthetic(
+                &mut state.art,
+                crate::model::library::SyntheticPage {
+                    name,
+                    owner: String::new(),
+                    image_url: None,
+                    liked_page: true,
+                },
+                rows,
+                &state.membership,
+            );
             state.router.go(
                 crate::views::MainNav::Playlist { id, liked: false },
                 cx.tl,

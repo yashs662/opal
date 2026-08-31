@@ -123,6 +123,8 @@ struct Layout<'a> {
     pub on_menu_add_queue: Rc<dyn Fn(String)>,
     pub on_menu_navigate: NavFn,
     pub on_menu_add_playlist: LikeForFn,
+    /// Context-menu "Go to song radio".
+    pub on_song_radio: LikeForFn,
     pub on_menu_close: Rc<dyn Fn()>,
 }
 
@@ -238,6 +240,7 @@ fn render(s: &mut Scene, v: &Layout) {
             v.on_menu_add_queue.clone(),
             v.on_menu_navigate.clone(),
             v.on_menu_add_playlist.clone(),
+            v.on_song_radio.clone(),
             v.on_menu_close.clone(),
         );
     });
@@ -292,6 +295,8 @@ pub struct HomeView {
     on_seek_to: Rc<dyn Fn(u32)>,
     /// Re-engage lyric auto-scroll (the "Jump to current" pill).
     on_lyrics_sync: Rc<dyn Fn()>,
+    /// Context-menu "Go to song radio" — opens the track's station page.
+    on_song_radio: LikeForFn,
     /// Open the like picker targeted at an arbitrary track (row hearts +
     /// the context menu's "Add to playlist…").
     on_like_for: LikeForFn,
@@ -455,6 +460,10 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::LyricsSync))
         };
+        let on_song_radio: LikeForFn = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |_ctx, track| dispatch.send(Msg::OpenSongRadio(Box::new(track))))
+        };
         let on_like_for: LikeForFn = {
             let dispatch = dispatch.clone();
             Rc::new(move |_ctx, track| dispatch.send(Msg::LikeOpenFor(Box::new(track))))
@@ -562,6 +571,7 @@ impl HomeView {
             on_lyrics_toggle,
             on_seek_to,
             on_lyrics_sync,
+            on_song_radio,
             on_like_for,
             on_show_all_library,
             on_nav_back,
@@ -589,6 +599,9 @@ impl HomeView {
         // album is a track list with a context_uri); the hero label differs.
         let kind_label = match nav {
             MainNav::Album { .. } => "Album",
+            MainNav::Playlist { id, .. } if id.starts_with(crate::app::update::RADIO_PREFIX) => {
+                "Radio"
+            }
             _ => "Playlist",
         };
         let playlist: Option<playlist::PlaylistViewData> = match nav {
@@ -861,6 +874,7 @@ impl HomeView {
             on_menu_add_queue: self.on_add_queue.clone(),
             on_menu_navigate: self.on_navigate.clone(),
             on_menu_add_playlist: self.on_like_for.clone(),
+            on_song_radio: self.on_song_radio.clone(),
             on_menu_close: self.on_menu_close.clone(),
         };
         render(s, &layout);
@@ -1192,7 +1206,7 @@ fn prepare_nav(state: &mut AppState, worker: &Worker, nav: &MainNav) {
             // Ephemeral synthetic listings (the artist "in your library"
             // page) are populated in-memory by their opener — nothing to
             // fetch, and no cache to consult.
-            if id.starts_with("__library__") {
+            if id.starts_with("__library__") || id.starts_with(crate::app::update::RADIO_PREFIX) {
                 return;
             }
             let token = state.auth.token();
