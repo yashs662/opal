@@ -2143,16 +2143,6 @@ fn spawn_fetch_track_details(resp: Responder, access_token: String, track_id: St
 /// not days.
 const PLAYLIST_DISK_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 30);
 
-/// Disk key for a playlist/album detail listing. **Versioned**: bump the
-/// prefix whenever `PlaylistTrack` grows fields the UI depends on (e.g.
-/// the per-artist ids behind the clickable credit spans) — old-schema
-/// entries deserialize with silent defaults, which shows up as features
-/// working on freshly-cached pages and not on stale ones. A bump orphans
-/// the old files (the json cache cap evicts them) and refetches honestly.
-fn detail_cache_key(id: &str) -> String {
-    format!("detail_v2_{id}")
-}
-
 /// Hard ceiling on streamed tracks — guards against a pathological
 /// `total` driving an unbounded loop. 10k covers every realistic
 /// library; the windowed-play UX matters more than completeness beyond.
@@ -2163,7 +2153,7 @@ const MAX_STREAM_TRACKS: usize = 10_000;
 /// cache (shared with playlists, keyed by id) makes re-opens instant.
 fn spawn_fetch_album(resp: Responder, access_token: String, id: String) {
     tokio::spawn(async move {
-        let key = detail_cache_key(&id);
+        let key = disk_cache::detail_key(&id);
         let cached = tokio::task::spawn_blocking(move || {
             disk_cache::read_json::<api::PlaylistDetail>(&key, PLAYLIST_DISK_TTL)
         })
@@ -2179,7 +2169,7 @@ fn spawn_fetch_album(resp: Responder, access_token: String, id: String) {
         }
         match api::get_album(&access_token, &id).await {
             Ok(detail) => {
-                let key = detail_cache_key(&id);
+                let key = disk_cache::detail_key(&id);
                 let to_cache = detail.clone();
                 tokio::task::spawn_blocking(move || disk_cache::write_json(&key, &to_cache));
                 resp.send(WorkerResponse::PlaylistOpened {
@@ -2797,7 +2787,7 @@ fn artist_library_scan(artist_id: &str, artist_name: &str) -> ArtistLibraryScan 
             None => out.push((t.clone(), vec![src.to_string()])),
         };
     if let Some(d) = disk_cache::read_json::<api::PlaylistDetail>(
-        &detail_cache_key(api::LIKED_SONGS_ID),
+        &disk_cache::detail_key(api::LIKED_SONGS_ID),
         PLAYLIST_DISK_TTL,
     ) {
         for t in d.tracks.iter().filter(|t| by_artist(t)) {
@@ -2818,7 +2808,7 @@ fn artist_library_scan(artist_id: &str, artist_name: &str) -> ArtistLibraryScan 
     if let Some(snap) = &snap {
         for p in &snap.playlists {
             if let Some(d) = disk_cache::read_json::<api::PlaylistDetail>(
-                &detail_cache_key(&p.id),
+                &disk_cache::detail_key(&p.id),
                 PLAYLIST_DISK_TTL,
             ) {
                 for t in d.tracks.iter().filter(|t| by_artist(t)) {
@@ -2891,7 +2881,7 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
     tokio::spawn(async move {
         // 1. Disk cache first — a fresh hit delivers the whole listing in
         //    one `complete` response (no re-paging the CDN/API).
-        let key = detail_cache_key(&id);
+        let key = disk_cache::detail_key(&id);
         let cached = tokio::task::spawn_blocking(move || {
             disk_cache::read_json::<api::PlaylistDetail>(&key, PLAYLIST_DISK_TTL)
         })
@@ -3039,7 +3029,7 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
                 tracks: accumulated,
                 total,
             };
-            let key = detail_cache_key(&id);
+            let key = disk_cache::detail_key(&id);
             tokio::task::spawn_blocking(move || disk_cache::write_json(&key, &detail));
         }
     });

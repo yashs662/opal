@@ -239,6 +239,11 @@ impl LibraryModel {
     /// patches below so an edit is reflected both now and on re-open.
     pub fn invalidate_cached(&mut self, id: &str) {
         self.playlist_cache.remove(id);
+        // The disk tier too: it outlives the process, so dropping only the
+        // in-memory copy left a like (or a playlist edit) visible for the
+        // rest of the session and gone after a restart — the cached
+        // listing came straight back off disk, still missing the change.
+        crate::disk_cache::remove_json(&crate::disk_cache::detail_key(id));
     }
 
     /// Whether the playlist `id` (or Liked Songs, when `liked`) is the page

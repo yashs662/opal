@@ -100,6 +100,30 @@ pub fn exists(key: &str) -> bool {
     entry_path(key).map(|p| p.exists()).unwrap_or(false)
 }
 
+/// Disk key for a playlist/album detail listing. **Versioned**: bump the
+/// prefix whenever `PlaylistTrack` grows fields the UI depends on (e.g.
+/// the per-artist ids behind the clickable credit spans) — old-schema
+/// entries deserialize with silent defaults, which shows up as features
+/// working on freshly-cached pages and not on stale ones. A bump orphans
+/// the old files (the json cache cap evicts them) and refetches honestly.
+///
+/// Lives here, next to the cache it names, so *every* holder of a detail
+/// listing agrees on the key: the worker writes it, and the library slice
+/// deletes it when a mutation makes the listing wrong.
+pub fn detail_key(id: &str) -> String {
+    format!("detail_v2_{id}")
+}
+
+/// Delete the **JSON** cache entry for `key` (best-effort) — the tier
+/// `write_json` stores into. Mutating a resource server-side has to drop
+/// this as well as any in-memory copy, or a restart inside the TTL reads
+/// the pre-mutation listing straight back off disk.
+pub fn remove_json(key: &str) {
+    if let Some(path) = json_path(key) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /// Delete the cache entry for `key` (best-effort). Used to invalidate a
 /// resource after we mutate it server-side, so the next read re-fetches.
 pub fn remove(key: &str) {
@@ -428,4 +452,42 @@ pub fn clear() -> u64 {
         }
     }
     before.saturating_sub(usage().total())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Point the cache at a fresh temp dir for the length of one test.
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("opal-cache-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        set_root(Some(dir.clone()));
+        dir
+    }
+
+    #[test]
+    fn remove_json_drops_the_entry_a_mutation_invalidated() {
+        let dir = temp_root("remove-json");
+        let key = detail_key("37i9dQZF1DXcBWIGoYBM5M");
+        write_json(&key, &vec!["a".to_string(), "b".to_string()]);
+        assert!(
+            read_json::<Vec<String>>(&key, Duration::MAX).is_some(),
+            "written entry should read back"
+        );
+        remove_json(&key);
+        assert!(
+            read_json::<Vec<String>>(&key, Duration::MAX).is_none(),
+            "invalidated entry must not survive — a restart would read it"
+        );
+        set_root(None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detail_key_is_stable_and_namespaced() {
+        // The worker writes under this key and the library slice deletes
+        // under it; they must agree exactly.
+        assert_eq!(detail_key("abc"), "detail_v2_abc");
+    }
 }
