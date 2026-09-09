@@ -2,7 +2,7 @@
 
 use opal_gfx::{Scene, Signal};
 
-use crate::widgets::color::accent_fg;
+use crate::widgets::color::{AccentSurface, accent_surface};
 use crate::widgets::tokens as t;
 
 /// Selected chip uses the live accent colour (derived from the current
@@ -16,8 +16,9 @@ pub fn chip(s: &mut Scene, label: &str, selected: bool, accent: &Signal<[f32; 4]
         .center()
         .radius(t::R_FULL);
     if selected {
-        row.color(accent.clone()).hover_opacity(0.9).child(|c| {
-            c.text((), label, 13.0).color(accent_fg(accent));
+        let c = accent_surface(accent, AccentSurface::Solid);
+        row.color(c.fill).hover_opacity(0.9).child(|r| {
+            r.text((), label, 13.0).color(c.fg);
         });
     } else {
         row.color(t::PANEL_HI).hover_opacity(0.8).child(|c| {

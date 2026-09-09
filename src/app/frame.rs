@@ -99,15 +99,25 @@ pub fn tick(
     if state.now_field.tick(cx.now) {
         cx.rebuild();
     }
+    // Hand the engine this frame's spectrum. Cheap (eight atomic loads)
+    // and unconditional: the shader globals are one uniform every effect
+    // and every animated glyph reads, so publishing here is all it takes
+    // for the whole scene to move to the music.
+    let (level, bands) = state.audio_levels.read();
+    ctx.publish_audio(level, bands);
     // Lyrics page: light the line at the playhead and keep it centred.
     // The highlight itself is a signal write (colour binds repaint, no
     // rebuild); only the *change* edge does any work, so a frame inside
     // one line costs a compare.
     if matches!(state.router.nav, crate::views::MainNav::Lyrics) {
         use crate::views::home::lyrics as ly;
-        let p = &state.player_ui;
-        let pos = (p.progress.get() * p.duration_ms.get()).max(0.0) as u32;
-        state.lyrics.tick(pos, cx.tl, cx.now);
+        let pos = state.player_ui.position_ms();
+        let moved = state.lyrics.tick(pos, cx.tl, cx.now);
+        // Hand the per-glyph animation its new moment. Only on a real
+        // change (a new line, a pause, a seek) — a playhead simply
+        // advancing leaves the line's clock where it is, so a steady
+        // frame pushes nothing at all.
+        push_line_clock(ctx, state, pos, moved);
         if let Some(scroller) = ctx.node(ly::SCROLL_NODE) {
             // A scroll target we didn't set is the user's wheel/drag — stop
             // following and offer the pill instead of fighting them for the
@@ -327,6 +337,41 @@ pub fn tick(
 }
 
 /// Scroll the lit lyric line to the middle of the page and record the
+/// Push the lit line's clock to the shaders, and put the line it just
+/// left back to rest. Exactly the two nodes a handover touches, and only
+/// when the moment actually changed — see `LineClock::differs_from`.
+fn push_line_clock(
+    ctx: &mut SceneCtx,
+    state: &mut AppState,
+    position_ms: u32,
+    moved: Option<usize>,
+) {
+    use crate::model::lyrics::LineClock;
+    use crate::views::home::lyrics as ly;
+    let active = state.lyrics.active.get();
+    let clock = state.lyrics.line_clock(
+        active,
+        position_ms,
+        state.player_ui.is_playing.get(),
+        ctx.effect_time,
+    );
+    if moved.is_none() && !clock.differs_from(state.lyrics.pushed_clock) {
+        return;
+    }
+    state.lyrics.pushed_clock = clock;
+    if let Some(node) = ctx.node(&ly::text_node(active)) {
+        ctx.tree.set_effect_data(node, clock.params().to_vec());
+    }
+    // The line the playhead just left goes back to rest, or it would keep
+    // sweeping under the new one.
+    if moved.is_some()
+        && let Some(node) = ctx.node(&ly::text_node(state.lyrics.prev.get()))
+    {
+        ctx.tree
+            .set_effect_data(node, LineClock::default().params().to_vec());
+    }
+}
+
 /// target the engine settled on. Read-back matters: `set_scroll_target`
 /// clamps to the scrollable range and snaps, so the stored value is what
 /// the next frame must compare against to tell our own scroll from the

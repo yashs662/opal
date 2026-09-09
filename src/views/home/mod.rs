@@ -608,6 +608,11 @@ impl HomeView {
         // list (playlist page, artist page, queue, search results) — the
         // now-playing uri included, so the animated field follows the
         // track into whichever list it appears in.
+        // One clock read per build: every shader field's envelope is
+        // measured from the same instant, and the lyric animation from
+        // the same shader clock the shaders themselves will see.
+        let now = std::time::Instant::now();
+        let effect_time = s.ctx().effect_time;
         let row_actions = crate::widgets::track_row::TrackRowActions {
             on_context_menu: self.on_context_menu.clone(),
             on_like: self.on_like_for.clone(),
@@ -616,7 +621,7 @@ impl HomeView {
             accent: state.backdrop.accent.clone(),
             now_uri: state.now_field.current.clone(),
             leaving_uri: state.now_field.leaving.clone(),
-            field_elapsed: state.now_field.elapsed(std::time::Instant::now()),
+            field_elapsed: state.now_field.elapsed(now),
         };
         let playlist: Option<playlist::PlaylistViewData> = match nav {
             MainNav::Playlist { .. } | MainNav::Album { .. } => {
@@ -798,6 +803,12 @@ impl HomeView {
             lyrics: &state.lyrics,
             on_seek_to: self.on_seek_to.clone(),
             on_lyrics_sync: self.on_lyrics_sync.clone(),
+            lyrics_clock: state.lyrics.line_clock(
+                state.lyrics.active.get(),
+                state.player_ui.position_ms(),
+                state.player_ui.is_playing.get(),
+                effect_time,
+            ),
             membership: &state.membership,
             pulse: &state.library.skeleton_pulse,
             on_queue_jump: self.on_queue_jump.clone(),

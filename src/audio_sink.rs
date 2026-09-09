@@ -30,6 +30,7 @@ use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 use log::{info, warn};
 
 use crate::audio_eq::{EqProcessor, EqShared};
+use crate::audio_levels::{AudioLevels, LevelAnalyzer};
 
 /// How often `write()` re-checks the default output device's identity.
 const DEVICE_RECHECK: Duration = Duration::from_millis(500);
@@ -53,15 +54,25 @@ pub struct SwitchingSink {
     /// Reused scratch buffer for the in-place EQ pass so `write` doesn't
     /// allocate per packet.
     scratch: Vec<f64>,
+    /// Spectrum analysis of what actually reaches the speakers, published
+    /// lock-free for the lyric shaders (see `audio_levels`). Fed *after*
+    /// the EQ, so a boosted band moves the words the way it moves the
+    /// room.
+    levels: LevelAnalyzer,
+    /// The shared surface the analyzer publishes into — kept so the sink
+    /// can zero it when playback stops.
+    levels_shared: Arc<AudioLevels>,
 }
 
 impl SwitchingSink {
-    pub fn new(eq: Arc<EqShared>) -> Self {
+    pub fn new(eq: Arc<EqShared>, levels: Arc<AudioLevels>) -> Self {
         Self {
             out: None,
             last_check: Instant::now(),
             eq: EqProcessor::new(eq, SAMPLE_RATE),
             scratch: Vec::new(),
+            levels: LevelAnalyzer::new(levels.clone(), SAMPLE_RATE),
+            levels_shared: levels,
         }
     }
 
@@ -155,6 +166,10 @@ impl Sink for SwitchingSink {
             out.sink.sleep_until_end();
             out.sink.pause();
         }
+        // Nothing is playing any more: drop the published spectrum so the
+        // animations coast back to rest instead of holding the last frame
+        // of the song forever.
+        self.levels_shared.silence();
         Ok(())
     }
 
@@ -203,6 +218,7 @@ impl Sink for SwitchingSink {
         self.scratch.clear();
         self.scratch.extend_from_slice(samples);
         self.eq.process_interleaved(&mut self.scratch);
+        self.levels.feed(&self.scratch, NUM_CHANNELS as usize);
         let samples_f32: &[f32] = &converter.f64_to_f32(&self.scratch);
         let source = rodio::buffer::SamplesBuffer::new(
             NUM_CHANNELS as cpal::ChannelCount,

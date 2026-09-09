@@ -240,28 +240,26 @@ pub fn view(
     sticky_bar(s, icons, data, accent, collapse, &on_play);
 }
 
-/// Build the playback target for the track at `index`. Real playlists
-/// play their context at the offset; the Liked Songs collection context
-/// anchors by *track uri* instead (its server-side order is
-/// added-at-desc, which can drift from the listed index — and the uri
-/// anchor doubles as the 400-fallback recovery point). With no context
-/// at all, a capped window of URIs from the clicked track.
+/// Build the playback target for the track at `index`. A context plays
+/// anchored by the row's *track uri*, never by its position: the rows on
+/// screen come from a TTL cache, so one add or remove anywhere above them
+/// shifts every server-side position by one and a positional offset then
+/// starts the wrong song. The uri says which song the user actually
+/// clicked, whatever the live order is (and it doubles as the 400-fallback
+/// recovery point). Position is the fallback for a row the buffer hasn't
+/// materialized yet, and with no context at all it's a capped window of
+/// URIs from the clicked track.
 fn make_target(context_uri: &Option<String>, rows: &RowBuf, index: u32) -> PlayTarget {
     match context_uri {
-        Some(uri) if uri.ends_with(":collection") => {
-            let track_uri = rows
-                .borrow()
-                .get(index as usize)
-                .map(|r| r.uri.clone())
-                .unwrap_or_default();
-            PlayTarget::ContextAt {
+        Some(uri) => match rows.borrow().get(index as usize) {
+            Some(row) => PlayTarget::ContextAt {
                 context_uri: uri.clone(),
-                track_uri,
-            }
-        }
-        Some(uri) => PlayTarget::Context {
-            context_uri: uri.clone(),
-            offset: index,
+                track_uri: row.uri.clone(),
+            },
+            None => PlayTarget::Context {
+                context_uri: uri.clone(),
+                offset: index,
+            },
         },
         None => {
             let buf = rows.borrow();

@@ -561,6 +561,7 @@ impl Worker {
         wake: Arc<WakeHandle>,
         uploader: Arc<Uploader>,
         eq: Arc<crate::audio_eq::EqShared>,
+        levels: Arc<crate::audio_levels::AudioLevels>,
     ) -> Self {
         let (cmd_tx, mut cmd_rx) = tmpsc::unbounded_channel::<WorkerCommand>();
         let (resp_tx, resp_rx): (Sender<WorkerResponse>, Receiver<WorkerResponse>) = channel();
@@ -698,6 +699,7 @@ impl Worker {
                             quality,
                             normalize,
                             eq.clone(),
+                            levels.clone(),
                         ),
                         WorkerCommand::Playback {
                             access_token,
@@ -3243,6 +3245,7 @@ fn spawn_connect_session(
     quality: crate::prefs::AudioQuality,
     normalize: bool,
     eq: Arc<crate::audio_eq::EqShared>,
+    levels: Arc<crate::audio_levels::AudioLevels>,
 ) {
     tokio::spawn(async move {
         // The session authenticates with its own grant, not the Web API
@@ -3263,7 +3266,9 @@ fn spawn_connect_session(
 
         let creds = Credentials::with_access_token(streaming_token);
         let boot =
-            match spirc_bootstrap::start(s, creds, initial_volume, quality, normalize, eq).await {
+            match spirc_bootstrap::start(s, creds, initial_volume, quality, normalize, eq, levels)
+                .await
+            {
                 Ok(b) => b,
                 Err(e) => {
                     error!("spirc bootstrap failed: {e}");

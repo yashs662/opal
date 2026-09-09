@@ -255,6 +255,12 @@ impl PlayerModel {
         self.snapshot.as_ref().map(f)
     }
 
+    /// The playhead in milliseconds, from the progress fraction the bar
+    /// tweens. The one place that conversion lives.
+    pub fn position_ms(&self) -> u32 {
+        (self.progress.get() * self.duration_ms.get()).max(0.0) as u32
+    }
+
     /// The current track's `spotify:track:…` uri, if a snapshot is loaded.
     pub fn current_track_uri(&self) -> Option<String> {
         self.snapshot.as_ref().map(|p| p.track_id.clone())

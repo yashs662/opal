@@ -59,6 +59,9 @@ pub struct MainPane<'a> {
     pub on_seek_to: Rc<dyn Fn(u32)>,
     /// Re-engage lyric auto-scroll (the "Jump to current" pill).
     pub on_lyrics_sync: Rc<dyn Fn()>,
+    /// Where the lit lyric line is in its own moment, for the per-glyph
+    /// animation the page runs on it.
+    pub lyrics_clock: crate::model::lyrics::LineClock,
     /// The active device's queue (`None` while loading; `nav` is Queue).
     pub queue: Option<&'a [crate::api::QueueEntry]>,
     /// Saved-state source of truth for the queue rows' hearts.
@@ -173,6 +176,7 @@ impl Component for MainPane<'_> {
                                 self.on_seek_to.clone(),
                                 self.on_lyrics_sync.clone(),
                                 self.on_navigate.clone(),
+                                self.lyrics_clock,
                             );
                         }
                         MainNav::Queue => {

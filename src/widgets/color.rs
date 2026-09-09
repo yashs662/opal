@@ -62,32 +62,130 @@ pub fn chrome_accent(
     lift_for_chrome(base)
 }
 
+/// Minimum contrast for *text* on its own surface. 4.5:1 is the WCAG
+/// 1.4.3 floor for body-size type — stricter than
+/// [`MIN_ACCENT_CONTRAST`], which only governs icons/pills as shapes.
+pub const MIN_TEXT_CONTRAST: f32 = 4.5;
+
+/// The dark chrome as a colour — the sRGB grey whose relative
+/// luminance *is* [`CHROME_LUMA`], so the two descriptions of the same
+/// surface can't drift apart (a test pins them together). This is what a
+/// translucent tint composites over.
+pub const CHROME: [f32; 4] = [0.152, 0.152, 0.152, 1.0];
+
+/// Composite `c` (using its own alpha) over the opaque `bg`, giving the
+/// colour a viewer actually sees. Translucent fills contrast against
+/// *this*, never against their nominal colour — that gap is what makes an
+/// accent tint under accent text vanish.
+pub fn over(c: [f32; 4], bg: [f32; 4]) -> [f32; 4] {
+    let a = c[3];
+    [
+        bg[0] + (c[0] - bg[0]) * a,
+        bg[1] + (c[1] - bg[1]) * a,
+        bg[2] + (c[2] - bg[2]) * a,
+        1.0,
+    ]
+}
+
+/// Nudge `c` toward whichever pole (white/black) `bg` leaves room for,
+/// stopping the moment it clears `min` contrast against `bg`. Hue is
+/// preserved as far as the target allows; a colour that already passes
+/// comes back untouched, and one that can't reach the target even at the
+/// pole comes back as the pole (the best available).
+///
+/// This is the one contrast rule in the app: [`lift_for_chrome`] and
+/// [`accent_surface`] are both phrased in terms of it.
+pub fn readable_on(c: [f32; 4], bg: [f32; 4], min: f32) -> [f32; 4] {
+    let lbg = luminance(bg);
+    if contrast(luminance(c), lbg) >= min {
+        return c;
+    }
+    // Pole with the most headroom over the background: on dark surfaces
+    // that is white, on light ones black.
+    let pole = if contrast(1.0, lbg) >= contrast(0.0, lbg) {
+        1.0
+    } else {
+        0.0
+    };
+    let mix = |t: f32| {
+        [
+            c[0] + (pole - c[0]) * t,
+            c[1] + (pole - c[1]) * t,
+            c[2] + (pole - c[2]) * t,
+            c[3],
+        ]
+    };
+    // A stepped scan, not a bisection: a colour on the far side of the
+    // background dips *through* 1:1 contrast on the way to the pole, so
+    // the predicate isn't monotone and a bisection can land in the dip.
+    const STEPS: u32 = 48;
+    for i in 1..=STEPS {
+        let m = mix(i as f32 / STEPS as f32);
+        if contrast(luminance(m), lbg) >= min {
+            return m;
+        }
+    }
+    mix(1.0)
+}
+
+/// How an accent-coloured surface is painted. Both variants come back
+/// from [`accent_surface`] with a foreground that is *guaranteed* legible
+/// on the fill they ship with.
+#[derive(Clone, Copy, PartialEq)]
+pub enum AccentSurface {
+    /// The accent itself as an opaque fill (play disc, selected chip,
+    /// the LOSSLESS badge) — foreground is white or near-black.
+    Solid,
+    /// The accent at `alpha` over the dark chrome — a whisper of colour
+    /// (hover beds, section headers). Foreground stays *accent-hued*,
+    /// lifted until it clears the composited tint.
+    Tint(f32),
+}
+
+/// The reactive `(fill, foreground)` pair for an accent surface. Take
+/// both from here rather than pairing a fill with a hand-picked colour:
+/// picking them apart is how accent text ends up on an accent tint, two
+/// near-identical luminances that wash out on dark covers.
+pub struct SurfaceColors {
+    pub fill: Computed<[f32; 4]>,
+    pub fg: Computed<[f32; 4]>,
+}
+
+/// Build the pair for `style` off the live accent — both sides follow the
+/// cover crossfade, so the contrast guarantee holds per frame, not just
+/// at the moment a view was built.
+pub fn accent_surface(accent: &Signal<[f32; 4]>, style: AccentSurface) -> SurfaceColors {
+    SurfaceColors {
+        fill: Computed::new((accent.clone(),), move |(a,)| surface_fill(&a, style)),
+        fg: Computed::new((accent.clone(),), move |(a,)| surface_fg(&a, style)),
+    }
+}
+
+/// Non-reactive fill for [`accent_surface`] — for callers already holding
+/// the accent inside a multi-input `Computed`.
+pub fn surface_fill(a: &[f32; 4], style: AccentSurface) -> [f32; 4] {
+    match style {
+        AccentSurface::Solid => *a,
+        AccentSurface::Tint(alpha) => [a[0], a[1], a[2], alpha],
+    }
+}
+
+/// Non-reactive foreground for [`accent_surface`].
+pub fn surface_fg(a: &[f32; 4], style: AccentSurface) -> [f32; 4] {
+    match style {
+        AccentSurface::Solid => accent_fg_color(a),
+        AccentSurface::Tint(alpha) => {
+            let bed = over([a[0], a[1], a[2], alpha], CHROME);
+            readable_on(*a, bed, MIN_TEXT_CONTRAST)
+        }
+    }
+}
+
 /// Brighten `c` (mix toward white, preserving hue) until it clears
 /// [`MIN_ACCENT_CONTRAST`] against the chrome. No-op when it already
 /// does. Binary-searches the mix factor — luminance is monotonic in it.
 pub fn lift_for_chrome(c: [f32; 4]) -> [f32; 4] {
-    let target = MIN_ACCENT_CONTRAST * (CHROME_LUMA + 0.05) - 0.05;
-    if luminance(c) >= target {
-        return c;
-    }
-    let mix = |t: f32| {
-        [
-            c[0] + (1.0 - c[0]) * t,
-            c[1] + (1.0 - c[1]) * t,
-            c[2] + (1.0 - c[2]) * t,
-            c[3],
-        ]
-    };
-    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
-    for _ in 0..20 {
-        let mid = (lo + hi) * 0.5;
-        if luminance(mix(mid)) < target {
-            lo = mid
-        } else {
-            hi = mid
-        }
-    }
-    mix(hi)
+    readable_on(c, CHROME, MIN_ACCENT_CONTRAST)
 }
 
 /// Push a colour up to saturation/brightness floors (HSV), keeping its
@@ -249,6 +347,56 @@ mod tests {
     #[test]
     fn contrast_black_white_is_21() {
         assert!((contrast(0.0, 1.0) - 21.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn chrome_colour_matches_chrome_luma() {
+        assert!((luminance(CHROME) - CHROME_LUMA).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tinted_surface_text_clears_the_composited_bed() {
+        // A dark red accent: at 16% over the chrome the bed is nearly the
+        // accent's own luminance — the case that washed out the badge.
+        let acc = [0.35, 0.05, 0.05, 1.0];
+        let style = AccentSurface::Tint(0.16);
+        let bed = over(surface_fill(&acc, style), CHROME);
+        let fg = surface_fg(&acc, style);
+        assert!(
+            contrast(luminance(fg), luminance(bed)) >= MIN_TEXT_CONTRAST - 0.01,
+            "fg {fg:?} on bed {bed:?}"
+        );
+        // Still red-led — the lift keeps the hue, it doesn't go white.
+        assert!(fg[0] > fg[1] && fg[0] > fg[2]);
+    }
+
+    #[test]
+    fn solid_surface_pairs_accent_with_readable_foreground() {
+        for acc in [[0.05, 0.05, 0.2, 1.0], [0.95, 0.9, 0.4, 1.0]] {
+            let fg = surface_fg(&acc, AccentSurface::Solid);
+            assert!(contrast(luminance(fg), luminance(acc)) >= 3.0);
+        }
+        assert_eq!(
+            surface_fill(&[0.4, 0.1, 0.1, 1.0], AccentSurface::Solid),
+            [0.4, 0.1, 0.1, 1.0]
+        );
+    }
+
+    #[test]
+    fn readable_on_leaves_a_passing_colour_exact() {
+        let c = [1.0, 1.0, 1.0, 1.0];
+        assert_eq!(readable_on(c, CHROME, MIN_TEXT_CONTRAST), c);
+    }
+
+    #[test]
+    fn readable_on_darkens_against_a_light_background() {
+        let out = readable_on(
+            [0.9, 0.85, 0.4, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            MIN_TEXT_CONTRAST,
+        );
+        assert!(contrast(luminance(out), 1.0) >= MIN_TEXT_CONTRAST - 0.01);
+        assert!(luminance(out) < 0.2);
     }
 
     #[test]

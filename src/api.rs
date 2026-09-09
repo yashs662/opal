@@ -1826,13 +1826,18 @@ pub async fn play(token: &str, device_id: Option<&str>) -> Result<(), AuthError>
     player_command(token, reqwest::Method::PUT, &path).await
 }
 
-/// What to start playing on the active device. Real playlists/albums use
-/// a `context_uri` (so Spotify queues the whole context); the Liked
-/// Songs collection has no playable context URI, so it ships an explicit
-/// `uris` list. Both carry an `offset` = the index to start at.
-/// [`Self::ContextAt`] starts a context at a specific *track* (offset by
-/// URI, not index) — for entry points that know the song but not its
-/// position, like a recently-played row starting its album.
+/// What to start playing on the active device.
+///
+/// Anything with a context — a playlist, an album, Liked Songs
+/// (`spotify:user:{id}:collection`) — plays through
+/// [`Self::ContextAt`], anchored by the **track uri**: the list on screen
+/// comes from a TTL cache, and one edit above a row shifts every
+/// server-side position, so a positional offset would start the wrong
+/// song. [`Self::Context`] (an index into the context) is for the callers
+/// that genuinely have no track to name — starting a context from the
+/// top, or a row the buffer hasn't materialized. [`Self::Uris`] is the
+/// last resort for a list with no context at all (search results, an
+/// artist's top tracks): an explicit window of URIs.
 #[derive(Debug, Clone)]
 pub enum PlayTarget {
     Context {

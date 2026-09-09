@@ -106,10 +106,11 @@ impl EqShared {
     }
 }
 
-/// One RBJ peaking biquad in transposed Direct-Form II (good f64 numerical
-/// behaviour, one add of state per sample).
+/// One RBJ biquad in transposed Direct-Form II (good f64 numerical
+/// behaviour, one add of state per sample). Peaking for the EQ's bands,
+/// band-pass for the spectrum analyzer (see [`crate::audio_levels`]).
 #[derive(Clone, Copy)]
-struct Biquad {
+pub struct Biquad {
     b0: f64,
     b1: f64,
     b2: f64,
@@ -121,7 +122,7 @@ struct Biquad {
 
 impl Biquad {
     /// Identity (unity passthrough).
-    const fn identity() -> Self {
+    pub const fn identity() -> Self {
         Self {
             b0: 1.0,
             b1: 0.0,
@@ -133,9 +134,24 @@ impl Biquad {
         }
     }
 
+    /// RBJ "cookbook" band-pass coefficients (constant 0 dB peak gain,
+    /// normalised by a0) — one band of a spectrum analyzer. Same state
+    /// convention as the peaking form.
+    pub fn set_bandpass(&mut self, f0: f64, q: f64, fs: f64) {
+        let w0 = 2.0 * std::f64::consts::PI * f0 / fs;
+        let (sin_w0, cos_w0) = w0.sin_cos();
+        let alpha = sin_w0 / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        self.b0 = alpha / a0;
+        self.b1 = 0.0;
+        self.b2 = -alpha / a0;
+        self.a1 = -2.0 * cos_w0 / a0;
+        self.a2 = (1.0 - alpha) / a0;
+    }
+
     /// RBJ "cookbook" peaking-EQ coefficients (normalised by a0). Preserves
     /// the running state `z1/z2` so a live gain tweak doesn't click.
-    fn set_peaking(&mut self, f0: f64, q: f64, gain_db: f64, fs: f64) {
+    pub fn set_peaking(&mut self, f0: f64, q: f64, gain_db: f64, fs: f64) {
         let a = 10f64.powf(gain_db / 40.0);
         let w0 = 2.0 * std::f64::consts::PI * f0 / fs;
         let (sin_w0, cos_w0) = w0.sin_cos();
@@ -149,7 +165,7 @@ impl Biquad {
     }
 
     #[inline]
-    fn process(&mut self, x: f64) -> f64 {
+    pub fn process(&mut self, x: f64) -> f64 {
         let y = self.b0 * x + self.z1;
         self.z1 = self.b1 * x - self.a1 * y + self.z2;
         self.z2 = self.b2 * x - self.a2 * y;

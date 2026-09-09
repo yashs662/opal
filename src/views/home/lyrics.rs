@@ -5,13 +5,19 @@
 //! the next writes one signal and repaints; it never rebuilds the scene.
 //! The frame loop scrolls the lit line to the middle (see
 //! `app::frame::tick`), and clicking a line seeks the track to it.
+//!
+//! The lit line also *sings*: its glyphs run the karaoke text effect, so
+//! the words light left to right in time with the line, a bloom riding
+//! the leading edge. That runs entirely on the GPU from a stamped clock
+//! ([`LineClock`]) — the CPU touches it only when the moment really
+//! changes (a new line, a pause, a seek).
 
 use std::rc::Rc;
 
 use opal_gfx::{Align, Bind, Computed, CursorIcon, Justify, Len, Lerp, Scene, Signal};
 
-use crate::model::lyrics::{LyricsModel, LyricsStatus};
-use crate::widgets::color::lift_for_chrome;
+use crate::model::lyrics::{LineClock, LyricsModel, LyricsStatus};
+use crate::widgets::color::{AccentSurface, lift_for_chrome};
 use crate::widgets::icon::IconSet;
 use crate::widgets::tokens as t;
 
@@ -24,6 +30,17 @@ pub const SCROLL_NODE: &str = "lyrics_scroll";
 pub fn line_node(i: usize) -> String {
     format!("lyric_line:{i}")
 }
+
+/// Node name of the `i`-th line's *text*, which is what carries the
+/// per-glyph animation — the frame loop pushes its clock params here.
+pub fn text_node(i: usize) -> String {
+    format!("lyric_text:{i}")
+}
+
+/// Frame rate the sung line asks for while the page is open. The app's
+/// default is enough for the slow row fields, but a sweep travelling
+/// through the letters reads steppy below this.
+const LINE_FPS: u16 = 60;
 
 /// Resting line type size. Big and bold like the official client's page:
 /// these are meant to be read across the room, not scanned like a track
@@ -57,6 +74,7 @@ pub fn view(
     on_seek_to: Rc<dyn Fn(u32)>,
     on_sync: Rc<dyn Fn()>,
     on_navigate: crate::views::home::NavFn,
+    clock: LineClock,
 ) {
     // Stack: the scrolling words, with the sync pill floating over their
     // bottom edge. Square, so the group costs no compositor layer.
@@ -66,17 +84,27 @@ pub fn view(
         .align(Align::Center)
         .justify(Justify::End)
         .child(|page| {
-            lyric_scroller(page, lyrics, accent, player, &on_seek_to, &on_navigate);
+            lyric_scroller(
+                page,
+                lyrics,
+                accent,
+                player,
+                clock,
+                &on_seek_to,
+                &on_navigate,
+            );
             sync_pill(page, icons, lyrics, accent, on_sync);
         });
 }
 
 /// The scrolling column of lines (see [`SCROLL_NODE`]).
+#[allow(clippy::too_many_arguments)]
 fn lyric_scroller(
     s: &mut Scene,
     lyrics: &LyricsModel,
     accent: &Signal<[f32; 4]>,
     player: &crate::model::player::PlayerModel,
+    clock: LineClock,
     on_seek_to: &Rc<dyn Fn(u32)>,
     on_navigate: &crate::views::home::NavFn,
 ) {
@@ -98,8 +126,11 @@ fn lyric_scroller(
                 LyricsStatus::Unavailable => {
                     message(c, "No lyrics for this track");
                 }
-                LyricsStatus::Ready => lines(c, lyrics, accent, on_seek_to),
+                LyricsStatus::Ready => lines(c, lyrics, accent, clock, on_seek_to),
             }
+            // Tail space so the last line can still scroll to the middle
+            // of the viewport like every other one.
+            c.row(()).w(Len::Fill).h_px(t::SP_40);
         });
 }
 
@@ -156,7 +187,13 @@ fn sync_pill(
     accent: &Signal<[f32; 4]>,
     on_sync: Rc<dyn Fn()>,
 ) {
-    let fg = crate::widgets::color::accent_fg(accent);
+    // Fill + label as a pair: the wash is translucent, so a foreground
+    // picked against the *solid* accent reads against the wrong bed —
+    // a pale accent chose near-black text for what is actually a dark
+    // frosted surface. `accent_surface` contrasts against the composited
+    // tint instead.
+    let c = crate::widgets::color::accent_surface(accent, PILL_WASH);
+    let fg = c.fg;
     let fg2 = fg.clone();
     s.glass(())
         .w(Len::Auto)
@@ -165,7 +202,7 @@ fn sync_pill(
         .abs(0.0, -t::SP_6)
         .radius(t::R_FULL)
         .blur(14.0)
-        .color(accent_wash(accent))
+        .color(c.fill)
         .hover_color(t::HOVER_LIFT)
         .cursor(CursorIcon::Pointer)
         .layer_opacity(lyrics.pill_opacity.clone())
@@ -203,17 +240,16 @@ fn sync_pill(
         });
 }
 
-/// The pill's fill: the album accent pulled down to a translucent wash, so
-/// the frost reads as *this* track's chrome without shouting over the
-/// words behind it.
-fn accent_wash(accent: &Signal<[f32; 4]>) -> Computed<[f32; 4]> {
-    Computed::new((accent.clone(),), |(a,)| [a[0], a[1], a[2], 0.30])
-}
+/// The pill's surface: the album accent pulled down to a translucent wash,
+/// so the frost reads as *this* track's chrome without shouting over the
+/// words behind it — and a label contrast-checked against that wash.
+const PILL_WASH: AccentSurface = AccentSurface::Tint(0.30);
 
 fn lines(
     c: &mut Scene,
     lyrics: &LyricsModel,
     accent: &Signal<[f32; 4]>,
+    clock: LineClock,
     on_seek_to: &Rc<dyn Fn(u32)>,
 ) {
     let Some(l) = lyrics.lyrics.as_ref() else {
@@ -257,13 +293,32 @@ fn lines(
         };
         let start_ms = line.start_ms;
         let seek = on_seek_to.clone();
+        // Only the line at the playhead carries a live clock; every
+        // other one gets the resting params, which the effect answers by
+        // leaving its glyphs alone. The frame loop re-pushes exactly the
+        // two lines a handover touches — see `app::frame::tick`.
+        let params = if l.synced && lyrics.active.get() == i {
+            clock.params()
+        } else {
+            LineClock::default().params()
+        };
         let mut row = c.row(line_node(i));
-        row.w(Len::Fill).child(|r| {
-            r.text((), &line.text, LINE_TEXT)
+        row.w(Len::Fill).child(move |r| {
+            r.text(text_node(i), &line.text, LINE_TEXT)
                 .color(color)
                 .font_size_bind(size)
                 .w(Len::Fill)
-                .wrap();
+                .wrap()
+                // The sung-line sweep, run per glyph on the GPU: it
+                // lights left to right off the shader clock and the live
+                // audio, with nothing pumped per frame.
+                .text_fx(opal_gfx::TEXT_FX_KARAOKE)
+                .effect_data(&params)
+                .effect_animated()
+                // Letters landing on a beat need more frames than a
+                // drifting row field does; asking here keeps the rest of
+                // the app at its own cheaper rate.
+                .effect_fps(LINE_FPS);
         });
         // Click a line to jump there — only meaningful when the timings
         // are real.
@@ -283,9 +338,6 @@ fn lines(
                     .color(t::TEXT_DIM);
             });
     }
-    // Tail space so the last line can still scroll to the middle of the
-    // viewport like every other one.
-    c.row(()).w(Len::Fill).h_px(t::SP_40);
 }
 
 /// The lit line's colour: the accent, lifted to clear the chrome contrast

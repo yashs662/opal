@@ -42,6 +42,7 @@ pub async fn start(
     quality: crate::prefs::AudioQuality,
     normalize: bool,
     eq: Arc<crate::audio_eq::EqShared>,
+    levels: Arc<crate::audio_levels::AudioLevels>,
 ) -> Result<SpircBootstrap, AuthError> {
     // External cluster subscription must land BEFORE Spirc's own
     // dealer subs to be sure we register first in the listener map.
@@ -109,7 +110,10 @@ pub async fn start(
     // the OS default device — the stock backend binds one WASAPI stream
     // to whatever was default at startup, forever (see audio_sink.rs).
     let player = Player::new(player_config, session.clone(), volume_getter, move || {
-        Box::new(crate::audio_sink::SwitchingSink::new(eq.clone()))
+        Box::new(crate::audio_sink::SwitchingSink::new(
+            eq.clone(),
+            levels.clone(),
+        ))
     });
     // Grab the event stream before Spirc consumes the player.
     let player_events = player.get_player_event_channel();

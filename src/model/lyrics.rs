@@ -32,6 +32,51 @@ pub struct TrackLyrics {
     pub provider: String,
 }
 
+/// Where a line is in its own moment, as the shaders read it:
+/// `[active, start, duration, rate, frozen]`.
+///
+/// Derived, never stamped — `start` is the shader clock the line began
+/// at, so while playback runs at speed it stays *constant* frame over
+/// frame, and the params only need pushing when something actually
+/// changes (a new line, a pause, a seek). See [`LyricsModel::line_clock`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LineClock {
+    pub active: bool,
+    pub start: f32,
+    pub duration: f32,
+    pub playing: bool,
+    pub progress: f32,
+}
+
+impl LineClock {
+    /// The shader params. One definition, used by the view when it builds
+    /// a line and by the frame loop when it pushes an update.
+    pub fn params(self) -> [f32; 5] {
+        [
+            if self.active { 1.0 } else { 0.0 },
+            self.start,
+            self.duration,
+            if self.playing { 1.0 } else { 0.0 },
+            self.progress,
+        ]
+    }
+
+    /// Whether this is a different enough moment from `other` to be worth
+    /// pushing. While playing, `start` jitters by a frame of tween error;
+    /// re-uploading params for that would be a re-flatten every frame.
+    pub fn differs_from(self, other: Self) -> bool {
+        self.active != other.active
+            || self.playing != other.playing
+            || (self.duration - other.duration).abs() > 0.01
+            || (self.start - other.start).abs() > 0.08
+            || (!self.playing && (self.progress - other.progress).abs() > 0.005)
+    }
+}
+
+/// How long the last line of a song is treated as lasting — there is no
+/// next line to end it, and a sweep needs some span to run over.
+const LAST_LINE_MS: u32 = 6_000;
+
 /// Line-to-line handover: how long the outgoing line takes to shrink
 /// back and the incoming one to grow. Short enough to feel locked to the
 /// music, long enough to read as motion rather than a jump.
@@ -83,6 +128,10 @@ pub struct LyricsModel {
     /// A sync-pill press waiting to be honoured: re-centre on the active
     /// line even though the highlight itself didn't move.
     resync: bool,
+    /// The moment last pushed to the shaders, so the frame loop can tell
+    /// a real change (new line, pause, seek) from the clock simply
+    /// advancing — which needs no push at all.
+    pub pushed_clock: LineClock,
     /// Sync pill entry/exit — opacity + a small upward slide, both
     /// composite-only binds on the pill's own layer.
     pub pill_opacity: Signal<f32>,
@@ -105,6 +154,7 @@ impl Default for LyricsModel {
             follow: true,
             commanded_y: 0.0,
             resync: false,
+            pushed_clock: LineClock::default(),
             pill_opacity: Signal::new(0.0),
             pill_y: Signal::new(PILL_RISE),
             missing: HashSet::new(),
@@ -136,6 +186,47 @@ impl LyricsModel {
         tl.animate(&self.pill_y, y, PILL_CURVE, PILL_DURATION, now);
         if on {
             self.resync = true;
+        }
+    }
+
+    /// Where line `i` is in its own moment at `position_ms`, for the
+    /// shaders. Any line that isn't the one at the playhead gets the
+    /// resting clock, which every effect answers by leaving its glyphs
+    /// exactly where the layout put them.
+    pub fn line_clock(
+        &self,
+        i: usize,
+        position_ms: u32,
+        playing: bool,
+        effect_time: f32,
+    ) -> LineClock {
+        let Some(l) = self.lyrics.as_ref() else {
+            return LineClock::default();
+        };
+        if !l.synced || self.active.get() != i {
+            return LineClock::default();
+        }
+        let Some(line) = l.lines.get(i) else {
+            return LineClock::default();
+        };
+        // A line runs until the next one starts; the last one has nothing
+        // to end it, so it gets a sensible span to sweep over.
+        let end_ms = l
+            .lines
+            .get(i + 1)
+            .map(|n| n.start_ms)
+            .unwrap_or(line.start_ms + LAST_LINE_MS);
+        let duration = (end_ms.saturating_sub(line.start_ms) as f32 / 1000.0).max(0.2);
+        let elapsed = (position_ms.saturating_sub(line.start_ms) as f32 / 1000.0).max(0.0);
+        LineClock {
+            active: true,
+            // The clock the line *began* at — the shader runs the sweep
+            // from there, so a rebuild mid-line resumes instead of
+            // restarting, and a steady playhead never moves this value.
+            start: effect_time - elapsed,
+            duration,
+            playing,
+            progress: (elapsed / duration).clamp(0.0, 1.0),
         }
     }
 
@@ -237,6 +328,34 @@ mod tests {
             }),
         );
         m
+    }
+
+    #[test]
+    fn only_the_line_at_the_playhead_gets_an_active_clock() {
+        let m = model(&[0, 4000]);
+        m.active.set(1);
+        let idle = m.line_clock(0, 5000, true, 100.0);
+        assert!(!idle.active);
+        assert_eq!(idle.params()[0], 0.0);
+        let live = m.line_clock(1, 5000, true, 100.0);
+        assert!(live.active && live.playing);
+        // Started a second ago, and runs on past the last timestamp.
+        assert!((live.start - 99.0).abs() < 1e-3);
+        assert!((live.duration - LAST_LINE_MS as f32 / 1000.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_steady_playhead_keeps_the_same_start_so_nothing_is_pushed() {
+        let m = model(&[0, 4000]);
+        m.active.set(0);
+        // A second of playback advances the position and the clock
+        // together, so the line's start is unmoved — no param push.
+        let a = m.line_clock(0, 1000, true, 10.0);
+        let b = m.line_clock(0, 2000, true, 11.0);
+        assert!(!b.differs_from(a));
+        // A seek moves it, and that does need pushing.
+        let c = m.line_clock(0, 3500, true, 11.0);
+        assert!(c.differs_from(b));
     }
 
     #[test]

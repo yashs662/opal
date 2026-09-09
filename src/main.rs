@@ -7,6 +7,7 @@ mod album_art;
 mod api;
 mod app;
 mod audio_eq;
+mod audio_levels;
 mod audio_sink;
 mod auth;
 mod bounded;
@@ -173,7 +174,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // worker hands a clone to the audio sink at session bootstrap (audio
     // reads). One `Arc` bridges the two threads lock-free.
     let eq_shared = app.state().eq.shared();
-    let worker = Rc::new(Worker::new(app.wake_handle(), app.uploader(), eq_shared));
+    // The live spectrum of what Opal decodes: the audio thread publishes
+    // into it from the sink, the frame tick hands it to the engine, and
+    // the lyric shaders move to it. Silent (and harmless) when the hidden
+    // official client is the playback engine — those samples never pass
+    // through this process.
+    let audio_levels = app.state().audio_levels.clone();
+    let worker = Rc::new(Worker::new(
+        app.wake_handle(),
+        app.uploader(),
+        eq_shared,
+        audio_levels,
+    ));
     // Stored tokens can only be refreshed with the user's own client id;
     // empty when unconfigured (then an expired pair just routes to login).
     worker.try_load_tokens(app.state().prefs.data.client_id().unwrap_or_default());

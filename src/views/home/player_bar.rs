@@ -15,7 +15,7 @@ use opal_gfx::{Align, Computed, CursorIcon, Curve, Justify, Len, Scene, Signal};
 use crate::model::{BackdropModel, DevicesModel, MembershipModel, PlayerModel};
 use crate::views::MainNav;
 use crate::views::home::{NavFn, PlayerAction};
-use crate::widgets::color::{accent_fg, toggle_tint};
+use crate::widgets::color::{AccentSurface, accent_fg, accent_surface, toggle_tint};
 use crate::widgets::component::Component;
 use crate::widgets::crossfade::crossfaded_art;
 use crate::widgets::icon::{Icon, IconSet};
@@ -120,21 +120,14 @@ impl Component for PlayerBar<'_> {
                                 // actually playing rather than leaving the
                                 // user to infer it from the sound.
                                 if self.engine.is_active() {
-                                    // Accent-tinted fill + a stronger accent
-                                    // hairline, both derived from the live
-                                    // cover accent so the badge belongs to
-                                    // the same palette as the rest of the
-                                    // chrome rather than reading as chrome
-                                    // bolted on.
-                                    let fill =
-                                        Computed::new((self.backdrop.accent.clone(),), |(acc,)| {
-                                            [acc[0], acc[1], acc[2], 0.16]
-                                        });
-                                    // The hairline stays neutral: engine
-                                    // borders take a static colour (only
-                                    // fills accept a bind), and a frozen
-                                    // accent edge would drift out of step
-                                    // with the tint as covers change.
+                                    // Fill + foreground come as a pair from
+                                    // `accent_surface` — never hand-picked
+                                    // apart, which is how the badge once ended
+                                    // up as accent text on an accent tint (two
+                                    // near-identical luminances that vanished
+                                    // on dark covers).
+                                    let c =
+                                        accent_surface(&self.backdrop.accent, AccentSurface::Solid);
                                     // Wrapper supplies the top margin: the
                                     // engine has no margin builder, and
                                     // padding on the badge itself would just
@@ -144,12 +137,10 @@ impl Component for PlayerBar<'_> {
                                         w.row(())
                                             .pad_xy(t::SP_2, t::SP_0_5)
                                             .radius(t::R_SM)
-                                            .color(fill)
-                                            .border(1.0, t::BORDER)
+                                            .color(c.fill)
                                             .align(Align::Center)
                                             .child(|p| {
-                                                p.text((), "LOSSLESS", 9.0)
-                                                    .color(self.backdrop.accent.clone());
+                                                p.text((), "LOSSLESS", 9.0).color(c.fg);
                                             });
                                     });
                                 }

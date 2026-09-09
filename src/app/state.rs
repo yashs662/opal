@@ -24,6 +24,10 @@ pub struct AppState {
     /// Timed-lyrics slice: the playing track's lines + the reactive
     /// active-line index the lyrics page highlights from.
     pub lyrics: crate::model::lyrics::LyricsModel,
+    /// Live spectrum of the audio Opal is decoding, published by the sink
+    /// and read once a frame into the engine's shader globals. All zeros
+    /// when the official client is the engine (no samples of our own).
+    pub audio_levels: std::sync::Arc<crate::audio_levels::AudioLevels>,
     /// Spotify Canvas slice: cached clip path, off-thread decode session,
     /// frame sink + live target node, dim/hover overlay, `show_canvas`.
     pub canvas: CanvasModel,
@@ -118,6 +122,7 @@ impl AppState {
             library: LibraryModel::new(),
             now_field: Default::default(),
             lyrics: Default::default(),
+            audio_levels: crate::audio_levels::AudioLevels::new(),
             canvas: CanvasModel::new(prefs.show_canvas),
             art: ArtModel::new(),
             backdrop: BackdropModel::new(prefs.backdrop_blur),
