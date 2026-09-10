@@ -3062,6 +3062,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
 ]
 
 [[package]]
@@ -3389,6 +3390,9 @@ dependencies = [
  "linux-keyutils-keyring-store",
  "log",
  "oauth2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "opal-gfx",
  "openh264",
  "protobuf",
@@ -3421,6 +3425,9 @@ dependencies = [
  "env_logger",
  "etagere",
  "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "png 0.18.1",
  "pollster",
  "resvg",

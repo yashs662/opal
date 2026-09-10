@@ -8,8 +8,9 @@
 //! requirement — see [`set_show_window`] for the "show the Spotify window"
 //! setting.
 //!
-//! Nothing here modifies Spotify. It is process launch plus `ShowWindow` —
-//! the same calls a taskbar utility makes.
+//! Nothing here modifies Spotify. It is process launch plus a window hide
+//! (`ShowWindow` on Windows, `NSRunningApplication.hide` on macOS) — the
+//! same calls a taskbar utility or ⌘H makes.
 //!
 //! # Ownership
 //!
@@ -53,7 +54,7 @@ pub fn set_show_window(show: bool) {
 }
 
 /// Who started the client, which decides the teardown.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ownership {
     /// Opal launched it — closing it again on the way out is fair game and
@@ -65,7 +66,7 @@ pub enum Ownership {
 }
 
 /// The engine's live state, held by the worker across commands.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub struct EngineState {
     pub ownership: Ownership,
@@ -81,27 +82,33 @@ pub enum Restore {
     /// the client (its own audio-quality setting lives in there).
     Show,
     /// Minimised — Opal is quitting. The client stays reachable in the
-    /// taskbar and keeps playing, without a window leaping up as the app
-    /// the user just closed disappears.
+    /// taskbar (or the Dock, where "hidden" already means exactly this) and
+    /// keeps playing, without a window leaping up as the app the user just
+    /// closed disappears.
     Minimized,
 }
 
 /// Whether this platform can host the engine at all.
 ///
 /// Hiding another application's window is inherently platform-specific:
-/// Win32 does it with one `ShowWindow` call and no permission, macOS needs
-/// Accessibility/Automation consent through AppleScript, and Wayland has no
-/// protocol for it at all. Only Windows is implemented — the UI reads this
-/// to leave the setting out entirely rather than offer a control that can
-/// only fail.
-pub const SUPPORTED: bool = cfg!(windows);
+/// Win32 does it with one `ShowWindow` call, macOS with
+/// `NSRunningApplication.hide` (app-level, the ⌘H mechanism), neither
+/// needing permission. Wayland has no protocol for it at all. The UI reads
+/// this to leave the setting out entirely rather than offer a control that
+/// can only fail.
+pub const SUPPORTED: bool = cfg!(any(windows, target_os = "macos"));
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::{acquire, enforce_window_state, locate, release};
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{acquire, enforce_window_state, locate, release};
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod unsupported;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use unsupported::{acquire, enforce_window_state, locate, release};

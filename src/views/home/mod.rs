@@ -108,6 +108,13 @@ struct Layout<'a> {
     pub player_bar: &'a crate::views::home::player_bar::PlayerBar<'a>,
     /// The top chrome bar (search + window controls), a [`Component`].
     pub top_bar: &'a crate::views::home::top_bar::TopBar<'a>,
+    /// Two-finger swipe edge arrows — the engine's live pull plus the
+    /// history flags that decide which edge answers.
+    pub swipe_pull: &'a Signal<f32>,
+    pub can_back: &'a Signal<bool>,
+    pub can_forward: &'a Signal<bool>,
+    pub accent: &'a Signal<[f32; 4]>,
+    pub icons: &'a crate::widgets::icon::IconSet,
     /// The centre pane (Home feed / playlist page), a [`Component`].
     pub main_pane: &'a crate::views::home::main_pane::MainPane<'a>,
     /// The settings modal, a [`Component`] owning its `Overlay` wrapper.
@@ -227,6 +234,14 @@ fn render(s: &mut Scene, v: &Layout) {
                 v.now_playing.view(b);
             });
         v.player_bar.view(root);
+        crate::widgets::swipe_indicator::view(
+            root,
+            v.icons,
+            v.swipe_pull,
+            v.can_back,
+            v.can_forward,
+            v.accent,
+        );
         // Modals — rendered last (layer on top), components that own
         // their Overlay wrappers. Skipped entirely when closed.
         v.settings_panel.view(root);
@@ -691,6 +706,7 @@ impl HomeView {
                             duration: playlist::fmt_duration(tk.duration_ms),
                             sources,
                             in_library,
+                            plays: None,
                         }
                     };
                 // Every heart — here and on the playlist/album pages — reads
@@ -711,7 +727,12 @@ impl HomeView {
                 let popular = a
                     .top_tracks
                     .iter()
-                    .map(|tk| row_of(tk, None, state.membership.is_saved(&tk.uri)))
+                    .map(|pt| {
+                        let mut row =
+                            row_of(&pt.track, None, state.membership.is_saved(&pt.track.uri));
+                        row.plays = pt.plays;
+                        row
+                    })
                     .collect();
                 artist::ArtistViewData {
                     name: a.name.clone(),
@@ -883,6 +904,11 @@ impl HomeView {
             player_bar: &player_bar,
             sidebar: &sidebar,
             top_bar: &top_bar,
+            swipe_pull: &state.router.swipe_pull,
+            can_back: &state.router.can_back,
+            can_forward: &state.router.can_forward,
+            accent: &state.backdrop.accent,
+            icons,
             main_pane: &main_pane,
             settings_panel: &settings_panel,
             devices_panel: &devices_panel,

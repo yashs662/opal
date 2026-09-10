@@ -405,6 +405,7 @@ fn results_section(
                     sources: None,
                     in_library: membership.is_saved(&tk.uri),
                     playable: tk.playable,
+                    plays: None,
                 },
                 row_actions,
             );

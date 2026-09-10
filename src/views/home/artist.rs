@@ -43,6 +43,8 @@ pub struct ArtistTrackRow {
     /// "Liked Songs • Chill" — which library sources hold this track.
     pub sources: Option<String>,
     pub in_library: bool,
+    /// Lifetime stream count — Popular rows only, when the source has it.
+    pub plays: Option<u64>,
 }
 
 /// Everything the artist page needs for one render. Built per rebuild from
@@ -136,6 +138,7 @@ pub fn view(
                             sources: row.sources.clone(),
                             in_library: row.in_library,
                             playable: row.track.playable,
+                            plays: row.plays.map(crate::widgets::track_row::fmt_plays),
                         },
                         actions,
                     );
@@ -175,6 +178,7 @@ pub fn view(
                             sources: row.sources.clone(),
                             in_library: row.in_library,
                             playable: row.track.playable,
+                            plays: None,
                         },
                         actions,
                     );

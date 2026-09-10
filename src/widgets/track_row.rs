@@ -67,6 +67,8 @@ pub const ROW_H: f32 = t::SP_14;
 /// header's "Album" column so the labels line up; content wider than this
 /// marquees instead of truncating.
 const ALBUM_W: f32 = t::SP_48;
+/// Play-count column — wide enough for a ten-digit count with separators.
+const PLAYS_W: f32 = t::SP_24;
 
 /// Everything one row needs. Built per rebuild by the surface.
 pub struct TrackRow {
@@ -87,6 +89,23 @@ pub struct TrackRow {
     pub in_library: bool,
     /// Playable — a local/region-blocked track renders dim + inert.
     pub playable: bool,
+    /// Pre-formatted lifetime play count ("12,345,678") — the artist
+    /// page's Popular rows; `None` hides the column.
+    pub plays: Option<String>,
+}
+
+/// Full play count with thousands separators, the way the official client
+/// prints it — a stream count is read as a number, not a magnitude.
+pub fn fmt_plays(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Where a row stands in the now-playing handover: how long ago the
@@ -236,6 +255,12 @@ pub fn track_row(s: &mut Scene, row: TrackRow, actions: &TrackRowActions) {
         .w_px(ALBUM_W)
         .h(Len::Fill)
         .align(Align::Center);
+        // Play count — Popular rows only.
+        if let Some(plays) = &row.plays {
+            r.row(()).w_px(PLAYS_W).justify(Justify::End).child(|c| {
+                c.text((), plays.clone(), 12.0).color(t::TEXT_DIM);
+            });
+        }
         // Heart — opens the like picker targeted at this row.
         like_heart(
             r,
@@ -284,4 +309,18 @@ pub fn like_heart(
         .child(|c| {
             icons.render(c, glyph, t::ICON_SM, tint.clone());
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_plays;
+
+    #[test]
+    fn plays_get_thousands_separators() {
+        assert_eq!(fmt_plays(0), "0");
+        assert_eq!(fmt_plays(999), "999");
+        assert_eq!(fmt_plays(1_000), "1,000");
+        assert_eq!(fmt_plays(12_345_678), "12,345,678");
+        assert_eq!(fmt_plays(1_234_567_890), "1,234,567,890");
+    }
 }

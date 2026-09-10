@@ -32,6 +32,14 @@ fn land_pre_auth(state: &mut AppState, cx: &mut Cx) {
     }
 }
 
+/// New Web API credentials (login, startup load, refresh): the auth slice
+/// for the UI, and the process-wide live copy every request reads at send
+/// time (`auth::live`) — the two must never diverge.
+fn install_auth(state: &mut AppState, auth: crate::auth::oauth::SpotifyAuthResponse) {
+    crate::auth::live::install(&auth, state.prefs.data.client_id().unwrap_or_default());
+    state.auth.set(auth);
+}
+
 /// The session's credentials are dead (revoked token, denied login) —
 /// wipe them and send the user back to the pre-auth screen. Mirrors the
 /// manual sign-out: the settings modal must not be up next sign-in.
@@ -64,8 +72,13 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             }
             // Persist (debounced) so the device volume survives restarts
             // and seeds the Connect device's advertised initial volume.
-            state.prefs.data.audio.volume = fraction.clamp(0.0, 1.0);
-            state.prefs.mark_dirty(cx.now);
+            // Every cluster push reports the volume; only a *change* is
+            // worth a disk write.
+            let volume = fraction.clamp(0.0, 1.0);
+            if (state.prefs.data.audio.volume - volume).abs() > f32::EPSILON {
+                state.prefs.data.audio.volume = volume;
+                state.prefs.mark_dirty(cx.now);
+            }
         }
         WorkerResponse::OAuthStarted { auth_url } => {
             log::info!("opening browser for OAuth: {auth_url}");
@@ -77,7 +90,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // Mid-session refresh: swap the live token only. Everything
             // else (home data, librespot session, Spirc device) keeps
             // running — the session authenticated once and stays up.
-            state.auth.set(auth);
+            install_auth(state, auth);
         }
         WorkerResponse::TokensRefreshFailed { permanent } => {
             if permanent {
@@ -123,7 +136,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 // and it stays paused.
                 worker.start_lossless_engine(auth.access_token.clone(), false);
             }
-            state.auth.set(auth);
+            install_auth(state, auth);
             if state.router.view != View::Home {
                 state.router.view = View::Home;
                 cx.rebuild();
@@ -988,7 +1001,11 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 let covers = albums
                     .iter()
                     .filter_map(|al| al.image_url.as_ref())
-                    .chain(top_tracks.iter().filter_map(|t| t.album_image_url.as_ref()))
+                    .chain(
+                        top_tracks
+                            .iter()
+                            .filter_map(|t| t.track.album_image_url.as_ref()),
+                    )
                     .chain(
                         library_tracks
                             .iter()

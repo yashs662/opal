@@ -249,6 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let home_view = views::home::HomeView::new(dispatch.clone(), icons.clone());
     let login_view = views::login::LoginView::new(dispatch.clone(), icons.clone());
+    let swipe_dispatch = dispatch.clone();
     let setup_view = views::setup::SetupView::new(dispatch, icons.clone());
 
     let app = {
@@ -289,6 +290,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // as Opal disappears), a process we launched gets closed. Without
         // this, quitting Opal would strand an invisible Spotify.
         official_app::release(official_app::Restore::Minimized);
+    });
+
+    // Two-finger trackpad swipe = the top-bar history arrows, with the
+    // engine's live pull driving the edge indicators.
+    let mut app = app;
+    let pull = app.swipe_progress();
+    app.state_mut().router.swipe_pull = pull;
+    let app = app.on_swipe_nav(move |dir, _ctx| {
+        swipe_dispatch.send(match dir {
+            opal_gfx::SwipeNav::Back => app::msg::Msg::NavBack,
+            opal_gfx::SwipeNav::Forward => app::msg::Msg::NavForward,
+        })
     });
 
     // Register as an OS media app once the window is up (SMTC needs its

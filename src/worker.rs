@@ -21,7 +21,7 @@ use log::{debug, error, info, warn};
 use opal_gfx::{ImageHandle, Uploader, WakeHandle};
 use protobuf::EnumOrUnknown;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Duration;
@@ -199,11 +199,9 @@ pub enum WorkerCommand {
         local: bool,
     },
     /// Proactively refresh the access token before it expires (dispatched
-    /// by the frame tick's due-check; see `AuthModel::refresh_due`).
-    RefreshTokens {
-        refresh_token: String,
-        client_id: String,
-    },
+    /// by the frame tick's due-check; see `AuthModel::refresh_due`). The
+    /// live credentials live in `auth::live`, so there is nothing to carry.
+    RefreshTokens,
     /// List Connect devices for the devices popup.
     FetchDevices {
         access_token: String,
@@ -412,7 +410,7 @@ pub enum WorkerResponse {
         name: String,
         image_url: Option<String>,
         followers: u64,
-        top_tracks: Vec<api::PlaylistTrack>,
+        top_tracks: Vec<api::PopularTrack>,
         albums: Vec<api::AlbumRef>,
         library_tracks: Vec<(api::PlaylistTrack, Vec<String>)>,
     },
@@ -512,9 +510,10 @@ pub enum WorkerResponse {
     SpotifySessionFailed {
         error: String,
     },
-    /// The librespot `spirc_task` ended (dealer/AP socket dropped on a long
-    /// session) — the Connect device is offline. The reducer reconnects with
-    /// a fresh token; the worker already backed off before sending this.
+    /// The librespot session is gone (AP socket dropped, system slept) or a
+    /// connect attempt failed transiently — the Connect device is offline.
+    /// The reducer reconnects with a fresh token; the worker already backed
+    /// off before sending this.
     SpotifySessionLost,
     /// The playlist-membership index is ready — carries the editable
     /// playlist list (id + name) for the heart picker.
@@ -566,6 +565,14 @@ impl Worker {
         let (cmd_tx, mut cmd_rx) = tmpsc::unbounded_channel::<WorkerCommand>();
         let (resp_tx, resp_rx): (Sender<WorkerResponse>, Receiver<WorkerResponse>) = channel();
         let resp = Responder { tx: resp_tx, wake };
+        // Every token refresh — proactive or forced by a 401 — reaches the
+        // UI through this one hook (see `auth::live`).
+        {
+            let resp = resp.clone();
+            crate::auth::live::on_refresh(move |auth| {
+                resp.send(WorkerResponse::TokensRefreshed { auth });
+            });
+        }
 
         thread::spawn(move || {
             // Bound the blocking pool: every disk-cache read/write and
@@ -737,10 +744,7 @@ impl Worker {
                             steps,
                             local,
                         ),
-                        WorkerCommand::RefreshTokens {
-                            refresh_token,
-                            client_id,
-                        } => spawn_refresh_tokens(resp.clone(), refresh_token, client_id),
+                        WorkerCommand::RefreshTokens => spawn_refresh_tokens(resp.clone()),
                         WorkerCommand::FetchDevices { access_token } => {
                             spawn_fetch_devices(resp.clone(), access_token)
                         }
@@ -962,11 +966,8 @@ impl Worker {
             position_ms,
         });
     }
-    pub fn refresh_tokens(&self, refresh_token: String, client_id: String) {
-        let _ = self.cmd_tx.send(WorkerCommand::RefreshTokens {
-            refresh_token,
-            client_id,
-        });
+    pub fn refresh_tokens(&self) {
+        let _ = self.cmd_tx.send(WorkerCommand::RefreshTokens);
     }
     pub fn fetch_devices(&self, access_token: String) {
         let _ = self
@@ -2536,21 +2537,36 @@ fn spawn_fetch_artist(
             .await
             .map(|p| p.country)
             .unwrap_or_default();
-        let (profile, top_tracks, albums) = tokio::join!(
+        let (profile, albums) = tokio::join!(
             api::get_artist(&access_token, &id),
-            api::get_artist_top_tracks(&access_token, &id, &market),
             api::get_artist_albums(&access_token, &id, 20),
         );
         // Partial failures degrade to empty sections, but loudly — a
         // silent swallow here once hid a whole API regression.
-        let top_tracks = top_tracks
-            .inspect_err(|e| warn!("artist top-tracks ({id}) failed: {e}"))
-            .unwrap_or_default();
         let albums = albums
             .inspect_err(|e| warn!("artist albums ({id}) failed: {e}"))
             .unwrap_or_default();
         match profile {
             Ok(p) => {
+                // Popular tracks: Spotify's own ranked list (with play
+                // counts) off the client-internal artist view when the
+                // session is up, else rebuilt from a name search — which is
+                // why this waits on the profile.
+                let session = { session_slot.lock().await.clone() };
+                let internal = match &session {
+                    Some(s) => artist_top_tracks_internal(s, &id)
+                        .await
+                        .inspect_err(|e| info!("artist view ({id}) unavailable: {e}"))
+                        .ok(),
+                    None => None,
+                };
+                let top_tracks = match internal {
+                    Some(t) => t,
+                    None => api::get_artist_top_tracks(&access_token, &id, &p.name, &market)
+                        .await
+                        .inspect_err(|e| warn!("artist top-tracks ({id}) failed: {e}"))
+                        .unwrap_or_default(),
+                };
                 // The user's saved songs by this artist, across the whole
                 // library. The reverse index makes the set complete; page
                 // caches resolve most metadata for free, and the handful in
@@ -2758,6 +2774,128 @@ fn proto_track_to_row(
 /// A saved track paired with the names of the sources (playlists / Liked
 /// Songs) that contain it — one artist-library row.
 type ArtistLibraryRow = (api::PlaylistTrack, Vec<String>);
+/// Spotify's own Popular list for an artist, with lifetime play counts,
+/// from the artist view the official clients render their artist page
+/// from (`spclient /artistview`). **Undocumented, internal**: the shape
+/// is read leniently (`top_tracks.tracks[].{uri,playcount}`) and any
+/// mismatch is an `Err` with a snippet of the body, so the caller's
+/// documented fallback takes over and the log shows what changed.
+/// Track metadata comes from the extended-metadata hydration the rest of
+/// the app uses, so rows look like every other track row.
+async fn artist_top_tracks_internal(
+    session: &Session,
+    artist_id: &str,
+) -> Result<Vec<api::PopularTrack>, String> {
+    let endpoint = format!(
+        "/artistview/v1/artist/{artist_id}?purchase_allowed=false&timeFormat=24h&locale=en&cat=1"
+    );
+    let body = session
+        .spclient()
+        .request(&http::Method::GET, &endpoint, None, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    #[cfg(debug_assertions)]
+    dump_artist_view(&body);
+    let ranked = parse_artist_view_top_tracks(&body)?;
+    let uris: Vec<String> = ranked.iter().map(|(u, _)| u.clone()).collect();
+    let hydrated = fetch_tracks_v4(session, &uris).await;
+    let by_uri: std::collections::HashMap<String, api::PlaylistTrack> =
+        hydrated.into_iter().map(|t| (t.uri.clone(), t)).collect();
+    let out: Vec<api::PopularTrack> = ranked
+        .into_iter()
+        .filter_map(|(uri, plays)| {
+            by_uri.get(&uri).map(|t| api::PopularTrack {
+                track: t.clone(),
+                plays,
+            })
+        })
+        .collect();
+    if out.is_empty() {
+        return Err("no top tracks hydrated".to_string());
+    }
+    info!(
+        "artist top-tracks ({artist_id}) via artist view: {} rows",
+        out.len()
+    );
+    Ok(out)
+}
+
+/// `(track uri, play count)` in Spotify's order, capped to the Popular
+/// section's length.
+///
+/// The artist view is a Hubs component tree (`{id, header, body: [...]}`),
+/// whose exact nesting differs by client version, so this walks the whole
+/// tree in document order and takes every object that names a track
+/// (`uri`, directly or under `metadata`), reading `playcount` from the
+/// same object or its `metadata` — as a number or a numeric string. The
+/// popular list is the first run of tracks in the body, so document
+/// order is rank order. Each uri once.
+fn parse_artist_view_top_tracks(body: &[u8]) -> Result<Vec<(String, Option<u64>)>, String> {
+    let snippet = || String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned();
+    let v: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("not JSON ({e}): {}", snippet()))?;
+    let mut rows: Vec<(String, Option<u64>)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_track_rows(&v, &mut rows, &mut seen);
+    rows.truncate(api::TOP_TRACKS);
+    if rows.is_empty() {
+        return Err(format!("no track uris in artist view: {}", snippet()));
+    }
+    Ok(rows)
+}
+
+fn collect_track_rows(
+    v: &serde_json::Value,
+    rows: &mut Vec<(String, Option<u64>)>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    match v {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_track_rows(item, rows, seen);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let meta = map.get("metadata").and_then(|m| m.as_object());
+            let uri = map
+                .get("uri")
+                .or_else(|| meta.and_then(|m| m.get("uri")))
+                .and_then(|u| u.as_str())
+                .filter(|u| u.starts_with("spotify:track:"));
+            if let Some(uri) = uri
+                && seen.insert(uri.to_string())
+            {
+                let plays = map
+                    .get("playcount")
+                    .or_else(|| meta.and_then(|m| m.get("playcount")))
+                    .and_then(|p| {
+                        p.as_u64()
+                            .or_else(|| p.as_str().and_then(|s| s.parse().ok()))
+                    });
+                rows.push((uri.to_string(), plays));
+            }
+            for child in map.values() {
+                collect_track_rows(child, rows, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Keep the last artist-view response on disk (`<cache>/debug/artistview.json`)
+/// so an unexpected shape can be read in full rather than from a log
+/// snippet. Best-effort, debug builds only.
+#[cfg(debug_assertions)]
+fn dump_artist_view(body: &[u8]) {
+    if let Some(dir) = disk_cache::root_dir().map(|r| r.join("debug")) {
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("artistview.json");
+        if std::fs::write(&path, body).is_ok() {
+            debug!("artist view body written to {}", path.display());
+        }
+    }
+}
+
 /// `artist_library_scan`'s result: rows resolved from caches, plus
 /// `(uri, source_names)` for saved-by-this-artist tracks needing a
 /// metadata fetch.
@@ -3257,12 +3395,16 @@ fn spawn_connect_session(
                 resp.send(WorkerResponse::SpotifySessionFailed {
                     error: e.to_string(),
                 });
+                // Not a spent grant (that's `Credentials` at bootstrap) —
+                // the network is the usual cause, so keep trying.
+                schedule_session_retry(resp.clone(), "streaming authorisation failed");
                 return;
             }
         };
 
         let s = spotify_session::new_session();
         *session_slot.lock().await = Some(s.clone());
+        let session_for_watch = s.clone();
 
         let creds = Credentials::with_access_token(streaming_token);
         let boot =
@@ -3276,17 +3418,22 @@ fn spawn_connect_session(
                     // the next attempt re-consents instead of replaying a
                     // dead token. The Web API login is a separate grant and
                     // stays untouched.
-                    if matches!(e, AuthError::Credentials(_))
-                        && let Err(e) = crate::auth::streaming::delete()
-                    {
+                    let credentials = matches!(e, AuthError::Credentials(_));
+                    if credentials && let Err(e) = crate::auth::streaming::delete() {
                         warn!("clearing streaming grant: {e}");
                     }
                     resp.send(WorkerResponse::SpotifySessionFailed {
                         error: e.to_string(),
                     });
+                    // Anything but a dead grant is transient (no network
+                    // after a wake, an AP hiccup) — retry with back-off.
+                    if !credentials {
+                        schedule_session_retry(resp.clone(), "spirc bootstrap failed");
+                    }
                     return;
                 }
             };
+        SESSION_RETRIES.store(0, Ordering::Relaxed);
         info!("spirc connect device registered as 'Opal'");
         let spirc_bootstrap::SpircBootstrap {
             spirc,
@@ -3296,18 +3443,22 @@ fn spawn_connect_session(
         } = boot;
         *spirc_slot.lock().await = Some(spirc);
 
-        // Drive the Connect device event loop. If it ends, the dealer/AP
-        // socket dropped (a long-idle session, a network blip) — the device
-        // is offline and playback can't recover on its own. Back off briefly,
-        // then ask the host to reconnect with a fresh token (the reducer
-        // re-dispatches `ConnectSpotifySession`); the back-off keeps a hard
-        // failure from hot-looping.
+        // Drive the Connect device event loop under supervision. When the
+        // session dies (AP socket closed, keep-alive missed, the machine
+        // slept) the device is offline and playback can't recover on its
+        // own: tear the session down and ask the host to reconnect (the
+        // reducer re-dispatches `ConnectSpotifySession`).
         let resp_for_task = resp.clone();
         tokio::spawn(async move {
-            spirc_task.await;
-            warn!("spirc_task ended — Connect device offline, reconnecting");
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            resp_for_task.send(WorkerResponse::SpotifySessionLost);
+            let reason = supervise_session(spirc_task, &session_for_watch).await;
+            warn!("{reason} — Connect device offline, reconnecting");
+            // Stop the old dealer's own 10 s reconnect loop — it would keep
+            // spinning next to the replacement session forever.
+            session_for_watch.dealer().close().await;
+            if !session_for_watch.is_invalid() {
+                session_for_watch.shutdown();
+            }
+            schedule_session_retry(resp_for_task, reason);
         });
 
         // Drain cluster updates into UI-thread responses (remote devices'
@@ -3444,12 +3595,78 @@ fn spawn_connect_session(
     });
 }
 
+/// How often the session supervisor looks at the session's health.
+const SESSION_CHECK: Duration = Duration::from_secs(5);
+/// A gap this long between two supervisor ticks means the machine slept.
+const SLEEP_GAP: Duration = Duration::from_secs(30);
+/// Reconnect back-off: `SESSION_RETRY_BASE * 2^n`, capped.
+const SESSION_RETRY_BASE: Duration = Duration::from_secs(3);
+const SESSION_RETRY_MAX: Duration = Duration::from_secs(120);
+/// Consecutive failed session attempts; zeroed by a successful bootstrap.
+static SESSION_RETRIES: AtomicU32 = AtomicU32::new(0);
+
+/// Run the Spirc event loop until it ends or the session is no longer
+/// worth keeping, and say why.
+///
+/// librespot's loop only re-checks `Session::is_invalid` after one of its
+/// event streams fires. After the AP socket closes it invalidates the
+/// session but nothing fires again, so the task hangs forever with the
+/// device offline — the supervisor polls the flag itself. A system sleep
+/// is caught directly rather than waiting the ~100 s the AP keep-alive
+/// takes to notice: on macOS the monotonic clock pauses while asleep so
+/// the wall clock runs ahead of it; on Windows/Linux it keeps counting, so
+/// the tick itself arrives late. Either gap means every socket is dead.
+async fn supervise_session(
+    mut spirc_task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    session: &Session,
+) -> &'static str {
+    let mut ticks = tokio::time::interval(SESSION_CHECK);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last = (std::time::Instant::now(), std::time::SystemTime::now());
+    loop {
+        tokio::select! {
+            () = &mut spirc_task => return "spirc_task ended",
+            _ = ticks.tick() => {
+                let now = (std::time::Instant::now(), std::time::SystemTime::now());
+                let mono = now.0.duration_since(last.0);
+                let wall = now.1.duration_since(last.1).unwrap_or_default();
+                last = now;
+                if wall.saturating_sub(mono) > SLEEP_GAP || mono > SESSION_CHECK + SLEEP_GAP {
+                    return "system resumed from sleep";
+                }
+                if session.is_invalid() {
+                    return "session invalidated";
+                }
+            }
+        }
+    }
+}
+
+/// Ask the host for a fresh session after an exponential back-off, so a
+/// dead network after a wake costs one cheap connect attempt every couple
+/// of minutes rather than a hot loop.
+fn schedule_session_retry(resp: Responder, reason: &str) {
+    let n = SESSION_RETRIES.fetch_add(1, Ordering::Relaxed).min(16);
+    let delay = SESSION_RETRY_BASE
+        .saturating_mul(1u32 << n)
+        .min(SESSION_RETRY_MAX);
+    info!("{reason} — session reconnect in {}s", delay.as_secs());
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        resp.send(WorkerResponse::SpotifySessionLost);
+    });
+}
+
 /// How long to wait for the official client's Connect device to appear in
 /// `/me/player/devices` after its window shows up. Registration trails the
 /// UI by a second or two on a cold start.
 const ENGINE_DEVICE_WAIT: Duration = Duration::from_secs(25);
-/// Cadence for both the device poll and the re-hide watchdog.
+/// Cadence of the device poll while the engine starts up.
 const ENGINE_POLL: Duration = Duration::from_secs(2);
+/// Cadence of the re-hide sweep while the engine is up. A window that
+/// pops back stays visible at most this long; it runs for the whole
+/// session, so it's paced for battery, not for snappiness.
+const ENGINE_WINDOW_POLL: Duration = Duration::from_secs(5);
 
 /// Pick the official client out of a Connect device list.
 ///
@@ -3587,7 +3804,7 @@ fn spawn_start_engine(
         let flag = watchdog.clone();
         tokio::spawn(async move {
             while flag.load(Ordering::Relaxed) {
-                tokio::time::sleep(ENGINE_POLL).await;
+                tokio::time::sleep(ENGINE_WINDOW_POLL).await;
                 let _ = tokio::task::spawn_blocking(official_app::enforce_window_state).await;
             }
         });
@@ -3611,11 +3828,26 @@ fn spawn_stop_engine(resp: Responder, watchdog: Arc<AtomicBool>) {
 }
 
 /// This machine's name, which is what Spotify calls its desktop device.
+/// On macOS that's the user-facing computer name ("Yash's MacBook Pro"),
+/// which lives in SystemConfiguration, not in any env var — read once,
+/// since the device poll asks every couple of seconds.
 fn hostname() -> Option<String> {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .filter(|s| !s.is_empty())
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        let name = std::process::Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        #[cfg(not(target_os = "macos"))]
+        let name = std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok());
+        name.filter(|s| !s.is_empty())
+    })
+    .clone()
 }
 
 fn spawn_fetch_devices(resp: Responder, access_token: String) {
@@ -3965,29 +4197,16 @@ fn spawn_edit_membership(
 }
 
 /// Proactive token refresh (mid-session — the startup path lives in
-/// `spawn_try_load`). Persists the rotated tokens so the next launch
-/// starts from the fresh pair.
-fn spawn_refresh_tokens(resp: Responder, refresh: String, client_id: String) {
+/// `spawn_try_load`). The refresh itself, its persistence and the
+/// `TokensRefreshed` announcement all happen in `auth::live`; this only
+/// reports a failure so the auth slice can back off or sign out.
+fn spawn_refresh_tokens(resp: Responder) {
     tokio::spawn(async move {
-        match refresh_token(&refresh, &client_id).await {
-            Ok(auth) => {
-                info!("access token refreshed proactively");
-                let prev = token_manager::load_tokens().ok();
-                let stored = StoredTokens::from_refresh(auth.clone(), prev.as_ref());
-                let _ = token_manager::save_tokens(&stored);
-                resp.send(WorkerResponse::TokensRefreshed { auth });
-            }
-            Err(e) => {
-                warn!("proactive token refresh failed: {e}");
-                // `invalid_grant` from the token endpoint = the refresh
-                // token itself is revoked/expired — retrying can never
-                // succeed. Anything else (network, 5xx) is transient.
-                let permanent = matches!(
-                    &e,
-                    AuthError::Api(body, _) if body.contains("invalid_grant")
-                );
-                resp.send(WorkerResponse::TokensRefreshFailed { permanent });
-            }
+        if let Err(e) = crate::auth::live::refresh().await {
+            warn!("proactive token refresh failed: {e}");
+            resp.send(WorkerResponse::TokensRefreshFailed {
+                permanent: crate::auth::live::is_permanent(&e),
+            });
         }
     });
 }
@@ -4039,4 +4258,63 @@ fn spawn_try_load(resp: Responder, client_id: String) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod artist_view_tests {
+    use super::parse_artist_view_top_tracks;
+
+    #[test]
+    fn artist_view_rows_keep_order_and_read_both_playcount_forms() {
+        let body = br#"{"top_tracks":{"tracks":[
+            {"uri":"spotify:track:a","playcount":12345678,"name":"A"},
+            {"uri":"spotify:track:b","playcount":"999","name":"B"},
+            {"uri":"spotify:track:c","name":"C"},
+            {"uri":"spotify:episode:x","playcount":5}
+        ]}}"#;
+        let rows = parse_artist_view_top_tracks(body).expect("parses");
+        assert_eq!(
+            rows,
+            vec![
+                ("spotify:track:a".to_string(), Some(12_345_678)),
+                ("spotify:track:b".to_string(), Some(999)),
+                ("spotify:track:c".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn artist_view_hubs_tree_yields_tracks_in_document_order() {
+        // The real shape: a Hubs component tree with the tracks nested in
+        // `body[].children[]`, uri + playcount under `metadata`.
+        let body = br#"{"id":"artist-entity-view","header":{"text":{"title":"X"}},
+          "body":[
+            {"id":"artist-entity-view-popular-tracks","children":[
+              {"text":{"title":"One"},"metadata":{"uri":"spotify:track:one","playcount":"1200"}},
+              {"text":{"title":"Two"},"metadata":{"uri":"spotify:track:two","playcount":900}},
+              {"text":{"title":"Two again"},"metadata":{"uri":"spotify:track:two"}}
+            ]},
+            {"id":"releases","children":[{"metadata":{"uri":"spotify:album:z"}}]}
+          ]}"#;
+        let rows = parse_artist_view_top_tracks(body).expect("parses");
+        assert_eq!(
+            rows,
+            vec![
+                ("spotify:track:one".to_string(), Some(1200)),
+                ("spotify:track:two".to_string(), Some(900)),
+            ]
+        );
+    }
+
+    #[test]
+    fn artist_view_shape_mismatch_is_an_error_with_a_snippet() {
+        let err = parse_artist_view_top_tracks(br#"{"header":{}}"#).unwrap_err();
+        assert!(err.starts_with("no track uris"), "{err}");
+        assert!(err.contains("header"), "{err}");
+        assert!(
+            parse_artist_view_top_tracks(b"<html>")
+                .unwrap_err()
+                .starts_with("not JSON")
+        );
+    }
 }

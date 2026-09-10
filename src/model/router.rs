@@ -56,6 +56,9 @@ pub struct RouterModel {
     /// Reactive can-go flags — the arrows' tints ride these (no rebuild).
     pub can_back: Signal<bool>,
     pub can_forward: Signal<bool>,
+    /// Live two-finger swipe pull from the engine (`App::swipe_progress`),
+    /// installed by `main` — the edge arrows ride it.
+    pub swipe_pull: Signal<f32>,
 }
 
 impl RouterModel {
@@ -73,6 +76,7 @@ impl RouterModel {
             forward: Vec::new(),
             can_back: Signal::new(false),
             can_forward: Signal::new(false),
+            swipe_pull: Signal::new(0.0),
         }
     }
 

@@ -607,6 +607,7 @@ fn track_row(
             sources: None,
             in_library: r.in_library,
             playable: r.playable,
+            plays: None,
         },
         actions,
     );

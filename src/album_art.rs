@@ -64,7 +64,7 @@ pub fn decode_to_rgba(bytes: &[u8], max_dim: u32) -> Option<(u32, u32, Vec<u8>)>
 pub fn extract_accent(rgba: &[u8], _w: u32, _h: u32) -> [f32; 4] {
     let mut sum = [0.0_f32; 3];
     let mut n: u32 = 0;
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let r = px[0] as f32 / 255.0;
         let g = px[1] as f32 / 255.0;
         let b = px[2] as f32 / 255.0;
@@ -91,7 +91,7 @@ pub fn extract_accent(rgba: &[u8], _w: u32, _h: u32) -> [f32; 4] {
 pub fn mean_luminance(rgba: &[u8]) -> f32 {
     let mut sum = 0.0_f32;
     let mut n: u32 = 0;
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         sum += crate::widgets::color::luminance([
             px[0] as f32 / 255.0,
             px[1] as f32 / 255.0,

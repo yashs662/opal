@@ -14,7 +14,7 @@ pub fn locate() -> Option<PathBuf> {
 }
 
 pub fn acquire() -> Result<EngineState, String> {
-    Err("the Spotify-client engine is only supported on Windows".to_string())
+    Err("the Spotify-client engine is only supported on Windows and macOS".to_string())
 }
 
 pub fn release(_restore: Restore) {}

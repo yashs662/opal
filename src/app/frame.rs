@@ -236,9 +236,9 @@ pub fn tick(
     // listening session must never start 401-ing mid-flight. Two Cell
     // reads per frame on the cold path; dispatches exactly once per due
     // window (the in-flight gate holds until the response lands).
-    if let Some(rt) = state.auth.refresh_due(cx.now) {
+    if state.auth.refresh_due() {
         log::info!("access token nearing expiry — refreshing");
-        worker.refresh_tokens(rt, state.prefs.data.client_id().unwrap_or_default());
+        worker.refresh_tokens();
     }
     // Hardware media keys / OS-panel buttons → the same transport intents
     // the player-bar buttons emit (queued ahead of the drain below).
@@ -275,7 +275,17 @@ pub fn tick(
         let playing = state.player_ui.is_playing.get();
         let progress_ms = (state.player_ui.progress.get() as f64
             * state.player_ui.duration_ms.get() as f64) as u64;
+        // The OS media panel is a synchronous call into the system's
+        // media daemon; name it in the log if it ever holds the frame.
+        let t0 = std::time::Instant::now();
         media.sync(state.player_ui.snapshot.as_ref(), playing, progress_ms);
+        let took = t0.elapsed();
+        if took > std::time::Duration::from_millis(250) {
+            log::warn!(
+                "[stall] media controls sync held the ui thread for {} ms",
+                took.as_millis()
+            );
+        }
     }
     // On search-modal open: clear the field (its node persists while the
     // modal is closed, so it would otherwise reopen with the last query) and

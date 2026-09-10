@@ -17,6 +17,32 @@ use crate::errors::AuthError;
 
 const API: &str = "https://api.spotify.com/v1";
 
+/// Send one authorised Web API request. **Every** request in this module
+/// goes through here, so the bearer is always the live token at send time
+/// (see [`crate::auth::live`]): refreshed first if it's about to expire,
+/// and — should Spotify still answer 401 — refreshed once more and the
+/// request replayed. `hint` is the token the caller was handed; it is only
+/// used when no live credentials are installed (tests, startup races).
+/// `build` is called per attempt so the retry is a fresh request.
+async fn send(
+    hint: &str,
+    build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, AuthError> {
+    use crate::auth::live;
+    let client = reqwest::Client::new();
+    let token = match live::bearer().await {
+        Some(t) => t?,
+        None => hint.to_string(),
+    };
+    let res = build(&client).bearer_auth(&token).send().await?;
+    if res.status() != reqwest::StatusCode::UNAUTHORIZED || !live::is_installed() {
+        return Ok(res);
+    }
+    log::warn!("web api 401 with a live token — refreshing and retrying once");
+    let fresh = live::refresh().await?.access_token;
+    Ok(build(&client).bearer_auth(fresh).send().await?)
+}
+
 /// Cache TTLs per endpoint class — the single knob for "how long is a
 /// cached Web API response good for". Every [`get_json`] caller picks one;
 /// adding an endpoint is a one-line choice here, and the response is then
@@ -394,11 +420,7 @@ async fn http_get_json<T: serde::de::DeserializeOwned>(
     token: &str,
     url: &str,
 ) -> Result<T, AuthError> {
-    let res = reqwest::Client::new()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await?;
+    let res = send(token, |c| c.get(url)).await?;
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
@@ -524,12 +546,11 @@ pub async fn add_to_playlist(
     track_uri: &str,
 ) -> Result<(), AuthError> {
     let body = serde_json::json!({ "uris": [track_uri] });
-    let res = reqwest::Client::new()
-        .post(format!("{API}/playlists/{playlist_id}/items"))
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await?;
+    let res = send(token, |c| {
+        c.post(format!("{API}/playlists/{playlist_id}/items"))
+            .json(&body)
+    })
+    .await?;
     playlist_write_result(res).await
 }
 
@@ -542,15 +563,14 @@ pub async fn remove_from_playlist(
     track_uri: &str,
 ) -> Result<(), AuthError> {
     let body = serde_json::json!({ "items": [{ "uri": track_uri }] });
-    let res = reqwest::Client::new()
-        .request(
+    let res = send(token, |c| {
+        c.request(
             reqwest::Method::DELETE,
             format!("{API}/playlists/{playlist_id}/items"),
         )
-        .bearer_auth(token)
         .json(&body)
-        .send()
-        .await?;
+    })
+    .await?;
     playlist_write_result(res).await
 }
 
@@ -631,6 +651,9 @@ struct RawTrack {
     /// `false` = not available in the user's region. Absent ⇒ playable.
     #[serde(default)]
     is_playable: Option<bool>,
+    /// 0–100 — the ranking behind the artist page's Popular section.
+    #[serde(default, deserialize_with = "null_default")]
+    popularity: u32,
 }
 #[derive(Deserialize)]
 struct RawArtist {
@@ -1404,27 +1427,80 @@ pub async fn resolve_context_meta(token: &str, uri: &str) -> Option<RecentContex
     }
 }
 
-/// An artist's most popular tracks (`/v1/artists/{id}/top-tracks`). Requires
-/// a `market` (the user's country); falls back to `US` if unknown. Mapped to
-/// `PlaylistTrack` so the artist page reuses the track-row rendering.
+/// An artist's most popular tracks. `/v1/artists/{id}/top-tracks` is
+/// deprecated (403 for Dev-Mode apps since the 2026 migration), so this
+/// rebuilds the list from one search page (10 is the API's cap now) of
+/// `artist:"<name>"` over tracks, kept to the tracks actually credited to
+/// `artist_id` (a same-named artist matches the filter too), one row per
+/// title (an album cut and its single are the same song to a listener),
+/// ranked by `popularity`.
+/// `market` (the user's country) decides regional availability; falls back
+/// to `US` if unknown. Mapped to `PlaylistTrack` so the artist page reuses
+/// the track-row rendering.
 pub async fn get_artist_top_tracks(
     token: &str,
     artist_id: &str,
+    artist_name: &str,
     market: &str,
-) -> Result<Vec<PlaylistTrack>, AuthError> {
+) -> Result<Vec<PopularTrack>, AuthError> {
     #[derive(Deserialize)]
     struct R {
+        tracks: Section,
+    }
+    #[derive(Deserialize)]
+    struct Section {
         #[serde(default)]
-        tracks: Vec<RawTrack>,
+        items: Vec<Option<RawTrack>>,
     }
     let market = if market.is_empty() { "US" } else { market };
-    let url = format!("{API}/artists/{artist_id}/top-tracks?market={market}");
+    let query = format!("artist:\"{}\"", artist_name.replace('"', ""));
+    let url = format!(
+        "{API}/search?q={}&type=track&limit={SEARCH_PAGE_MAX}&market={market}",
+        pct(&query)
+    );
     let r: R = get_json(token, &url, ttl::SLOW).await?;
-    Ok(r.tracks
+    let found: Vec<RawTrack> = r.tracks.items.into_iter().flatten().collect();
+    let ranked = rank_top_tracks(found, artist_id);
+    log::info!(
+        "artist top-tracks ({artist_id}) via search: {} rows for {artist_name:?} in {market}",
+        ranked.len()
+    );
+    Ok(ranked)
+}
+
+/// Rows in the artist page's Popular section — what the retired endpoint
+/// returned.
+pub const TOP_TRACKS: usize = 10;
+
+/// One row of an artist's Popular list. `plays` is Spotify's lifetime
+/// stream count when the source carries it (the client-internal artist
+/// view); the Web API has no such field, so the search fallback leaves it
+/// `None`.
+#[derive(Debug, Clone)]
+pub struct PopularTrack {
+    pub track: PlaylistTrack,
+    pub plays: Option<u64>,
+}
+
+/// `/search` rejects `limit` above this (400 "Invalid limit") since the
+/// 2026 Dev-Mode changes; the documented range is now 0–10.
+const SEARCH_PAGE_MAX: u32 = 10;
+
+/// Turn a name-search result into the Popular list: only tracks credited
+/// to `artist_id`, most popular first, one per title, capped.
+fn rank_top_tracks(mut tracks: Vec<RawTrack>, artist_id: &str) -> Vec<PopularTrack> {
+    tracks.retain(|t| !t.id.is_empty() && t.artists.iter().any(|a| a.id == artist_id));
+    tracks.sort_by_key(|t| std::cmp::Reverse(t.popularity));
+    let mut seen = std::collections::HashSet::new();
+    tracks
         .into_iter()
-        .filter(|t| !t.id.is_empty())
-        .map(RawTrack::into_track)
-        .collect())
+        .filter(|t| seen.insert(t.name.to_lowercase()))
+        .take(TOP_TRACKS)
+        .map(|t| PopularTrack {
+            track: t.into_track(),
+            plays: None,
+        })
+        .collect()
 }
 
 /// Albums by an artist, sorted newest-first by `release_date`. We
@@ -1722,11 +1798,7 @@ pub async fn get_currently_playing(token: &str) -> Result<Option<CurrentlyPlayin
         images: Vec<RawImg>,
     }
 
-    let res = reqwest::Client::new()
-        .get(format!("{API}/me/player"))
-        .bearer_auth(token)
-        .send()
-        .await?;
+    let res = send(token, |c| c.get(format!("{API}/me/player"))).await?;
     let status = res.status();
     if status.as_u16() == 204 {
         return Ok(None);
@@ -1799,14 +1871,13 @@ pub async fn get_currently_playing(token: &str) -> Result<Option<CurrentlyPlayin
 /// log; there's nothing to control until the user starts playback
 /// somewhere.
 async fn player_command(token: &str, method: reqwest::Method, path: &str) -> Result<(), AuthError> {
-    let res = reqwest::Client::new()
-        .request(method, format!("{API}{path}"))
-        .bearer_auth(token)
-        // PUT/POST with an empty body — Spotify rejects a missing
-        // Content-Length on some of these, so set it explicitly.
-        .header(reqwest::header::CONTENT_LENGTH, 0)
-        .send()
-        .await?;
+    let res = send(token, |c| {
+        c.request(method.clone(), format!("{API}{path}"))
+            // PUT/POST with an empty body — Spotify rejects a missing
+            // Content-Length on some of these, so set it explicitly.
+            .header(reqwest::header::CONTENT_LENGTH, 0)
+    })
+    .await?;
     let status = res.status();
     if status.is_success() {
         return Ok(());
@@ -2031,12 +2102,8 @@ fn play_body(target: &PlayTarget) -> serde_json::Value {
 }
 
 async fn play_target(token: &str, url: &str, target: &PlayTarget) -> Result<(), AuthError> {
-    let res = reqwest::Client::new()
-        .put(url)
-        .bearer_auth(token)
-        .json(&play_body(target))
-        .send()
-        .await?;
+    let body = play_body(target);
+    let res = send(token, |c| c.put(url).json(&body)).await?;
     let status = res.status();
     if status.is_success() {
         return Ok(());
@@ -2114,12 +2181,7 @@ pub async fn get_devices(token: &str) -> Result<Vec<Device>, AuthError> {
 /// immediately (the official client's behaviour when you pick a device).
 pub async fn transfer_playback(token: &str, device_id: &str, play: bool) -> Result<(), AuthError> {
     let body = serde_json::json!({ "device_ids": [device_id], "play": play });
-    let res = reqwest::Client::new()
-        .put(format!("{API}/me/player"))
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await?;
+    let res = send(token, |c| c.put(format!("{API}/me/player")).json(&body)).await?;
     let status = res.status();
     if status.is_success() {
         return Ok(());
@@ -2156,12 +2218,11 @@ pub async fn set_track_saved(token: &str, track_id: &str, saved: bool) -> Result
         reqwest::Method::DELETE
     };
     let uri = format!("spotify:track:{track_id}");
-    let res = reqwest::Client::new()
-        .request(method, format!("{API}/me/library?uris={uri}"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({}))
-        .send()
-        .await?;
+    let res = send(token, |c| {
+        c.request(method.clone(), format!("{API}/me/library?uris={uri}"))
+            .json(&serde_json::json!({}))
+    })
+    .await?;
     let status = res.status();
     if status.is_success() {
         return Ok(());
@@ -2307,11 +2368,7 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
             return Ok(value);
         }
     }
-    let res = reqwest::Client::new()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await?;
+    let res = send(token, |c| c.get(url)).await?;
     if !res.status().is_success() {
         let status = res.status().as_u16();
         let body = res.text().await.unwrap_or_default();
@@ -2330,6 +2387,47 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw_track(id: &str, name: &str, artist: &str, popularity: u32) -> RawTrack {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "uri": format!("spotify:track:{id}"),
+            "name": name,
+            "duration_ms": 1000,
+            "artists": [{ "id": artist, "name": "x" }],
+            "popularity": popularity,
+        }))
+        .expect("test track parses")
+    }
+
+    #[test]
+    fn top_tracks_keep_only_the_artist_rank_by_popularity_and_dedupe_titles() {
+        let tracks = vec![
+            raw_track("a", "Song A", "art", 40),
+            // Same-named artist matched the search filter — not theirs.
+            raw_track("z", "Impostor", "other", 99),
+            raw_track("b", "Song B", "art", 90),
+            // The single edition of Song A: one row per title, the more
+            // popular one wins.
+            raw_track("a2", "song a", "art", 70),
+            raw_track("", "No id", "art", 100),
+        ];
+        let out = rank_top_tracks(tracks, "art");
+        let ids: Vec<&str> = out.iter().map(|t| t.track.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a2"]);
+        assert!(
+            out.iter().all(|t| t.plays.is_none()),
+            "search carries no play counts"
+        );
+    }
+
+    #[test]
+    fn top_tracks_are_capped() {
+        let tracks = (0..25)
+            .map(|i| raw_track(&format!("t{i}"), &format!("Song {i}"), "art", i))
+            .collect();
+        assert_eq!(rank_top_tracks(tracks, "art").len(), TOP_TRACKS);
+    }
 
     /// Local files / market-unavailable tracks arrive with explicit
     /// `null` fields (`"id": null`), which `#[serde(default)]` alone

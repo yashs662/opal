@@ -76,7 +76,7 @@ pub struct OpenArtist {
     pub name: String,
     pub image_url: Option<String>,
     pub followers: u64,
-    pub top_tracks: Vec<PlaylistTrack>,
+    pub top_tracks: Vec<crate::api::PopularTrack>,
     pub albums: Vec<AlbumRef>,
     /// The user's saved songs by this artist across the whole library —
     /// Liked Songs + every membership-indexed playlist — each with the
