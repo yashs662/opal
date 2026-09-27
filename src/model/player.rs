@@ -589,7 +589,9 @@ impl VolumeHandle {
 /// Human label for a playing context uri — the card's "Playing from" row.
 fn context_kind(uri: Option<&str>) -> &'static str {
     match uri {
-        Some(u) if u.ends_with(":collection") => "Liked Songs",
+        // Both `spotify:collection:tracks` and the legacy
+        // `spotify:user:{id}:collection` (other clients still report it).
+        Some(u) if u.contains(":collection") => "Liked Songs",
         Some(u) if u.contains(":album:") => "Album",
         Some(u) if u.contains(":playlist:") => "Playlist",
         Some(u) if u.contains(":artist:") => "Artist",

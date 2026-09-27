@@ -779,7 +779,6 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             // Register + fetch the artist image so the resolved handle has
             // a signal to land in (the card binds it reactively).
             if let Some(url) = detail.image_url.clone() {
-                state.art.or_signal(crate::album_art::cache_key(&url));
                 state.art.dispatch_cover(worker, url);
             }
             state.player_ui.np_about = Some(detail);
@@ -808,13 +807,9 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         WorkerResponse::ContextsResolved { map } => {
             // Register + dispatch each context cover so the Recents session
             // rows can bind a reactive thumb, then store the resolved info.
-            for info in map.values() {
-                if let Some(url) = info.cover_url.clone() {
-                    let key = album_art::cache_key(&url);
-                    state.art.or_signal(key);
-                    state.art.dispatch_cover(worker, url);
-                }
-            }
+            state
+                .art
+                .dispatch_covers(worker, map.values().filter_map(|i| i.cover_url.clone()));
             state.library.recent_contexts.extend(map);
             cx.rebuild();
         }
@@ -832,10 +827,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 .chain(results.artists.iter().filter_map(|a| a.image_url.clone()))
                 .chain(results.albums.iter().filter_map(|a| a.image_url.clone()))
                 .chain(results.playlists.iter().filter_map(|p| p.image_url.clone()));
-            for url in covers {
-                state.art.or_signal(album_art::cache_key(&url));
-                state.art.dispatch_cover(worker, url);
-            }
+            state.art.dispatch_covers(worker, covers);
             state.search.results = Some(results);
             // Grow/shrink the modal to fit the new results (overlay morph).
             let target = crate::views::home::search_modal::target_h(&state.search);
@@ -994,10 +986,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 // (not in the view build) — the build holds an immutable
                 // borrow of `home_art`, so `or_signal`'s borrow_mut there
                 // panics. Later `AlbumArtReady` fills these via set_resolved.
-                if let Some(u) = &image_url {
-                    state.art.or_signal(album_art::cache_key(u));
-                    state.art.dispatch_cover(worker, u.clone());
-                }
+                state.art.dispatch_covers(worker, image_url.iter().cloned());
                 let covers = albums
                     .iter()
                     .filter_map(|al| al.image_url.as_ref())
@@ -1011,10 +1000,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                             .iter()
                             .filter_map(|(t, _)| t.album_image_url.as_ref()),
                     );
-                for u in covers {
-                    state.art.or_signal(album_art::cache_key(u));
-                    state.art.dispatch_cover(worker, u.clone());
-                }
+                state.art.dispatch_covers(worker, covers.cloned());
                 if let Some(a) = state.library.open_artist.as_mut() {
                     a.name = name;
                     a.image_url = image_url;
@@ -1187,11 +1173,10 @@ fn incomplete(t: &crate::api::PlaylistTrack) -> bool {
 /// Signal + fetch every queue cover. Signals are created HERE (not in the
 /// view build — builds are pure reads of `art`).
 fn queue_art(state: &mut AppState, worker: &Rc<Worker>, entries: &[crate::api::QueueEntry]) {
-    for url in entries
-        .iter()
-        .filter_map(|e| e.track.album_image_url.as_ref())
-    {
-        state.art.or_signal(album_art::cache_key(url));
-        state.art.dispatch_cover(worker, url.clone());
-    }
+    state.art.dispatch_covers(
+        worker,
+        entries
+            .iter()
+            .filter_map(|e| e.track.album_image_url.clone()),
+    );
 }

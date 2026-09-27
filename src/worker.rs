@@ -3005,18 +3005,6 @@ fn artist_library_scan(artist_id: &str, artist_name: &str) -> ArtistLibraryScan 
     (out, missing)
 }
 
-/// The user's Liked Songs collection context uri
-/// (`spotify:user:{id}:collection`) — `get_me` is disk-cached (SLOW), so
-/// this is free after the first call. `None` if the profile can't resolve
-/// (the caller falls back to a bare uris window).
-async fn collection_context_uri(access_token: &str) -> Option<String> {
-    api::get_me(access_token)
-        .await
-        .ok()
-        .filter(|p| !p.id.is_empty())
-        .map(|p| format!("spotify:user:{}:collection", p.id))
-}
-
 fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked: bool) {
     tokio::spawn(async move {
         // 1. Disk cache first — a fresh hit delivers the whole listing in
@@ -3034,10 +3022,11 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
                 detail.name,
                 detail.tracks.len()
             );
-            // Older cache entries predate the collection context — patch
-            // it in so cached Liked Songs plays with a context too.
-            if liked && detail.context_uri.is_none() {
-                detail.context_uri = collection_context_uri(&access_token).await;
+            // Older cache entries carry no context, or the legacy
+            // `spotify:user:{id}:collection` one that loads blank — always
+            // stamp the current uri so cached Liked Songs plays correctly.
+            if liked {
+                detail.context_uri = Some(api::LIKED_SONGS_CONTEXT.to_string());
             }
             resp.send(WorkerResponse::PlaylistOpened {
                 detail,
@@ -3050,12 +3039,11 @@ fn spawn_fetch_playlist(resp: Responder, access_token: String, id: String, liked
         //    from the first page) so the header + scrollbar appear before
         //    any track page lands.
         let (name, owner, image_url, context_uri) = if liked {
-            // Liked Songs IS a playable context — `spotify:user:{id}:collection`,
-            // the same uri the official client plays it through. Playing with
-            // a context (instead of a bare uris window) is what keeps
-            // continuation + autoplay + every connected client's now-playing
-            // coherent.
-            let ctx = collection_context_uri(&access_token).await;
+            // Liked Songs IS a playable context (`api::LIKED_SONGS_CONTEXT`).
+            // Playing with a context (instead of a bare uris window) is what
+            // keeps continuation + autoplay + every connected client's
+            // now-playing coherent.
+            let ctx = Some(api::LIKED_SONGS_CONTEXT.to_string());
             ("Liked Songs".to_string(), String::new(), None, ctx)
         } else {
             match api::playlist_meta(&access_token, &id).await {

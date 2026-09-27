@@ -206,6 +206,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(url) = last_cover {
         app.state_mut().art.rehydrate_cover(&url, &worker);
     }
+    // Same for the persisted recent-search covers: the search modal's node is
+    // built every frame (the overlay owns its visibility), so its rows bind
+    // `art.signal` — a pure read — from the very first scene. Without a
+    // dispatch here the restored history would render on grey placeholders
+    // forever. Capped at ten entries, disk-cache-first.
+    let history_covers: Vec<String> = app
+        .state()
+        .prefs
+        .data
+        .search_history
+        .iter()
+        .filter_map(|e| e.image_url.clone())
+        .collect();
+    app.state_mut().art.dispatch_covers(&worker, history_covers);
     // Re-hydrate the last track's Canvas too (when enabled), so the
     // now-playing pane loops its video on cold start rather than only the
     // static cover. The canvas meta + mp4 are disk-cached for a just-played

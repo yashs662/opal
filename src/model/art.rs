@@ -176,6 +176,16 @@ impl ArtModel {
         worker.fetch_album_art(url, key);
     }
 
+    /// Dispatch a whole run of cover URLs (a page's rows, a search
+    /// response, a restored history) through [`Self::dispatch_cover`] —
+    /// the one place the signal-before-fetch invariant lives, so no call
+    /// site has to remember to `or_signal` first.
+    pub fn dispatch_covers(&mut self, worker: &Worker, urls: impl IntoIterator<Item = String>) {
+        for url in urls {
+            self.dispatch_cover(worker, url);
+        }
+    }
+
     /// Re-hydrate the backdrop cover from a persisted URL on cold start:
     /// fetch the art (disk-cache hit → near-instant) plus Spotify's
     /// extracted accent, so the launch backdrop is already populated +

@@ -6,6 +6,10 @@
 //! a width. Two tones: [`ButtonTone::Neutral`] (the default account-action
 //! look) and [`ButtonTone::Danger`] (a red scheme for destructive actions
 //! like resetting preferences).
+//!
+//! [`text_action`] is the borderless sibling — the small dim label that
+//! trails a section header ("Clear all" / "Show all"), with a hit target
+//! and hover fill instead of bare text.
 
 use opal_gfx::{Align, EventCtx, Len, Scene};
 
@@ -62,5 +66,30 @@ pub fn pill_button(
                 icons.render(b, ic, t::ICON_SM, fg);
             }
             b.text((), label, t::TEXT_SM).color(fg);
+        });
+}
+
+/// Horizontal padding inside a [`text_action`]. Exposed so a header can
+/// pull its own right inset in by the same amount and land the *label* on
+/// the content edge, not the pill's box.
+pub const TEXT_ACTION_PAD_X: f32 = t::SP_2;
+
+/// Borderless inline action beside a section header — dim label that
+/// brightens and picks up a subtle fill on hover. Auto-sized, with real
+/// padding so the hit target is a pill rather than the glyphs themselves.
+pub fn text_action(s: &mut Scene, label: &str, on_click: impl Fn(&mut EventCtx) + 'static) {
+    s.row(())
+        .w(Len::Auto)
+        .h_px(t::BTN_H_SM)
+        .pad_xy(TEXT_ACTION_PAD_X, 0.0)
+        .align(Align::Center)
+        .radius(t::R_FULL)
+        .hover_color(t::BTN_HOVER)
+        .cursor(opal_gfx::CursorIcon::Pointer)
+        .on_click(on_click)
+        .child(|b| {
+            b.text((), label, t::TEXT_XS)
+                .color(t::TEXT_DIM)
+                .hover_color(t::TEXT);
         });
 }

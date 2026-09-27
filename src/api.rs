@@ -587,6 +587,13 @@ async fn playlist_write_result(res: reqwest::Response) -> Result<(), AuthError> 
 /// Songs collection rather than a real playlist.
 pub const LIKED_SONGS_ID: &str = "__liked__";
 
+/// The playable context uri for Liked Songs. The legacy
+/// `spotify:user:{id}:collection` form is still accepted by the Web API, but
+/// with an `offset.uri` the official client loads it as an empty context
+/// (200 OK, then a blank player with a 0-track queue); this form plays the
+/// clicked track in place.
+pub const LIKED_SONGS_CONTEXT: &str = "spotify:collection:tracks";
+
 /// Deserialize a field that may be **explicitly `null`** into its
 /// `Default`. `#[serde(default)]` alone only covers a *missing* field —
 /// Spotify sends `"id": null` (etc.) for local files and market-
@@ -1900,7 +1907,7 @@ pub async fn play(token: &str, device_id: Option<&str>) -> Result<(), AuthError>
 /// What to start playing on the active device.
 ///
 /// Anything with a context — a playlist, an album, Liked Songs
-/// (`spotify:user:{id}:collection`) — plays through
+/// ([`LIKED_SONGS_CONTEXT`]) — plays through
 /// [`Self::ContextAt`], anchored by the **track uri**: the list on screen
 /// comes from a TTL cache, and one edit above a row shifts every
 /// server-side position, so a positional offset would start the wrong
