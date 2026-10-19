@@ -18,6 +18,7 @@ use crate::album_art;
 use crate::api::{AlbumRef, HomeData, PlaylistDetail, PlaylistTrack};
 use crate::bounded::BoundedMap;
 use crate::model::ArtModel;
+use crate::views::RadioSeed;
 use crate::views::home::playlist::{self, PlaylistRow, RowBuf};
 use crate::worker::Worker;
 
@@ -117,9 +118,10 @@ pub struct LibraryModel {
     /// queue page. `None` = not loaded / loading; refetched on every
     /// open (live state, no cache).
     pub queue: Option<Vec<crate::api::QueueEntry>>,
-    /// The track uri the open song-radio page was seeded from — a
-    /// `SongRadioLoaded` for anything else is a stale response.
-    pub radio_seed: Option<String>,
+    /// The seed of the latest song radio requested — a `SongRadioLoaded`
+    /// for anything else is a stale response. Kept after the page is left
+    /// so a station that lands late is still cached for the way back.
+    pub radio_seed: Option<RadioSeed>,
     /// Skeleton-row pulse opacity, ping-pong tweened while the open
     /// detail page is still streaming (driven by `app::frame::tick`).
     pub skeleton_pulse: Signal<f32>,
@@ -182,12 +184,73 @@ impl LibraryModel {
         );
     }
 
-    /// A fresh (within TTL) cached detail clone, if any.
-    fn cached_detail(&self, id: &str) -> Option<PlaylistDetail> {
+    /// A fresh (within TTL) cached detail, if any.
+    fn cached_detail(&self, id: &str) -> Option<&PlaylistDetail> {
         self.playlist_cache
             .get(id)
             .filter(|c| c.fetched.elapsed() < PLAYLIST_TTL)
-            .map(|c| c.detail.clone())
+            .map(|c| &c.detail)
+    }
+
+    /// A complete page for `detail`: rows baked, hero cover requested
+    /// (rows fetch the 300px tier, so nothing else is guaranteed to have
+    /// fetched this URL).
+    fn detail_page(
+        &self,
+        art: &mut ArtModel,
+        worker: &Worker,
+        detail: &PlaylistDetail,
+        liked: bool,
+        membership: &crate::model::membership::MembershipModel,
+    ) -> OpenPlaylist {
+        let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
+        self.build_rows(art, &buf, &detail.tracks, liked, membership);
+        if let Some(u) = detail.image_url.clone() {
+            art.dispatch_cover(worker, u);
+        }
+        OpenPlaylist {
+            liked,
+            name: detail.name.clone(),
+            owner: detail.owner.clone(),
+            image_url: detail.image_url.clone(),
+            context_uri: detail.context_uri.clone(),
+            total: detail.total,
+            rows: buf,
+            loading: false,
+            complete: true,
+        }
+    }
+
+    /// Open the fresh cached detail for `id` — instant, no fetch. `false`
+    /// on a miss (the caller then puts up a shell and fetches).
+    fn open_cached(
+        &mut self,
+        art: &mut ArtModel,
+        worker: &Worker,
+        id: &str,
+        liked: bool,
+        membership: &crate::model::membership::MembershipModel,
+    ) -> bool {
+        let Some(page) = self
+            .cached_detail(id)
+            .map(|d| self.detail_page(art, worker, d, liked, membership))
+        else {
+            return false;
+        };
+        self.open_playlist = Some(page);
+        true
+    }
+
+    /// Open `detail` as the centre-pane page (a fetch that just resolved).
+    pub fn open_detail(
+        &mut self,
+        art: &mut ArtModel,
+        worker: &Worker,
+        detail: &PlaylistDetail,
+        liked: bool,
+        membership: &crate::model::membership::MembershipModel,
+    ) {
+        self.open_playlist = Some(self.detail_page(art, worker, detail, liked, membership));
     }
 
     // --- row baking ---------------------------------------------------
@@ -380,25 +443,7 @@ impl LibraryModel {
         liked: bool,
         membership: &crate::model::membership::MembershipModel,
     ) {
-        if let Some(detail) = self.cached_detail(id) {
-            let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-            self.build_rows(art, &buf, &detail.tracks, liked, membership);
-            // Hero cover — rows fetch the 300px tier, so nothing else is
-            // guaranteed to have fetched this URL.
-            if let Some(u) = detail.image_url.clone() {
-                art.dispatch_cover(worker, u);
-            }
-            self.open_playlist = Some(OpenPlaylist {
-                liked,
-                name: detail.name,
-                owner: detail.owner,
-                image_url: detail.image_url,
-                context_uri: detail.context_uri,
-                total: detail.total,
-                rows: buf,
-                loading: false,
-                complete: true,
-            });
+        if self.open_cached(art, worker, id, liked, membership) {
             return;
         }
 
@@ -446,24 +491,7 @@ impl LibraryModel {
         id: &str,
         membership: &crate::model::membership::MembershipModel,
     ) {
-        if let Some(detail) = self.cached_detail(id) {
-            let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
-            self.build_rows(art, &buf, &detail.tracks, false, membership);
-            // Hero cover — see `open_for`.
-            if let Some(u) = detail.image_url.clone() {
-                art.dispatch_cover(worker, u);
-            }
-            self.open_playlist = Some(OpenPlaylist {
-                liked: false,
-                name: detail.name,
-                owner: detail.owner,
-                image_url: detail.image_url,
-                context_uri: detail.context_uri,
-                total: detail.total,
-                rows: buf,
-                loading: false,
-                complete: true,
-            });
+        if self.open_cached(art, worker, id, false, membership) {
             return;
         }
         let buf: RowBuf = Rc::new(RefCell::new(Vec::new()));
@@ -479,6 +507,28 @@ impl LibraryModel {
             complete: false,
         });
         self.ensure_loaded_album(worker, token, id);
+    }
+
+    /// Open a song radio. A fresh cached station opens instantly (history
+    /// steps land here too); otherwise the seed's header goes up straight
+    /// away and the station is built server-side, landing via
+    /// `SongRadioLoaded`.
+    pub fn open_radio(
+        &mut self,
+        art: &mut ArtModel,
+        worker: &Worker,
+        seed: &RadioSeed,
+        membership: &crate::model::membership::MembershipModel,
+    ) {
+        let id = seed.page_id();
+        if self.open_cached(art, worker, &id, false, membership) {
+            return;
+        }
+        self.open_synthetic_pending(art, worker, seed.header());
+        self.radio_seed = Some(seed.clone());
+        if self.playlist_inflight.insert(id) {
+            worker.fetch_song_radio(seed.track_uri.clone());
+        }
     }
 
     /// Open an artist page. Sets a loading shell + dispatches the profile +

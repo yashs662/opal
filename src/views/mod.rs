@@ -37,6 +37,10 @@ pub enum MainNav {
     /// An album detail page. `id` is the Spotify album id. Reuses the
     /// playlist track-list machinery (an album has a `context_uri` + tracks).
     Album { id: String },
+    /// A song radio — the station Spotify seeds off one track, rendered
+    /// through the playlist view. The seed travels in the nav so a history
+    /// step can re-open the page on its own, like a route's params.
+    Radio { seed: RadioSeed },
     /// An artist page. `id` is the Spotify artist id. Shows the artist hero
     /// + a discography grid of album tiles (each opens an [`Self::Album`]).
     Artist { id: String },
@@ -62,11 +66,54 @@ impl MainNav {
             MainNav::Playlist { id, .. } | MainNav::Album { id } => {
                 Some(format!("detail_scroll:{id}"))
             }
+            MainNav::Radio { seed } => Some(format!("detail_scroll:{}", seed.page_id())),
             MainNav::Home
             | MainNav::Artist { .. }
             | MainNav::ShowAll { .. }
             | MainNav::Queue
             | MainNav::Lyrics => None,
+        }
+    }
+}
+
+/// The track a [`MainNav::Radio`] page is seeded on — everything the page
+/// needs to rebuild itself: the station fetch and the header shown while
+/// it resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RadioSeed {
+    pub track_uri: String,
+    pub track_name: String,
+    pub image_url: Option<String>,
+}
+
+impl RadioSeed {
+    pub fn new(track: &crate::api::PlaylistTrack) -> Self {
+        Self {
+            track_uri: track.uri.clone(),
+            track_name: track.name.clone(),
+            image_url: track.album_image_url.clone(),
+        }
+    }
+
+    /// The page's key in the detail cache (and its scroller's scope).
+    pub fn page_id(&self) -> String {
+        Self::page_id_of(&self.track_uri)
+    }
+
+    /// [`Self::page_id`] for a bare seed uri (a worker response).
+    pub fn page_id_of(track_uri: &str) -> String {
+        format!("radio:{track_uri}")
+    }
+
+    /// The header shown until the station lands. A radio playlist carries
+    /// no picture, so the page keeps the seed's art — what it's "based
+    /// on" anyway.
+    pub fn header(&self) -> crate::model::library::SyntheticPage {
+        crate::model::library::SyntheticPage {
+            name: format!("{} radio", self.track_name),
+            owner: format!("Based on {}", self.track_name),
+            image_url: self.image_url.clone(),
+            liked_page: false,
         }
     }
 }

@@ -480,12 +480,15 @@ pub enum WorkerResponse {
         path: std::path::PathBuf,
     },
     /// A song radio resolved to its track rows (empty = the station
-    /// couldn't be built; the page shows its empty state). `name` and
-    /// `name` is Spotify's own radio-playlist title when it resolved —
-    /// the page keeps its seed-derived one when empty.
+    /// couldn't be built; the page shows its empty state). `name` is
+    /// Spotify's own radio-playlist title when it resolved — the page
+    /// keeps its seed-derived one when empty. `context_uri` is that radio
+    /// playlist, played as a real context so every device can resolve it
+    /// on a transfer; `None` for the autoplay fallback.
     SongRadioLoaded {
         track_uri: String,
         name: String,
+        context_uri: Option<String>,
         tracks: Vec<api::PlaylistTrack>,
     },
     /// A lyrics fetch settled. `lyrics: None` = this track has none (or
@@ -607,6 +610,10 @@ impl Worker {
             // sections are a single clone/store.
             let local_ctx: Arc<std::sync::Mutex<Option<String>>> =
                 Arc::new(std::sync::Mutex::new(None));
+            // The cluster's active device id as last announced to the UI —
+            // the dedup for `ActiveDeviceChanged` (see `spawn_connect_session`)
+            // and where a connect-state `play` is addressed.
+            let active_device: ActiveDevice = Arc::new(std::sync::Mutex::new(None));
             // Drives the official client's re-hide watchdog task, which
             // exits when this clears. The engine record itself lives in
             // `official_app` (the exit hook needs it too).
@@ -702,6 +709,7 @@ impl Worker {
                             session.clone(),
                             spirc.clone(),
                             local_ctx.clone(),
+                            active_device.clone(),
                             initial_volume,
                             quality,
                             normalize,
@@ -720,7 +728,11 @@ impl Worker {
                             local_ctx.clone(),
                             access_token,
                             cmd,
-                            PlaybackRoute { local, engine },
+                            PlaybackRoute {
+                                local,
+                                engine,
+                                active: active_device.lock().unwrap().clone(),
+                            },
                         ),
                         WorkerCommand::ClaimPlaybackPaused {
                             context_uri,
@@ -1350,6 +1362,7 @@ fn spawn_fetch_song_radio(
             resp.send(WorkerResponse::SongRadioLoaded {
                 track_uri,
                 name: String::new(),
+                context_uri: None,
                 tracks: Vec::new(),
             });
             return;
@@ -1358,11 +1371,15 @@ fn spawn_fetch_song_radio(
         // same 50 songs (and the same mosaic cover) the official client
         // opens. The autoplay station is the fallback: same track pool,
         // different ordering, and no playlist identity.
-        let (name, uris) = match radio_playlist(&session, &track_uri).await {
-            Some(r) => r,
+        let (context_uri, name, uris) = match radio_playlist(&session, &track_uri).await {
+            Some(RadioPlaylist { uri, name, tracks }) => (Some(uri), name, tracks),
             None => {
                 warn!("radio playlist unavailable for {track_uri} — falling back to the station");
-                (String::new(), autoplay_station(&session, &track_uri).await)
+                (
+                    None,
+                    String::new(),
+                    autoplay_station(&session, &track_uri).await,
+                )
             }
         };
         let tracks = fetch_tracks_v4(&session, &uris).await;
@@ -1373,21 +1390,31 @@ fn spawn_fetch_song_radio(
         resp.send(WorkerResponse::SongRadioLoaded {
             track_uri,
             name,
+            context_uri,
             tracks,
         });
     });
 }
 
+/// Spotify's own radio playlist for a seed track.
+struct RadioPlaylist {
+    /// `spotify:playlist:…` — the context the official client plays.
+    uri: String,
+    name: String,
+    /// Playable track uris, in playlist order.
+    tracks: Vec<String>,
+}
+
 /// Resolve a track to Spotify's own radio playlist for it — the
 /// `inspiredby-mix` seed→playlist mapping the official client's "Go to
-/// song radio" uses — and read that playlist's name and track list.
+/// song radio" uses — and read that playlist's uri, name and track list.
 /// `None` if any step fails (the caller falls back to the station).
 ///
 /// No cover comes back with it: a radio playlist carries no picture, and
 /// its annotation (where a normal playlist's image lives) 404s. The page
 /// keeps the seed track's art, which is what the radio is "based on"
 /// anyway.
-async fn radio_playlist(session: &Session, track_uri: &str) -> Option<(String, Vec<String>)> {
+async fn radio_playlist(session: &Session, track_uri: &str) -> Option<RadioPlaylist> {
     let seed = SpotifyUri::from_uri(track_uri).ok()?;
     let body = match session.spclient().get_radio_for_track(&seed).await {
         Ok(b) => b,
@@ -1405,15 +1432,19 @@ async fn radio_playlist(session: &Session, track_uri: &str) -> Option<(String, V
             return None;
         }
     };
-    let uris: Vec<String> = playlist
+    let tracks: Vec<String> = playlist
         .tracks()
         .map(|u| u.to_uri())
         .filter(|u| api::is_playable_queue_uri(u))
         .collect();
-    if uris.is_empty() {
+    if tracks.is_empty() {
         return None;
     }
-    Some((playlist.name().to_string(), uris))
+    Some(RadioPlaylist {
+        name: playlist.name().to_string(),
+        uri: playlist_uri,
+        tracks,
+    })
 }
 
 /// The first `spotify:playlist:…` uri anywhere in a JSON document. The
@@ -1790,22 +1821,64 @@ async fn skip_to_queue_item(
     if !uid.is_empty() {
         track.insert("uid".into(), uid.into());
     }
-    let body = serde_json::json!({
-        "command": {
-            "endpoint": "skip_next",
-            "track": track,
-            // Non-optional on the receiving end (librespot's
-            // `SkipNextCommand`), and Spotify's own clients always stamp
-            // the initiating time.
-            "logging_params": {
-                "command_initiated_time": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or_default(),
+    send_player_command(
+        session,
+        device_id,
+        serde_json::json!({ "endpoint": "skip_next", "track": track }),
+    )
+    .await
+}
+
+/// `play` addressed to `device_id` — the command the official clients
+/// send to load a context on another device (librespot parses exactly
+/// this shape in its dealer `Command::Play` handler). The receiving device
+/// resolves the context itself, so unlike the Web API this loads anything
+/// a client can play, algorithmic playlists included.
+async fn play_on_device(
+    session: &Session,
+    device_id: &str,
+    context_uri: &str,
+    start: &LoadStart,
+) -> Result<(), librespot_core::Error> {
+    let skip_to = match &start.track {
+        Some(PlayingTrack::Uri(uri)) => serde_json::json!({ "track_uri": uri }),
+        Some(PlayingTrack::Index(i)) => serde_json::json!({ "track_index": i }),
+        _ => serde_json::json!({}),
+    };
+    send_player_command(
+        session,
+        device_id,
+        serde_json::json!({
+            "endpoint": "play",
+            "context": {
+                "uri": context_uri,
+                "url": format!("context://{context_uri}"),
+                "metadata": {},
             },
-        }
-    })
-    .to_string();
+            "play_origin": { "feature_identifier": "opal" },
+            "options": { "skip_to": skip_to, "seek_to": start.position_ms },
+        }),
+    )
+    .await
+}
+
+/// Post one connect-state player command from Opal's device to
+/// `device_id` (`POST /connect-state/v1/player/command/from/{us}/to/{them}`).
+/// Stamps the `logging_params` every command carries — non-optional on the
+/// receiving end (librespot's command structs), and Spotify's own clients
+/// always send the initiating time.
+async fn send_player_command(
+    session: &Session,
+    device_id: &str,
+    mut command: serde_json::Value,
+) -> Result<(), librespot_core::Error> {
+    command["logging_params"] = serde_json::json!({
+        "command_initiated_time": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default(),
+    });
+    let body = serde_json::json!({ "command": command }).to_string();
     let endpoint = format!(
         "/connect-state/v1/player/command/from/{}/to/{device_id}",
         session.device_id()
@@ -1844,6 +1917,7 @@ async fn run_playback_cmd(
     token: &str,
     cmd: PlaybackCmd,
     device: Option<&str>,
+    connect: &ConnectRoute,
 ) -> Result<(), AuthError> {
     match cmd {
         PlaybackCmd::Play => api::play(token, device).await,
@@ -1854,8 +1928,107 @@ async fn run_playback_cmd(
         PlaybackCmd::Repeat(mode) => api::set_repeat(token, mode).await,
         PlaybackCmd::Seek(ms) => api::seek(token, ms, device).await,
         PlaybackCmd::Volume(pct) => api::set_volume(token, pct).await,
-        PlaybackCmd::PlayContext(target) => api::play_context(token, target, device).await,
+        PlaybackCmd::PlayContext(target) => load_context(token, &target, device, connect).await,
     }
+}
+
+/// Opal's own Connect presence — the session to send connect-state
+/// commands from and the Spirc to load locally — for the context loads
+/// the Web API refuses.
+struct ConnectRoute {
+    session: Option<Session>,
+    spirc: Arc<AsyncMutex<Option<Spirc>>>,
+    /// The device the cluster last reported active.
+    active: Option<String>,
+}
+
+/// Where a load starts inside its context: the track, and the position
+/// within it.
+struct LoadStart {
+    track: Option<PlayingTrack>,
+    position_ms: u32,
+}
+
+impl LoadStart {
+    fn of(target: &api::PlayTarget) -> Self {
+        let (track, position_ms) = match target {
+            api::PlayTarget::ContextAt { track_uri, .. } => {
+                (Some(PlayingTrack::Uri(track_uri.clone())), 0)
+            }
+            api::PlayTarget::Context { offset, .. } => (Some(PlayingTrack::Index(*offset)), 0),
+            api::PlayTarget::Resume {
+                uri, position_ms, ..
+            } => (Some(PlayingTrack::Uri(uri.clone())), *position_ms),
+            api::PlayTarget::Uris { .. } => (None, 0),
+        };
+        Self { track, position_ms }
+    }
+}
+
+impl ConnectRoute {
+    /// Load `context_uri` onto `device` (`None` = the active one) the way
+    /// the official clients do: a local Spirc load when that device is
+    /// Opal itself, else a connect-state `play` command to it.
+    async fn play(
+        &self,
+        device: Option<&str>,
+        context_uri: &str,
+        target: &api::PlayTarget,
+    ) -> Result<(), librespot_core::Error> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| librespot_core::Error::unavailable("no session"))?;
+        let to = device
+            .or(self.active.as_deref())
+            .ok_or_else(|| librespot_core::Error::unavailable("no active device"))?;
+        let start = LoadStart::of(target);
+        if to == session.device_id()
+            && let Some(spirc) = self.spirc.lock().await.as_ref()
+        {
+            return spirc.load(LoadRequest::from_context_uri(
+                context_uri.to_string(),
+                LoadRequestOptions {
+                    start_playing: true,
+                    seek_to: start.position_ms,
+                    context_options: None,
+                    playing_track: start.track,
+                },
+            ));
+        }
+        play_on_device(session, to, context_uri, &start).await
+    }
+}
+
+/// Load a context onto `device` (`None` = the active one). The Web API
+/// first — the documented path. A context it refuses (song radio, Daily
+/// Mix, …) goes out as the connect-state `play` the official clients send
+/// each other, so it plays as the *real* context: anything else then
+/// resolves it on a transfer, where a bare track list (`spotify:web-api`)
+/// can't be. The album re-anchor is the last resort.
+async fn load_context(
+    token: &str,
+    target: &api::PlayTarget,
+    device: Option<&str>,
+    connect: &ConnectRoute,
+) -> Result<(), AuthError> {
+    let first = api::play_context(token, target, device).await;
+    match &first {
+        Err(e) if api::is_unsupported_context(e) => {}
+        _ => return first,
+    }
+    if let Some(ctx) = target.context_uri() {
+        match connect.play(device, ctx, target).await {
+            Ok(()) => {
+                info!("loaded {ctx} over connect-state (the Web API refused it)");
+                return Ok(());
+            }
+            Err(e) => warn!("connect-state play of {ctx} failed: {e}"),
+        }
+    }
+    api::play_context_degraded(token, target, device)
+        .await
+        .unwrap_or(first)
 }
 
 /// Make the hidden official client the active device again, and report
@@ -1892,7 +2065,13 @@ struct PlaybackRoute {
     /// The lossless engine's Connect device id while the hidden client
     /// holds playback.
     engine: Option<String>,
+    /// The cluster's active device when the command was issued.
+    active: Option<String>,
 }
+
+/// The cluster's last-announced active device id, shared by every task
+/// that reads or announces it.
+type ActiveDevice = Arc<std::sync::Mutex<Option<String>>>;
 
 /// The album context a bare track uri belongs to (`spotify:album:…`), used
 /// to turn a contextless single-track load into a real context so playback
@@ -1952,8 +2131,13 @@ fn spawn_playback(
     cmd: PlaybackCmd,
     route: PlaybackRoute,
 ) {
-    let PlaybackRoute { local, engine } = route;
+    let PlaybackRoute {
+        local,
+        engine,
+        active,
+    } = route;
     tokio::spawn(async move {
+        let session = { session_slot.lock().await.clone() };
         // Cold-start resume with no captured context (self-play never reports
         // one): fall back to the track's album so playback continues past the
         // one track instead of ending dead. Cheap + cached (immutable track
@@ -1990,10 +2174,9 @@ fn spawn_playback(
             // an autoplay station off the track. Do the same: play the track
             // followed by its station, so what comes next is recommendations.
             PlaybackCmd::PlayContext(api::PlayTarget::Uris { uris, offset }) if uris.len() == 1 => {
-                let session = { session_slot.lock().await.clone() };
                 let mut uris = uris;
-                if let Some(session) = session {
-                    uris.extend(autoplay_station(&session, &uris[0]).await);
+                if let Some(session) = session.as_ref() {
+                    uris.extend(autoplay_station(session, &uris[0]).await);
                 }
                 PlaybackCmd::PlayContext(api::PlayTarget::Uris { uris, offset })
             }
@@ -2053,7 +2236,13 @@ fn spawn_playback(
             }
             // No local Spirc after all — fall through to the Web API.
         }
-        let result = run_playback_cmd(&access_token, cmd.clone(), None).await;
+        let self_id = session.as_ref().map(|s| s.device_id().to_string());
+        let connect = ConnectRoute {
+            session,
+            spirc: spirc_slot,
+            active,
+        };
+        let result = run_playback_cmd(&access_token, cmd.clone(), None, &connect).await;
         // Nothing is the active device. Two ways back, in this order:
         let result = match result {
             Err(ref e) if is_no_active_device(e) => {
@@ -2071,9 +2260,13 @@ fn spawn_playback(
                                     "reclaimed the lossless engine '{}' ({})",
                                     device.name, device.id
                                 );
-                                let r =
-                                    run_playback_cmd(&access_token, cmd.clone(), Some(&device.id))
-                                        .await;
+                                let r = run_playback_cmd(
+                                    &access_token,
+                                    cmd.clone(),
+                                    Some(&device.id),
+                                    &connect,
+                                )
+                                .await;
                                 // Tell the app which device that was: the
                                 // client re-registers with a fresh id after a
                                 // restart, and the stale one would fail the
@@ -2095,19 +2288,13 @@ fn spawn_playback(
                     //    against our own librespot device id and simply
                     //    starts here instead of dead-ending on the 404.
                     None => {
-                        let device_id = {
-                            session_slot
-                                .lock()
-                                .await
-                                .as_ref()
-                                .map(|s| s.device_id().to_string())
-                        };
-                        match device_id {
+                        match self_id {
                             // Pause/Next/Seek/… with nothing playing
                             // anywhere: no state to act on; surface it.
                             Some(id) if wants_play(&cmd) => {
                                 info!("no active device — playing on Opal ({id})");
-                                run_playback_cmd(&access_token, cmd.clone(), Some(&id)).await
+                                run_playback_cmd(&access_token, cmd.clone(), Some(&id), &connect)
+                                    .await
                             }
                             _ => result,
                         }
@@ -3367,6 +3554,7 @@ fn spawn_connect_session(
     session_slot: Arc<AsyncMutex<Option<Session>>>,
     spirc_slot: Arc<AsyncMutex<Option<Spirc>>>,
     local_ctx: Arc<std::sync::Mutex<Option<String>>>,
+    last_active: ActiveDevice,
     initial_volume: f32,
     quality: crate::prefs::AudioQuality,
     normalize: bool,
@@ -3468,7 +3656,9 @@ fn spawn_connect_session(
         // push — the local task announces it instead. If the dedup were
         // per-task, the cluster task's stale `last_active` would then also
         // swallow the *next* remote switch, leaving the devices UI stuck.
-        let last_active = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        // A fresh session starts unannounced, so its first push always
+        // reaches the UI.
+        *last_active.lock().unwrap() = None;
         let last_active_cluster = last_active.clone();
         let local_ctx_cluster = local_ctx.clone();
         tokio::spawn(async move {

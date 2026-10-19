@@ -111,7 +111,9 @@ impl Component for MainPane<'_> {
                     .opacity_bind(fade)
                     .child(|content| match self.nav {
                         MainNav::Home => self.home_feed(content),
-                        MainNav::Playlist { .. } | MainNav::Album { .. } => {
+                        MainNav::Playlist { .. }
+                        | MainNav::Album { .. }
+                        | MainNav::Radio { .. } => {
                             if let Some(pv) = self.playlist {
                                 let scroll_node = self
                                     .nav

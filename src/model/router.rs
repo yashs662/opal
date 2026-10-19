@@ -99,6 +99,7 @@ impl RouterModel {
         match &self.nav {
             MainNav::Playlist { id: nid, .. } | MainNav::Album { id: nid } => nid == id,
             MainNav::Home
+            | MainNav::Radio { .. }
             | MainNav::Artist { .. }
             | MainNav::ShowAll { .. }
             | MainNav::Queue

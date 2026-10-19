@@ -271,33 +271,50 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         WorkerResponse::SongRadioLoaded {
             track_uri,
             name,
+            context_uri,
             tracks,
         } => {
-            // Dropped when the user moved on: the page was left, or a
-            // second radio was opened while this one was in flight.
-            if state.library.radio_seed.as_deref() != Some(track_uri.as_str()) {
-                return;
-            }
-            // Keep the header the pending page already put up.
-            let Some(open) = state.library.open_playlist.as_ref() else {
-                return;
-            };
-            // Spotify's own radio playlist names itself; without one,
-            // keep the seed-derived header already on screen.
-            let page = crate::model::library::SyntheticPage {
-                name: if name.is_empty() {
-                    open.name.clone()
-                } else {
-                    name
-                },
-                owner: open.owner.clone(),
-                image_url: open.image_url.clone(),
-                liked_page: false,
-            };
-            state
+            // The fetch settled either way — a revisit may dispatch again.
+            let id = crate::views::RadioSeed::page_id_of(&track_uri);
+            state.library.clear_inflight(&id);
+            // Stale when a second radio was opened while this one was in
+            // flight (that one's response is the one that applies).
+            let Some(seed) = state
                 .library
-                .open_synthetic(&mut state.art, page, tracks, &state.membership);
-            cx.rebuild();
+                .radio_seed
+                .clone()
+                .filter(|s| s.track_uri == track_uri)
+            else {
+                return;
+            };
+            // Spotify's own radio playlist names itself; without one, keep
+            // the seed-derived header.
+            let header = seed.header();
+            let detail = crate::api::PlaylistDetail {
+                id,
+                name: if name.is_empty() { header.name } else { name },
+                owner: header.owner,
+                image_url: header.image_url,
+                context_uri,
+                total: tracks.len() as u32,
+                tracks,
+            };
+            if matches!(&state.router.nav, crate::views::MainNav::Radio { seed: s } if *s == seed) {
+                state.library.open_detail(
+                    &mut state.art,
+                    worker,
+                    &detail,
+                    false,
+                    &state.membership,
+                );
+                cx.rebuild();
+            }
+            // Cached even when the page was already left, so the way back
+            // through history opens it instantly. A failed station isn't —
+            // the next visit retries.
+            if !detail.tracks.is_empty() {
+                state.library.cache(detail);
+            }
         }
         WorkerResponse::LyricsLoaded { track_id, lyrics } => {
             state.lyrics.resolve(&track_id, lyrics);

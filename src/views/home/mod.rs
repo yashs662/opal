@@ -614,9 +614,7 @@ impl HomeView {
         // album is a track list with a context_uri); the hero label differs.
         let kind_label = match nav {
             MainNav::Album { .. } => "Album",
-            MainNav::Playlist { id, .. } if id.starts_with(crate::app::update::RADIO_PREFIX) => {
-                "Radio"
-            }
+            MainNav::Radio { .. } => "Radio",
             _ => "Playlist",
         };
         // One bundle of row affordances per rebuild, shared by every flat
@@ -639,7 +637,7 @@ impl HomeView {
             field_elapsed: state.now_field.elapsed(now),
         };
         let playlist: Option<playlist::PlaylistViewData> = match nav {
-            MainNav::Playlist { .. } | MainNav::Album { .. } => {
+            MainNav::Playlist { .. } | MainNav::Album { .. } | MainNav::Radio { .. } => {
                 state.library.open_playlist.as_ref().map(|o| {
                     let cover = o
                         .image_url
@@ -1247,16 +1245,22 @@ fn prepare_nav(state: &mut AppState, worker: &Worker, nav: &MainNav) {
     match nav {
         MainNav::Playlist { id, liked } => {
             state.library.open_artist = None;
-            // Ephemeral synthetic listings (the artist "in your library"
-            // page) are populated in-memory by their opener — nothing to
-            // fetch, and no cache to consult.
-            if id.starts_with("__library__") || id.starts_with(crate::app::update::RADIO_PREFIX) {
+            // The ephemeral artist "in your library" listing is populated
+            // in-memory by its opener — nothing to fetch, and no cache to
+            // consult.
+            if id.starts_with("__library__") {
                 return;
             }
             let token = state.auth.token();
             state
                 .library
                 .open_for(&mut state.art, worker, token, id, *liked, &state.membership)
+        }
+        MainNav::Radio { seed } => {
+            state.library.open_artist = None;
+            state
+                .library
+                .open_radio(&mut state.art, worker, seed, &state.membership)
         }
         MainNav::Album { id } => {
             state.library.open_artist = None;

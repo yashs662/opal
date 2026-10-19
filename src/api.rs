@@ -2013,34 +2013,41 @@ impl PlayTarget {
     }
 }
 
-/// Start playback of a context (playlist/album) or explicit track list.
-/// `device_id = None` targets the user's active Connect device; `Some(id)`
-/// targets that device explicitly (the no-active-device fallback — play on
-/// Opal's own librespot player). Body shape mirrors the official
-/// client's `PUT /me/player/play`. A `404` (no active device) surfaces
-/// as `AuthError::Api`.
+/// Start playback of a context (playlist/album) or explicit track list —
+/// one attempt. `device_id = None` targets the user's active Connect
+/// device; `Some(id)` targets that device explicitly (the no-active-device
+/// fallback — play on Opal's own librespot player). Body shape mirrors the
+/// official client's `PUT /me/player/play`. A `404` (no active device)
+/// surfaces as `AuthError::Api`; a context the Web API won't load as
+/// [`is_unsupported_context`].
 pub async fn play_context(
     token: &str,
-    target: PlayTarget,
+    target: &PlayTarget,
     device_id: Option<&str>,
 ) -> Result<(), AuthError> {
-    let url = match device_id {
-        Some(id) => format!("{API}/me/player/play?device_id={id}"),
-        None => format!("{API}/me/player/play"),
-    };
-    let first = play_target(token, &url, &target).await;
-    // Algorithmic/personalized playlists (`spotify:playlist:37i9dQZF1E…` —
-    // Daily Mix, Discover Weekly, radio) have no fixed track list the public
-    // Web API will load as a context: it 400s "Non supported context uri".
-    // Recover by re-anchoring on the track's album, so playback continues and
-    // librespot autoplay keeps suggesting content past it. If even the album
-    // can't be resolved, play the track alone (no autoplay, but it plays).
-    let Err(AuthError::Api(_, Some(400))) = &first else {
-        return first;
-    };
-    let Some(track_uri) = target.anchor_track_uri() else {
-        return first;
-    };
+    play_target(token, &play_url(device_id), target).await
+}
+
+/// Algorithmic/personalized playlists (`spotify:playlist:37i9dQZF1E…` —
+/// Daily Mix, Discover Weekly, song radio) have no fixed track list the
+/// public Web API will load as a context: it 400s "Non supported context
+/// uri".
+pub fn is_unsupported_context(e: &AuthError) -> bool {
+    matches!(e, AuthError::Api(_, Some(400)))
+}
+
+/// Last resort for a context nothing could load: re-anchor on the track's
+/// album, so playback continues and autoplay keeps suggesting content past
+/// it; if even the album can't be resolved, play the track alone (no
+/// autoplay, but it plays). `None` when the target has no track to anchor
+/// on.
+pub async fn play_context_degraded(
+    token: &str,
+    target: &PlayTarget,
+    device_id: Option<&str>,
+) -> Option<Result<(), AuthError>> {
+    let track_uri = target.anchor_track_uri()?;
+    let url = play_url(device_id);
     let album_ctx = match track_id_from_uri(track_uri) {
         Some(id) => get_track(token, id)
             .await
@@ -2055,14 +2062,19 @@ pub async fn play_context(
             .await
             .is_ok()
         {
-            return Ok(());
+            return Some(Ok(()));
         }
     }
-    if let Some(t) = target.track_only() {
-        log::warn!("album re-anchor failed — degrading to track-only");
-        return play_target(token, &url, &t).await;
+    let t = target.track_only()?;
+    log::warn!("album re-anchor failed — degrading to track-only");
+    Some(play_target(token, &url, &t).await)
+}
+
+fn play_url(device_id: Option<&str>) -> String {
+    match device_id {
+        Some(id) => format!("{API}/me/player/play?device_id={id}"),
+        None => format!("{API}/me/player/play"),
     }
-    first
 }
 
 fn play_body(target: &PlayTarget) -> serde_json::Value {
