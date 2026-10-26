@@ -165,12 +165,20 @@ where
             None
         };
 
-        let cp = into_currently_playing(state);
-        info!(
-            "  -> CurrentlyPlaying: name='{}' artist='{}' playing={} progress={}/{} img={:?}",
-            cp.name, cp.artist, cp.is_playing, cp.progress_ms, cp.duration_ms, cp.album_image_url
-        );
-        on_update(Some(cp), volume, active_device, queue, false);
+        let player = into_currently_playing(state);
+        match &player {
+            Some(cp) => info!(
+                "  -> CurrentlyPlaying: name='{}' artist='{}' playing={} progress={}/{} img={:?}",
+                cp.name,
+                cp.artist,
+                cp.is_playing,
+                cp.progress_ms,
+                cp.duration_ms,
+                cp.album_image_url
+            ),
+            None => info!("  -> player_state carries no track"),
+        }
+        on_update(player, volume, active_device, queue, false);
     }
     debug!("cluster subscription stream ended");
 }
@@ -264,7 +272,13 @@ fn artists_from_metadata(
     artists
 }
 
-fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
+/// The playing track as our domain snapshot, or `None` when the state
+/// carries no track. Spotify keeps shipping a `player_state` after a session
+/// is torn down (the playing device was quit, or a load it refused cleared
+/// it) — options and a stale position, but no track. That is "nothing
+/// playing", and the host treats it so: the restored last track stays the
+/// anchor instead of being overwritten (and persisted) as a blank one.
+fn into_currently_playing(state: ProtoPlayerState) -> Option<CurrentlyPlaying> {
     // The context's display name ("Chill", "Daily Mix 2", "<song> Radio")
     // rides the state's context metadata — exactly what the official
     // client shows as the queue source.
@@ -273,7 +287,7 @@ fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
         .get("context_description")
         .filter(|d| !d.is_empty())
         .cloned();
-    let track = state.track.unwrap_or_default();
+    let track = state.track.into_option().filter(|t| !t.uri.is_empty())?;
     let md = &track.metadata;
     let artist_id = id_from_uri(&track.artist_uri);
     let name = md.get("title").cloned().unwrap_or_default();
@@ -333,10 +347,10 @@ fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
     };
     let shuffle = opts.shuffling_context;
 
-    let track_id = track.uri.clone();
+    let track_id = track.uri;
     let context_uri = (!state.context_uri.is_empty()).then(|| state.context_uri.clone());
 
-    CurrentlyPlaying {
+    Some(CurrentlyPlaying {
         track_id,
         name,
         artist,
@@ -351,7 +365,7 @@ fn into_currently_playing(state: ProtoPlayerState) -> CurrentlyPlaying {
         repeat,
         context_uri,
         context_name,
-    }
+    })
 }
 
 /// `spotify:image:HEX` → `https://i.scdn.co/image/HEX`. Pass through any
@@ -361,5 +375,27 @@ fn spotify_image_uri_to_https(uri: &str) -> String {
         format!("https://i.scdn.co/image/{hex}")
     } else {
         uri.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProtoPlayerState, into_currently_playing};
+
+    #[test]
+    fn a_trackless_player_state_is_nothing_playing() {
+        // What Spotify ships once a session is torn down: a stale position,
+        // no track.
+        let mut state = ProtoPlayerState::new();
+        state.position_as_of_timestamp = 886;
+        assert!(into_currently_playing(state).is_none());
+    }
+
+    #[test]
+    fn a_player_state_with_a_track_maps_through() {
+        let mut state = ProtoPlayerState::new();
+        state.track.mut_or_insert_default().uri = "spotify:track:abc".into();
+        let cp = into_currently_playing(state).expect("has a track");
+        assert_eq!(cp.track_id, "spotify:track:abc");
     }
 }

@@ -2018,8 +2018,8 @@ impl PlayTarget {
 /// device; `Some(id)` targets that device explicitly (the no-active-device
 /// fallback — play on Opal's own librespot player). Body shape mirrors the
 /// official client's `PUT /me/player/play`. A `404` (no active device)
-/// surfaces as `AuthError::Api`; a context the Web API won't load as
-/// [`is_unsupported_context`].
+/// surfaces as `AuthError::Api`; a load the target refuses as
+/// [`is_refused_load`].
 pub async fn play_context(
     token: &str,
     target: &PlayTarget,
@@ -2028,12 +2028,15 @@ pub async fn play_context(
     play_target(token, &play_url(device_id), target).await
 }
 
-/// Algorithmic/personalized playlists (`spotify:playlist:37i9dQZF1E…` —
-/// Daily Mix, Discover Weekly, song radio) have no fixed track list the
-/// public Web API will load as a context: it 400s "Non supported context
-/// uri".
-pub fn is_unsupported_context(e: &AuthError) -> bool {
-    matches!(e, AuthError::Api(_, Some(400)))
+/// The Web API won't carry this load, though a client could play it. The
+/// reference documents only albums, artists and playlists as contexts, and
+/// what lies outside that is refused two ways: algorithmic playlists
+/// (`spotify:playlist:37i9dQZF1E…` — Daily Mix, Discover Weekly, song
+/// radio) 400 "Non supported context uri" everywhere, and a phone answers
+/// Liked Songs (`spotify:collection:tracks`) with 403 "Restriction
+/// violated" where the desktop client and librespot accept it.
+pub fn is_refused_load(e: &AuthError) -> bool {
+    matches!(e, AuthError::Api(_, Some(400 | 403)))
 }
 
 /// Last resort for a context nothing could load: re-anchor on the track's

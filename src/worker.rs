@@ -2001,8 +2001,8 @@ impl ConnectRoute {
 }
 
 /// Load a context onto `device` (`None` = the active one). The Web API
-/// first — the documented path. A context it refuses (song radio, Daily
-/// Mix, …) goes out as the connect-state `play` the official clients send
+/// first — the documented path. A load it refuses (song radio, Daily Mix,
+/// Liked Songs on a phone, …) goes out as the connect-state `play` the official clients send
 /// each other, so it plays as the *real* context: anything else then
 /// resolves it on a transfer, where a bare track list (`spotify:web-api`)
 /// can't be. The album re-anchor is the last resort.
@@ -2014,7 +2014,7 @@ async fn load_context(
 ) -> Result<(), AuthError> {
     let first = api::play_context(token, target, device).await;
     match &first {
-        Err(e) if api::is_unsupported_context(e) => {}
+        Err(e) if api::is_refused_load(e) => {}
         _ => return first,
     }
     if let Some(ctx) = target.context_uri() {
@@ -3849,21 +3849,33 @@ const ENGINE_WINDOW_POLL: Duration = Duration::from_secs(5);
 /// Pick the official client out of a Connect device list.
 ///
 /// Spotify names the desktop client after the machine, so the hostname is
-/// the primary match. Anything already known to be *ours* (the librespot
-/// device named "Opal") is excluded outright, and a device absent from
-/// `before` is preferred — decisive on a cold launch, where the hostname
-/// might collide with another machine's entry. Shared by the engine start
-/// and the reclaim path so both agree on what "the client" means.
+/// the requirement, not a tiebreak: any other computer on the account (a
+/// laptop that happens to be online) is someone else's player, and taking
+/// it would transfer playback off this machine entirely. Between two
+/// entries carrying this machine's name, the one absent from `before` — the
+/// client that just registered — wins. Only when the hostname can't be read
+/// does freshness alone decide. The librespot device ("Opal") is ours and
+/// never a candidate. Shared by the engine start and the reclaim path so
+/// both agree on what "the client" means.
 fn pick_engine_device(devices: &[api::Device], before: &[String]) -> Option<api::Device> {
-    let host = hostname();
+    pick_device_for_host(devices, before, hostname().as_deref())
+}
+
+/// [`pick_engine_device`] against an explicit hostname.
+fn pick_device_for_host(
+    devices: &[api::Device],
+    before: &[String],
+    host: Option<&str>,
+) -> Option<api::Device> {
+    let fresh = |d: &&api::Device| !before.contains(&d.id);
     devices
         .iter()
         .filter(|d| d.name != "Opal" && d.kind == "Computer")
-        .max_by_key(|d| {
-            let fresh = !before.contains(&d.id);
-            let named = host.as_deref().is_some_and(|h| d.name == h);
-            (fresh as u8) * 2 + named as u8
+        .filter(|d| match host {
+            Some(h) => d.name.eq_ignore_ascii_case(h),
+            None => fresh(d),
         })
+        .max_by_key(fresh)
         .cloned()
 }
 
@@ -4494,5 +4506,54 @@ mod artist_view_tests {
                 .unwrap_err()
                 .starts_with("not JSON")
         );
+    }
+}
+
+#[cfg(test)]
+mod engine_device_tests {
+    use super::pick_device_for_host;
+    use crate::api::Device;
+
+    fn computer(id: &str, name: &str) -> Device {
+        Device {
+            id: id.into(),
+            name: name.into(),
+            kind: "Computer".into(),
+            is_active: false,
+            volume_percent: None,
+        }
+    }
+
+    #[test]
+    fn another_machine_is_never_the_engine() {
+        // This machine's client hasn't registered yet; a laptop on the same
+        // account is online and newer than the snapshot.
+        let devices = [computer("laptop", "OSG-KM3HR69LX2")];
+        assert!(pick_device_for_host(&devices, &[], Some("YASHS_DESKTOP")).is_none());
+    }
+
+    #[test]
+    fn hostname_matches_case_insensitively_and_skips_opal() {
+        let devices = [
+            computer("opal", "Opal"),
+            computer("laptop", "OSG-KM3HR69LX2"),
+            computer("desk", "YASHS_DESKTOP"),
+        ];
+        let picked = pick_device_for_host(&devices, &[], Some("Yashs_Desktop"));
+        assert_eq!(picked.map(|d| d.id), Some("desk".to_string()));
+    }
+
+    #[test]
+    fn a_name_collision_goes_to_the_fresh_registration() {
+        let devices = [computer("stale", "DESK"), computer("new", "DESK")];
+        let picked = pick_device_for_host(&devices, &["stale".into()], Some("DESK"));
+        assert_eq!(picked.map(|d| d.id), Some("new".to_string()));
+    }
+
+    #[test]
+    fn unknown_hostname_falls_back_to_freshness() {
+        let devices = [computer("old", "A"), computer("new", "B")];
+        let picked = pick_device_for_host(&devices, &["old".into()], None);
+        assert_eq!(picked.map(|d| d.id), Some("new".to_string()));
     }
 }
