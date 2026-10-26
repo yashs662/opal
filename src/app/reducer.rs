@@ -194,10 +194,13 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                 .devices
                 .remote_active
                 .set(!is_self && !device_id.is_empty());
-            state.devices.active_id = device_id;
             state.devices.playing_on_self.set(is_self);
+            // Moving off (or back onto) the engine's device flips the
+            // LOSSLESS badge and the EQ/normalize bypass.
+            let engine_flipped = state.engine.observe_active_device(&device_id);
+            state.devices.active_id = device_id;
             // Active-row highlight in the popup, if it's open.
-            if state.devices.overlay.is_open() {
+            if engine_flipped || state.devices.overlay.is_open() {
                 cx.rebuild();
             }
         }
@@ -460,12 +463,11 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         } => {
             log::info!("playback routed to the Spotify client: '{device_name}' ({device_id})");
             // Starting → Active: unlocks the toggle and lights the pill.
-            state.engine.status = crate::model::EngineStatus::Active;
             // Remember which device that is — transport re-targets it when
             // Spotify drops the active device after an idle spell (the
             // worker re-sends this response if the client came back with a
             // fresh id).
-            state.engine.device_id = Some(device_id);
+            state.engine.activate(device_id);
             state.player_ui.engine_pending.set(false);
             // The cluster push from the transfer carries the authoritative
             // state; nothing to sync here beyond letting the UI settle.
@@ -473,8 +475,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::LosslessEngineFailed { error } => {
             log::warn!("lossless engine failed: {error}");
-            state.engine.status = crate::model::EngineStatus::Off;
-            state.engine.device_id = None;
+            state.engine.deactivate();
             // Release the startup hold — playback falls back to Opal's own
             // device rather than staying locked behind a dead handover.
             state.player_ui.engine_pending.set(false);
@@ -487,8 +488,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::LosslessEngineStopped => {
             log::info!("lossless engine released");
-            state.engine.status = crate::model::EngineStatus::Off;
-            state.engine.device_id = None;
+            state.engine.deactivate();
             state.player_ui.engine_pending.set(false);
             cx.rebuild();
         }

@@ -35,6 +35,11 @@ pub struct EngineModel {
     /// startup (a file-exists check); without it the toggle is inert and
     /// says why, rather than failing after the user flips it.
     pub installed: bool,
+    /// The user moved playback to another device (Opal's own, a phone, …)
+    /// while the engine kept running. The engine is still up, but it's no
+    /// longer what plays — the badge, the EQ bypass and transport
+    /// re-targeting all have to follow the device that actually does.
+    displaced: bool,
 }
 
 impl EngineModel {
@@ -44,13 +49,42 @@ impl EngineModel {
         Self {
             status: EngineStatus::Off,
             device_id: None,
+            displaced: false,
             installed: crate::official_app::SUPPORTED && crate::official_app::locate().is_some(),
         }
     }
 
     /// The engine is holding playback.
     pub fn is_active(&self) -> bool {
-        self.status == EngineStatus::Active
+        self.status == EngineStatus::Active && !self.displaced
+    }
+
+    /// Mark the engine as (re)holding playback — it just came up or was
+    /// reclaimed onto a fresh device id.
+    pub fn activate(&mut self, device_id: String) {
+        self.status = EngineStatus::Active;
+        self.device_id = Some(device_id);
+        self.displaced = false;
+    }
+
+    /// Back to Opal's own device, engine released (stopped or failed).
+    pub fn deactivate(&mut self) {
+        self.status = EngineStatus::Off;
+        self.device_id = None;
+        self.displaced = false;
+    }
+
+    /// Follow the cluster's active device. An empty id is Spotify dropping
+    /// an idle device, not the user picking another one — that keeps the
+    /// engine as the chosen output so transport can reclaim it. Returns
+    /// whether [`Self::is_active`] flipped.
+    pub fn observe_active_device(&mut self, active_id: &str) -> bool {
+        if active_id.is_empty() {
+            return false;
+        }
+        let was = self.is_active();
+        self.displaced = self.device_id.as_deref() != Some(active_id);
+        was != self.is_active()
     }
 
     /// The device to aim playback at: the client, while it's the engine

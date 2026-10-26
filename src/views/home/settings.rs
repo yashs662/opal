@@ -193,7 +193,7 @@ impl Component for SettingsPanel<'_> {
                                 self.quality,
                                 &self.backdrop.accent,
                                 self.on_quality.clone(),
-                                self.settings.lossless_engine.get(),
+                                self.engine.is_active(),
                             );
                             // Normalisation lives in librespot's player, which
                             // isn't in the path once the official client is
