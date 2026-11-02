@@ -56,6 +56,22 @@ pub fn detach() {
     show();
 }
 
+/// Let go of an [`Ownership::Orphan`] engine without touching it, so the
+/// following exit's [`release`] leaves it running. For the debug harness:
+/// its launcher kills the user's Opal outright, which strands their client —
+/// still playing — as a hidden orphan; the harness run then claims it, and
+/// closing it on the way out would cut off their music. Left alone, it stays
+/// hidden and playing until the user's next Opal launch reclaims it. A
+/// client the harness launched itself is still closed.
+#[cfg_attr(not(feature = "automation"), allow(dead_code))]
+pub fn forget_orphan() {
+    let Ok(mut g) = ENGINE.lock() else { return };
+    if g.is_some_and(|s| s.ownership == Ownership::Orphan) {
+        log::info!("leaving orphaned official client running (debug harness exit)");
+        *g = None;
+    }
+}
+
 /// User policy for the engine's window: hidden (the default — Opal is the
 /// UI) or on screen. Read by [`acquire`] and by the worker's periodic
 /// [`enforce_window_state`] tick, both off the UI thread, so it lives in an
@@ -84,6 +100,12 @@ pub enum Ownership {
     /// It was already running. We may have hidden its window, but the
     /// process belongs to the user: restore the window, never kill it.
     Adopted,
+    /// It was already running *hidden* — a client an earlier Opal session
+    /// hid and never released (it crashed, or was killed). Nobody else will
+    /// clean it up, so it's closed on exit like [`Launched`](Self::Launched);
+    /// only a debug-harness exit lets go of it instead (see
+    /// [`forget_orphan`]).
+    Orphan,
 }
 
 /// The engine's live state, held by the worker across commands.

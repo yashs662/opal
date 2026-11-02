@@ -303,6 +303,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // returns minimised (reachable, still playing, but it doesn't leap up
         // as Opal disappears), a process we launched gets closed. Without
         // this, quitting Opal would strand an invisible Spotify.
+        #[cfg(feature = "automation")]
+        official_app::forget_orphan();
         official_app::release(official_app::Restore::Minimized);
     });
 

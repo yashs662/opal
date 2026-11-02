@@ -228,7 +228,7 @@ pub fn acquire() -> Result<EngineState, String> {
                 // Running with a hidden window is a state the client never
                 // puts itself in — it's the fingerprint of an earlier Opal
                 // session that hid it and died before releasing. Claim it as
-                // ours (`Launched`) so this run cleans it up on exit;
+                // ours (`Orphan`) so this run cleans it up on exit;
                 // adopting it instead is what lets orphans pile up, one
                 // invisible 800 MB client per crash.
                 log::info!(
@@ -240,7 +240,7 @@ pub fn acquire() -> Result<EngineState, String> {
                     win::show(h);
                 }
                 EngineState {
-                    ownership: Ownership::Launched,
+                    ownership: Ownership::Orphan,
                     hidden_by_us: false,
                 }
             }
@@ -310,7 +310,7 @@ pub fn release(restore: Restore) {
         return;
     };
     match state.ownership {
-        Ownership::Launched => {
+        Ownership::Launched | Ownership::Orphan => {
             // Ours: close it and give the memory back. `taskkill` (not a raw
             // TerminateProcess) so the whole CEF process tree goes.
             //

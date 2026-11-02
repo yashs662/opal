@@ -141,7 +141,8 @@ pub fn release(restore: Restore) {
         return;
     };
     match state.ownership {
-        Ownership::Launched => {
+        // macOS never claims orphans (see `acquire`); treated as ours anyway.
+        Ownership::Launched | Ownership::Orphan => {
             // Ours: a graceful quit request, which returns immediately —
             // the client tears itself down after Opal is gone.
             log::info!("closing official client (launched by Opal)");
