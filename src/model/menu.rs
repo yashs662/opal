@@ -1,10 +1,17 @@
-//! Right-click context-menu slice.
+//! Right-click context-menu slice — one menu for every right-click surface
+//! (track rows, the window's close button), so they share the box, the
+//! dismissal and the stacking.
 //!
-//! Holds the open state, the logical-px position to anchor the menu at
-//! (the cursor), and the right-clicked track's actionable data. Opening
-//! requests a scene rebuild (like the other popups), so the menu renders
-//! at the new position with the new target's actions; dismissing closes
-//! it the same way.
+//! Holds the menu's [`Overlay`] (fade, outside-press dismiss, input
+//! blocking and open-order stacking — so a popup launched from the menu
+//! lands above whatever the menu itself was opened over), the logical-px
+//! position to anchor it at (the cursor), and what was right-clicked
+//! ([`MenuKind`]), which decides the items. Opening requests a scene rebuild so the menu renders at
+//! the new position with the new target's actions.
+
+use std::time::{Duration, Instant};
+
+use opal_gfx::{Overlay, Timeline};
 
 /// The right-clicked track's data the menu acts on.
 #[derive(Clone, Default)]
@@ -36,30 +43,37 @@ impl MenuTarget {
     }
 }
 
+/// What the menu was opened on — decides its items.
+#[derive(Clone)]
+pub enum MenuKind {
+    /// A track row: queue / radio / album / artist / add to playlist.
+    Track(MenuTarget),
+    /// The window's close button while the lossless engine runs: close
+    /// Opal and keep the official client playing, or close as usual.
+    Window,
+}
+
 pub struct MenuModel {
-    pub open: bool,
+    /// Quick-fade, transparent-scrim overlay — owns open state + dismiss.
+    pub overlay: Overlay,
     /// Anchor position in **logical px** (cursor at right-click time).
     pub pos: [f32; 2],
-    pub target: MenuTarget,
+    pub kind: MenuKind,
 }
 
 impl MenuModel {
     pub fn new() -> Self {
         Self {
-            open: false,
+            overlay: Overlay::new().with_fade(Duration::from_millis(90)),
             pos: [0.0; 2],
-            target: MenuTarget::default(),
+            kind: MenuKind::Window,
         }
     }
 
-    pub fn show(&mut self, target: MenuTarget, pos: [f32; 2]) {
-        self.target = target;
+    pub fn show(&mut self, kind: MenuKind, pos: [f32; 2], tl: &mut Timeline, now: Instant) {
+        self.kind = kind;
         self.pos = pos;
-        self.open = true;
-    }
-
-    pub fn close(&mut self) {
-        self.open = false;
+        self.overlay.open(tl, now);
     }
 }
 

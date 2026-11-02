@@ -16,7 +16,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::NSString;
 
-use super::{ENGINE, EngineState, Ownership, Restore, show_window};
+use super::{ENGINE, EngineState, Ownership, Restore, is_active, show_window};
 
 const BUNDLE_ID: &str = "com.spotify.client";
 
@@ -168,11 +168,23 @@ pub fn release(restore: Restore) {
     }
 }
 
+/// Put the client on screen (no-op when it isn't running or isn't hidden).
+pub fn show() {
+    if let Some(app) = client() {
+        app.unhide();
+    }
+}
+
 /// Drive the client to whatever [`show_window`] currently asks for, and
 /// report whether anything had to move. Re-hides a client that unhid itself
 /// (a `spotify:` link handoff, a Dock click) and applies a flip of the
 /// "show the Spotify window" setting. No-ops when it already matches.
 pub fn enforce_window_state() -> bool {
+    // A client we've let go of (released, or detached by a "keep playing"
+    // close) is the user's again — no longer ours to hide.
+    if !is_active() {
+        return false;
+    }
     let Some(app) = client() else {
         return false;
     };

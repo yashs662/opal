@@ -50,7 +50,7 @@ pub use engine::{EngineModel, EngineStatus};
 pub use eq::EqModel;
 pub use library::LibraryModel;
 pub use membership::MembershipModel;
-pub use menu::{MenuModel, MenuTarget};
+pub use menu::{MenuKind, MenuModel, MenuTarget};
 pub use player::PlayerModel;
 pub use prefs::PrefsModel;
 pub use router::RouterModel;

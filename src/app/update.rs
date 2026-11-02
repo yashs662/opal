@@ -7,10 +7,13 @@
 //! For now it takes `&Rc<AppState>` + interior mutability, exactly like the
 //! worker reducer.
 
+use opal_gfx::WindowAction;
+
 use crate::api::{self, PlayTarget, track_id_from_uri};
 use crate::app::AppState;
 use crate::app::cx::Cx;
 use crate::app::msg::{Msg, MsgQueue};
+use crate::model::MenuKind;
 use crate::views::View;
 use crate::views::home::{PlayerAction, navigate, target_artist_ids, target_track};
 use crate::worker::{PlaybackCmd, Worker};
@@ -690,19 +693,31 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         }
 
         Msg::OpenContextMenu { pos, target } => {
-            state.menu.show(target, pos);
+            state.menu.show(MenuKind::Track(target), pos, cx.tl, cx.now);
             cx.rebuild();
+        }
+
+        Msg::OpenWindowMenu { pos } => {
+            // Only meaningful while we hold the client — otherwise a close
+            // is just a close, so the right-click does nothing.
+            if crate::official_app::is_active() {
+                state.menu.show(MenuKind::Window, pos, cx.tl, cx.now);
+                cx.rebuild();
+            }
+        }
+
+        Msg::QuitKeepEngine => {
+            // Detach first so the exit hook's release finds nothing to
+            // tear down, then close through the normal exit path (prefs
+            // flush etc. still run).
+            crate::official_app::detach();
+            cx.window(WindowAction::Close);
         }
 
         Msg::AddQueue(uri) => {
             if let Some(token) = state.auth.token() {
                 worker.add_to_queue(token, uri);
             }
-        }
-
-        Msg::MenuClose => {
-            state.menu.close();
-            cx.rebuild();
         }
 
         Msg::NowPlayingToggle => {

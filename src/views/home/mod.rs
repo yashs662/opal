@@ -125,14 +125,16 @@ struct Layout<'a> {
     pub like_menu: &'a crate::views::home::like_menu::LikeMenu<'a>,
     /// The Spotlight-style search modal, owning its `Overlay`.
     pub search_modal: &'a crate::views::home::search_modal::SearchModal<'a>,
-    /// Right-click context menu (track row actions) + its handlers.
+    /// Right-click context menu + its action emitters.
     pub menu: &'a crate::model::MenuModel,
-    pub on_menu_add_queue: Rc<dyn Fn(String)>,
-    pub on_menu_navigate: NavFn,
-    pub on_menu_add_playlist: LikeForFn,
-    /// Context-menu "Go to song radio".
-    pub on_song_radio: LikeForFn,
-    pub on_menu_close: Rc<dyn Fn()>,
+    pub menu_actions: &'a context_menu::MenuActions,
+}
+
+/// Where a right-click menu anchors: the cursor at emit time, physical px →
+/// logical (what the menu's `render_at` expects), carried in the intent.
+fn menu_anchor(ctx: &EventCtx) -> [f32; 2] {
+    let scale = ctx.tree.scale().max(1.0);
+    [ctx.cursor[0] / scale, ctx.cursor[1] / scale]
 }
 
 fn render(s: &mut Scene, v: &Layout) {
@@ -242,22 +244,15 @@ fn render(s: &mut Scene, v: &Layout) {
             v.can_forward,
             v.accent,
         );
-        // Modals — rendered last (layer on top), components that own
-        // their Overlay wrappers. Skipped entirely when closed.
+        // Popups — sibling `Overlay`s after the content. They stack by
+        // *open order* (each open raises its own z), so call order here
+        // doesn't matter: whichever opened last is on top. Skipped
+        // entirely when closed.
         v.settings_panel.view(root);
         v.devices_panel.view(root);
         v.like_menu.view(root);
         v.search_modal.view(root);
-        // Right-click context menu — topmost; renders only when open.
-        context_menu::view(
-            root,
-            v.menu,
-            v.on_menu_add_queue.clone(),
-            v.on_menu_navigate.clone(),
-            v.on_menu_add_playlist.clone(),
-            v.on_song_radio.clone(),
-            v.on_menu_close.clone(),
-        );
+        context_menu::view(root, v.menu, v.menu_actions);
     });
 }
 
@@ -299,8 +294,10 @@ pub struct HomeView {
     on_eq_rename_commit: Rc<dyn Fn(usize)>,
     on_queue_jump: Rc<dyn Fn(usize)>,
     on_context_menu: CtxMenuFn,
-    on_add_queue: Rc<dyn Fn(String)>,
-    on_menu_close: Rc<dyn Fn()>,
+    /// Right-click on the window's close button.
+    on_window_menu: Rc<dyn Fn(&mut EventCtx)>,
+    /// The right-click menu's action emitters.
+    menu_actions: context_menu::MenuActions,
     on_np_toggle: Rc<dyn Fn()>,
     /// Player-bar queue icon — open the queue page, or leave it again.
     on_queue_toggle: Rc<dyn Fn()>,
@@ -310,8 +307,6 @@ pub struct HomeView {
     on_seek_to: Rc<dyn Fn(u32)>,
     /// Re-engage lyric auto-scroll (the "Jump to current" pill).
     on_lyrics_sync: Rc<dyn Fn()>,
-    /// Context-menu "Go to song radio" — opens the track's station page.
-    on_song_radio: LikeForFn,
     /// Open the like picker targeted at an arbitrary track (row hearts +
     /// the context menu's "Add to playlist…").
     on_like_for: LikeForFn,
@@ -440,20 +435,19 @@ impl HomeView {
         let on_context_menu: CtxMenuFn = {
             let dispatch = dispatch.clone();
             Rc::new(move |ctx, target| {
-                // Read the cursor at emit time (physical px → logical, as the
-                // menu's `.abs()` expects) and carry it in the intent.
-                let scale = ctx.tree.scale().max(1.0);
-                let pos = [ctx.cursor[0] / scale, ctx.cursor[1] / scale];
-                dispatch.send(Msg::OpenContextMenu { pos, target });
+                dispatch.send(Msg::OpenContextMenu {
+                    pos: menu_anchor(ctx),
+                    target,
+                });
             })
         };
-        let on_add_queue: Rc<dyn Fn(String)> = {
+        let on_window_menu: Rc<dyn Fn(&mut EventCtx)> = {
             let dispatch = dispatch.clone();
-            Rc::new(move |uri| dispatch.send(Msg::AddQueue(uri)))
-        };
-        let on_menu_close: Rc<dyn Fn()> = {
-            let dispatch = dispatch.clone();
-            Rc::new(move || dispatch.send(Msg::MenuClose))
+            Rc::new(move |ctx| {
+                dispatch.send(Msg::OpenWindowMenu {
+                    pos: menu_anchor(ctx),
+                })
+            })
         };
         let on_np_toggle: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
@@ -474,10 +468,6 @@ impl HomeView {
         let on_lyrics_sync: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::LyricsSync))
-        };
-        let on_song_radio: LikeForFn = {
-            let dispatch = dispatch.clone();
-            Rc::new(move |_ctx, track| dispatch.send(Msg::OpenSongRadio(Box::new(track))))
         };
         let on_like_for: LikeForFn = {
             let dispatch = dispatch.clone();
@@ -535,6 +525,22 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move |_ctx, nav| dispatch.send(Msg::Navigate(nav)))
         };
+        let menu_actions = context_menu::MenuActions {
+            add_queue: {
+                let dispatch = dispatch.clone();
+                Rc::new(move |uri| dispatch.send(Msg::AddQueue(uri)))
+            },
+            navigate: on_navigate.clone(),
+            add_playlist: on_like_for.clone(),
+            song_radio: {
+                let dispatch = dispatch.clone();
+                Rc::new(move |_ctx, track| dispatch.send(Msg::OpenSongRadio(Box::new(track))))
+            },
+            quit_keep_engine: {
+                let dispatch = dispatch.clone();
+                Rc::new(move || dispatch.send(Msg::QuitKeepEngine))
+            },
+        };
         let request_cover: playlist::CoverFn = {
             let dispatch = dispatch.clone();
             Rc::new(move |url| dispatch.send(Msg::RequestCover(url)))
@@ -579,14 +585,13 @@ impl HomeView {
             on_eq_rename_commit,
             on_queue_jump,
             on_context_menu,
-            on_add_queue,
-            on_menu_close,
+            on_window_menu,
+            menu_actions,
             on_np_toggle,
             on_queue_toggle,
             on_lyrics_toggle,
             on_seek_to,
             on_lyrics_sync,
-            on_song_radio,
             on_like_for,
             on_show_all_library,
             on_nav_back,
@@ -804,6 +809,7 @@ impl HomeView {
             on_forward: self.on_nav_forward.clone(),
             on_home: self.on_home.clone(),
             on_search_open: self.on_search_open.clone(),
+            on_window_menu: self.on_window_menu.clone(),
             icons,
         };
         let main_pane = main_pane::MainPane {
@@ -913,11 +919,7 @@ impl HomeView {
             like_menu: &like_menu,
             search_modal: &search_modal,
             menu: &state.menu,
-            on_menu_add_queue: self.on_add_queue.clone(),
-            on_menu_navigate: self.on_navigate.clone(),
-            on_menu_add_playlist: self.on_like_for.clone(),
-            on_song_radio: self.on_song_radio.clone(),
-            on_menu_close: self.on_menu_close.clone(),
+            menu_actions: &self.menu_actions,
         };
         render(s, &layout);
     }

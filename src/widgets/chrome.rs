@@ -1,4 +1,4 @@
-use opal_gfx::{Align, Len, Scene, WindowAction};
+use opal_gfx::{Align, Len, NodeBuilderRef, Scene, WindowAction};
 
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens;
@@ -46,15 +46,16 @@ pub fn title_bar(s: &mut Scene, icons: &IconSet, title: &str) {
 /// source of truth for window-control chrome — reused by both the login
 /// title bar and the Home top bar so they stay visually identical.
 /// `push_end` shoves the button (and the trailing siblings that follow it)
-/// to the right edge.
-pub fn chrome_btn(
-    s: &mut Scene,
+/// to the right edge. Returns the button so a caller can add behaviour
+/// (e.g. a right-click menu on close).
+pub fn chrome_btn<'s>(
+    s: &'s mut Scene,
     icons: &IconSet,
     icon: Icon,
     action: WindowAction,
     hover: [f32; 4],
     push_end: bool,
-) {
+) -> NodeBuilderRef<'s> {
     let mut b = s.row(());
     b.w_px(tokens::SP_11)
         .h_px(tokens::SP_8)
@@ -69,4 +70,5 @@ pub fn chrome_btn(
     b.child(|c| {
         icons.render(c, icon, tokens::ICON_XS, tokens::TEXT);
     });
+    b
 }

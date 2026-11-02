@@ -19,6 +19,8 @@ pub fn acquire() -> Result<EngineState, String> {
 
 pub fn release(_restore: Restore) {}
 
+pub fn show() {}
+
 pub fn enforce_window_state() -> bool {
     false
 }

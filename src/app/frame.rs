@@ -269,6 +269,9 @@ pub fn tick(
     while let Some(resp) = worker.poll() {
         reducer::handle(state, &mut cx, worker, resp);
     }
+    if let Some(action) = cx.take_window_action() {
+        ctx.tree.request_window_action(action);
+    }
     // Mirror the (possibly just-updated) player state out to the OS media
     // panel — no-op unless the track or playing flag actually changed.
     if let Some(media) = state.media.as_mut() {

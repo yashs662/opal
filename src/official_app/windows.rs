@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 const WINDOW_WAIT: Duration = Duration::from_secs(20);
 const WINDOW_POLL: Duration = Duration::from_millis(250);
 
-use super::{ENGINE, EngineState, Ownership, Restore, show_window};
+use super::{ENGINE, EngineState, Ownership, Restore, is_active, show_window};
 
 /// Where the desktop client lives. The Microsoft Store build lands in
 /// `WindowsApps` under a versioned package dir and is launched through its
@@ -187,6 +187,12 @@ pub fn acquire() -> Result<EngineState, String> {
             // smaller window (ha) where it can flash on screen before we
             // hide it. Unrecognised flags are ignored by the client.
             .arg("--minimized")
+            // Don't hand it our stdio: the client can outlive Opal (a
+            // "keep Spotify playing" close), and an inherited pipe would
+            // then hold whatever reads Opal's output open forever.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| format!("launching Spotify: {e}"))?;
     }
@@ -333,11 +339,19 @@ pub fn release(restore: Restore) {
             {
                 log::info!("restoring official client window ({restore:?})");
                 match restore {
-                    Restore::Show => win::show(h),
+                    Restore::Show => show(),
                     Restore::Minimized => win::show_minimized(h),
                 }
             }
         }
+    }
+}
+
+/// Put the client's window on screen (no-op when there's no client or it's
+/// already showing).
+pub fn show() {
+    if let Some(h) = win::main_window(false) {
+        win::show(h);
     }
 }
 
@@ -351,6 +365,11 @@ pub fn release(restore: Restore) {
 /// a toggle so the change is immediate. No-ops when the window already
 /// matches the policy.
 pub fn enforce_window_state() -> bool {
+    // A client we've let go of (released, or detached by a "keep playing"
+    // close) is the user's again — its window is no longer ours to police.
+    if !is_active() {
+        return false;
+    }
     if show_window() {
         // Only a *hidden* window needs acting on; `main_window(true)` is the
         // visible-only scan, so "has a window but not a visible one" is the

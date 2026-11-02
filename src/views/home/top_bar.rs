@@ -29,6 +29,9 @@ pub struct TopBar<'a> {
     /// Live album accent — the chrome glyphs light with it on hover.
     pub accent: &'a Signal<[f32; 4]>,
     pub icons: &'a Rc<IconSet>,
+    /// Right-click on the close button — the reducer offers "keep Spotify
+    /// playing" while the lossless engine runs (no-op otherwise).
+    pub on_window_menu: Rc<dyn Fn(&mut opal_gfx::EventCtx)>,
 }
 
 impl Component for TopBar<'_> {
@@ -112,6 +115,7 @@ impl Component for TopBar<'_> {
                     t::BTN_HOVER,
                     false,
                 );
+                let on_window_menu = self.on_window_menu.clone();
                 chrome_btn(
                     t_row,
                     icons,
@@ -119,7 +123,8 @@ impl Component for TopBar<'_> {
                     WindowAction::Close,
                     t::CLOSE_HOVER,
                     false,
-                );
+                )
+                .on_right_click(move |ctx| on_window_menu(ctx));
                 // ^ window controls share the canonical widget in `chrome`.
             });
     }

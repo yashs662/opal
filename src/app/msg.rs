@@ -158,10 +158,16 @@ pub enum Msg {
         pos: [f32; 2],
         target: MenuTarget,
     },
+    /// Right-click on the window's close button at `pos` (logical px) —
+    /// offers "keep Spotify playing" while the lossless engine runs.
+    OpenWindowMenu {
+        pos: [f32; 2],
+    },
+    /// Close Opal but leave the lossless engine (official client) running
+    /// and playing; the next launch picks it back up.
+    QuitKeepEngine,
     /// Add a track to the play queue.
     AddQueue(String),
-    /// Close the right-click menu.
-    MenuClose,
     /// Show/hide the now-playing pane (slide-collapse animation).
     NowPlayingToggle,
     /// Wipe the disk cache (off-thread).

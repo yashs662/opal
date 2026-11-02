@@ -35,6 +35,27 @@ pub fn is_active() -> bool {
     ENGINE.lock().is_ok_and(|g| g.is_some())
 }
 
+/// Let go of the engine **without** releasing it, for a "close, keep
+/// Spotify playing" exit: the client keeps running (and playing) and its
+/// window comes back on screen — it's the user's player again, so they can
+/// reach it once Opal is gone. Called just before that exit, so the exit
+/// hook's [`release`] finds nothing to undo (and won't close a client we
+/// launched).
+///
+/// The next launch finds a running, visible client and adopts it like any
+/// the user started themselves: no relaunch, no playback gap, and it is
+/// restored rather than closed when that session ends.
+pub fn detach() {
+    let Some(state) = ENGINE.lock().ok().and_then(|mut g| g.take()) else {
+        return;
+    };
+    log::info!(
+        "detaching official client ({:?}) — left running, shown",
+        state.ownership
+    );
+    show();
+}
+
 /// User policy for the engine's window: hidden (the default — Opal is the
 /// UI) or on screen. Read by [`acquire`] and by the worker's periodic
 /// [`enforce_window_state`] tick, both off the UI thread, so it lives in an
@@ -101,14 +122,14 @@ pub const SUPPORTED: bool = cfg!(any(windows, target_os = "macos"));
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{acquire, enforce_window_state, locate, release};
+pub use windows::{acquire, enforce_window_state, locate, release, show};
 
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{acquire, enforce_window_state, locate, release};
+pub use macos::{acquire, enforce_window_state, locate, release, show};
 
 #[cfg(not(any(windows, target_os = "macos")))]
 mod unsupported;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub use unsupported::{acquire, enforce_window_state, locate, release};
+pub use unsupported::{acquire, enforce_window_state, locate, release, show};
