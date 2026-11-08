@@ -1916,7 +1916,7 @@ pub async fn play(token: &str, device_id: Option<&str>) -> Result<(), AuthError>
 /// top, or a row the buffer hasn't materialized. [`Self::Uris`] is the
 /// last resort for a list with no context at all (search results, an
 /// artist's top tracks): an explicit window of URIs.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum PlayTarget {
     Context {
         context_uri: String,
@@ -1941,6 +1941,35 @@ pub enum PlayTarget {
         position_ms: u32,
         context_uri: Option<String>,
     },
+}
+
+/// Hand-written so an explicit track window logs as a count, not as every
+/// one of its (often 50+) URIs — these land in logs, toasts and history.
+impl std::fmt::Debug for PlayTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlayTarget::Context {
+                context_uri,
+                offset,
+            } => write!(f, "Context({context_uri} @{offset})"),
+            PlayTarget::ContextAt {
+                context_uri,
+                track_uri,
+            } => write!(f, "ContextAt({context_uri} @{track_uri})"),
+            PlayTarget::Uris { uris, offset } => match uris.first() {
+                Some(first) => write!(f, "Uris({} tracks from {first} @{offset})", uris.len()),
+                None => write!(f, "Uris(empty)"),
+            },
+            PlayTarget::Resume {
+                uri,
+                position_ms,
+                context_uri,
+            } => match context_uri {
+                Some(ctx) => write!(f, "Resume({uri} @{position_ms}ms in {ctx})"),
+                None => write!(f, "Resume({uri} @{position_ms}ms)"),
+            },
+        }
+    }
 }
 
 impl PlayTarget {
@@ -2060,7 +2089,7 @@ pub async fn play_context_degraded(
         None => None,
     };
     if let Some(ctx) = album_ctx {
-        log::warn!("context uri rejected — re-anchoring on album {ctx}");
+        log::warn!(toast = "Playing the album instead"; "context uri rejected — re-anchoring on album {ctx}");
         if play_target(token, &url, &target.with_context(ctx))
             .await
             .is_ok()
@@ -2069,7 +2098,7 @@ pub async fn play_context_degraded(
         }
     }
     let t = target.track_only()?;
-    log::warn!("album re-anchor failed — degrading to track-only");
+    log::warn!(toast = "Playing just this track"; "album re-anchor failed — degrading to track-only");
     Some(play_target(token, &url, &t).await)
 }
 

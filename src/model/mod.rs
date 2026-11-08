@@ -22,6 +22,7 @@
 //!   - [`prefs`] — persisted preferences + panel widths + debounced save.
 //!   - [`router`] — view + centre-pane nav + entrance transition.
 //!   - [`settings`] — settings modal overlay + cache usage + dir handoff.
+//!   - [`toasts`] — toast stack + notification history + bell badge.
 
 pub mod art;
 pub mod auth;
@@ -40,6 +41,7 @@ pub mod prefs;
 pub mod router;
 pub mod search;
 pub mod settings;
+pub mod toasts;
 
 pub use art::ArtModel;
 pub use auth::AuthModel;
@@ -56,3 +58,4 @@ pub use prefs::PrefsModel;
 pub use router::RouterModel;
 pub use search::SearchModel;
 pub use settings::SettingsModel;
+pub use toasts::ToastModel;

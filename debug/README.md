@@ -29,9 +29,19 @@ no shell scripts) kills any stale `opal` process (the lock that breaks
   "force_home": true,            // boot to Home (skip Splash/Login)
   "window": [1280, 780],         // logical-px window size
   "log_filter": "info,...",      // env_logger override
+  "notices": [ <notices> ],      // optional; synthetic WARN/ERROR records
   "script": [ <steps> ]          // optional; empty = launch + sit
 }
 ```
+
+### Notices
+
+`{ "after_ms": 2500, "level": "error", "toast": "Title", "msg": "..." }` —
+logged from a background thread `after_ms` after launch, through the real
+log tap (`src/notify.rs`), so it exercises toasts + notification history
+exactly like a worker failure. `level` defaults to warn; `toast` is the
+call-site title (omit it for a history-only warning). See
+`debug/toasts.json` / `debug/notifications.json`.
 
 ### Steps (one action field each)
 

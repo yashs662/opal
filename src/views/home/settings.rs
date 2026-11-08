@@ -16,6 +16,9 @@ use crate::api::Profile;
 use crate::audio_eq::GAIN_DB_MAX;
 use crate::disk_cache::{self, CacheUsage};
 use crate::model::{BackdropModel, CanvasModel, EqModel, SettingsModel};
+use crate::notify::ToastLevel;
+use crate::widgets::button::icon_button;
+use crate::widgets::chip::{ChipState, chip};
 use crate::widgets::component::Component;
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
@@ -91,6 +94,10 @@ pub struct SettingsPanel<'a> {
     pub quality: crate::prefs::AudioQuality,
     /// Persist a new streaming-quality choice.
     pub on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
+    /// Which notices pop up as toasts (selected chip).
+    pub toast_level: ToastLevel,
+    /// Persist a new toast level.
+    pub on_toast_level: Rc<dyn Fn(ToastLevel)>,
     /// Persist the "Normalize volume" toggle after it flips.
     pub on_normalize: Rc<dyn Fn()>,
     /// The lossless toggle flipped → start/stop the hidden official client.
@@ -270,6 +277,13 @@ impl Component for SettingsPanel<'_> {
                                 // the official client is the engine, so the
                                 // biquads have nothing to act on.
                                 self.engine.is_active(),
+                            );
+                            divider(body);
+                            toast_row(
+                                body,
+                                self.toast_level,
+                                &self.backdrop.accent,
+                                self.on_toast_level.clone(),
                             );
                             divider(body);
                             cache_section(
@@ -980,13 +994,11 @@ fn blur_row(s: &mut Scene, blur: &Signal<f32>, accent: &Signal<[f32; 4]>, on_com
     });
 }
 
-/// Streaming-quality picker: three chips (96 / 160 / 320 kbps), the
-/// active one accent-filled. Bitrate is baked into the librespot player
-/// at session start, so a change applies from the next launch — the
-/// caption says so rather than pretending it's instant.
-/// `disabled` greys the row out and drops its click handlers: while the
-/// official client is the playback engine this setting governs nothing
-/// (it configures librespot, which isn't in the path), and a live-looking
+/// Streaming quality — Low / Normal / High chips. Bitrate is baked into
+/// the librespot player at session start, so a change applies from the next
+/// launch and the caption says so rather than pretending it's instant.
+/// `disabled` while the official client is the playback engine: the setting
+/// configures librespot, which isn't in the path then, and a live-looking
 /// control that does nothing is worse than a visibly inert one.
 fn quality_row(
     s: &mut Scene,
@@ -996,55 +1008,89 @@ fn quality_row(
     disabled: bool,
 ) {
     use crate::prefs::AudioQuality as Q;
-    s.col(()).w(Len::Fill).gap(t::SP_2).child(move |c| {
+    let choice = Choice {
+        title: "Streaming quality",
+        caption: if disabled {
+            "Set in the Spotify app while Lossless is on"
+        } else {
+            "Applies on next launch"
+        },
+        options: &[
+            (Q::Low, "Low 96k"),
+            (Q::Normal, "Normal 160k"),
+            (Q::High, "High 320k"),
+        ],
+        current,
+        disabled,
+    };
+    choice_row(s, choice, accent, on_quality);
+}
+
+/// Which notices pop up as toasts. Silenced ones still land in the
+/// notification history behind the top-bar bell.
+fn toast_row(
+    s: &mut Scene,
+    current: ToastLevel,
+    accent: &Signal<[f32; 4]>,
+    on_pick: Rc<dyn Fn(ToastLevel)>,
+) {
+    let choice = Choice {
+        title: "Pop-up notifications",
+        caption: "Everything stays in the history behind the bell",
+        options: &[
+            (ToastLevel::All, "Warnings & errors"),
+            (ToastLevel::ErrorsOnly, "Errors only"),
+            (ToastLevel::Off, "None"),
+        ],
+        current,
+        disabled: false,
+    };
+    choice_row(s, choice, accent, on_pick);
+}
+
+/// What a [`choice_row`] offers: a titled setting with mutually-exclusive
+/// options, `current` selected; `disabled` greys the row and drops every
+/// click.
+struct Choice<'a, T> {
+    title: &'a str,
+    caption: &'a str,
+    options: &'a [(T, &'a str)],
+    current: T,
+    disabled: bool,
+}
+
+/// A [`Choice`] as a row of chips: the current option accent-filled, the
+/// others clickable.
+fn choice_row<T: Copy + PartialEq + 'static>(
+    s: &mut Scene,
+    choice: Choice<'_, T>,
+    accent: &Signal<[f32; 4]>,
+    on_pick: Rc<dyn Fn(T)>,
+) {
+    let Choice {
+        title,
+        caption,
+        options,
+        current,
+        disabled,
+    } = choice;
+    s.col(()).w(Len::Fill).gap(t::SP_2).child(|c| {
         c.col(()).gap(t::SP_0_5).child(|m| {
-            m.text((), "Streaming quality", 14.0).color(if disabled {
-                t::TEXT_DIM
-            } else {
-                t::TEXT
-            });
-            m.text(
-                (),
-                if disabled {
-                    "Set in the Spotify app while Lossless is on"
-                } else {
-                    "Applies on next launch"
-                },
-                t::TEXT_XS,
-            )
-            .color(t::TEXT_DIM);
+            m.text((), title, t::TEXT_BASE)
+                .color(if disabled { t::TEXT_DIM } else { t::TEXT });
+            m.text((), caption, t::TEXT_XS).color(t::TEXT_DIM);
         });
-        c.row(()).gap(t::SP_2).child(move |row| {
-            for (q, label) in [
-                (Q::Low, "Low 96k"),
-                (Q::Normal, "Normal 160k"),
-                (Q::High, "High 320k"),
-            ] {
-                let selected = q == current;
-                let mut chip = row.row(());
-                chip.h_px(t::CHIP_H)
-                    .pad_xy(t::SP_3_5, t::SP_0)
-                    .center()
-                    .radius(t::R_FULL);
-                if disabled {
-                    // Inert: no hover, no click, and the selected chip loses
-                    // its accent so nothing reads as "currently in effect".
-                    chip.color(t::PANEL_HI).opacity(0.45).child(|x| {
-                        x.text((), label, 13.0).color(t::TEXT_DIM);
-                    });
-                } else if selected {
-                    chip.color(accent.clone()).child(|x| {
-                        x.text((), label, 13.0)
-                            .color(crate::widgets::color::accent_fg(accent));
-                    });
-                } else {
-                    let on_quality = on_quality.clone();
-                    chip.color(t::PANEL_HI)
-                        .hover_opacity(0.8)
-                        .on_click(move |_| on_quality(q))
-                        .child(|x| {
-                            x.text((), label, 13.0).color(t::TEXT);
-                        });
+        c.row(()).gap(t::SP_2).child(|row| {
+            for &(value, label) in options {
+                let state = match (disabled, value == current) {
+                    (true, _) => ChipState::Disabled,
+                    (false, true) => ChipState::Selected,
+                    (false, false) => ChipState::Idle,
+                };
+                let mut b = chip(row, label, state, accent);
+                if state == ChipState::Idle {
+                    let on_pick = on_pick.clone();
+                    b.on_click(move |_| on_pick(value));
                 }
             }
         });
@@ -1207,16 +1253,10 @@ fn header(s: &mut Scene, icons: &IconSet, overlay: Overlay) {
         .align(Align::Center)
         .child(|h| {
             h.text((), "Settings", t::TEXT_XL).color(t::TEXT);
-            h.row(())
-                .push_end()
-                .w_px(t::SP_8)
-                .h_px(t::SP_8)
-                .center()
-                .hover_opacity(0.7)
-                .on_click(move |ctx| overlay.morph_close(ctx.timeline, ctx.now))
-                .child(|c| {
-                    icons.render(c, Icon::Close, t::ICON_MD, t::TEXT_DIM);
-                });
+            icon_button(h, icons, Icon::Close, t::SP_8, t::ICON_MD, move |ctx| {
+                overlay.morph_close(ctx.timeline, ctx.now)
+            })
+            .push_end();
         });
 }
 

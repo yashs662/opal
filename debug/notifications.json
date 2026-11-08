@@ -1,0 +1,29 @@
+{
+  "force_home": true,
+  "window": [1280, 780],
+  "log_filter": "info,wgpu_hal=warn,wgpu_core=warn,opal=info,opal_gfx=warn",
+  "notices": [
+    { "after_ms": 2000, "toast": "Couldn't switch device", "msg": "transfer to 551ba3732465763576def8e4fcf26460a166dda8 failed: HTTP 500: Server error." },
+    { "after_ms": 2100, "msg": "album art fetch failed (https://i.scdn.co/image/ab67616d0000b273) attempt 1: operation timed out" },
+    { "after_ms": 2200, "level": "error", "msg": "streaming authorisation failed: HTTP 401: The access token expired" }
+  ],
+  "script": [
+    { "wait_ms": 3600 },
+    { "screenshot": "debug_captures/toasts/10_badge.png" },
+    { "click": [2107, 55] },
+    { "wait_ms": 90 },
+    { "screenshot": "debug_captures/toasts/20_open_early.png" },
+    { "wait_ms": 120 },
+    { "screenshot": "debug_captures/toasts/21_open_mid.png" },
+    { "wait_ms": 600 },
+    { "screenshot": "debug_captures/toasts/22_open.png" },
+    { "click": [2449, 184] },
+    { "wait_ms": 700 },
+    { "screenshot": "debug_captures/toasts/23_cleared.png" },
+    { "click": [1200, 1100] },
+    { "wait_ms": 90 },
+    { "screenshot": "debug_captures/toasts/24_closing.png" },
+    { "wait_ms": 600 },
+    { "screenshot": "debug_captures/toasts/25_closed.png" }
+  ]
+}

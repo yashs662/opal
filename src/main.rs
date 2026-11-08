@@ -23,6 +23,7 @@ mod hotreload;
 mod local_player;
 mod media_controls;
 mod model;
+mod notify;
 mod official_app;
 mod prefs;
 mod spirc_bootstrap;
@@ -57,7 +58,9 @@ fn init_credential_store() {
 
     match store {
         Ok(s) => keyring_core::set_default_store(s),
-        Err(e) => log::warn!("credential store init failed, tokens won't persist: {e}"),
+        Err(e) => {
+            log::warn!(toast = "Sign-in won't be remembered"; "credential store init failed, tokens won't persist: {e}")
+        }
     }
 }
 
@@ -70,7 +73,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `opal_gfx=debug` would spam per-frame `[loop] WaitUntil(...)` +
     // active-tick lines while the progress tween runs (60 fps during
     // playback). Drop the lib to `info`; keep `opal` at debug.
+    #[cfg(debug_assertions)]
     let default_filter = "info,wgpu_hal=warn,wgpu_core=warn,opal=debug,opal_gfx=info";
+    // Release has no console to read: only warnings and errors are worth
+    // formatting, and those reach the user through the notice layer
+    // anyway. `RUST_LOG` still overrides.
+    #[cfg(not(debug_assertions))]
+    let default_filter = "warn";
     #[cfg(feature = "automation")]
     let filter = debug_cfg
         .as_ref()
@@ -78,7 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| default_filter.to_string());
     #[cfg(not(feature = "automation"))]
     let filter = default_filter.to_string();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).init();
+    // env_logger for the console, plus the tap that turns WARN/ERROR into
+    // toasts + notification history (see `notify`).
+    notify::init(&filter);
 
     // keyring-core has no built-in store: register the OS-native one once,
     // before any Entry use (token load below). Fail-soft — a registration
@@ -166,6 +177,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (TEA Stage 1 — see PLAN_TEA.md).
     let msgs = app::msg::queue();
     let dispatch = app::msg::Dispatch::new(msgs.clone(), app.wake_handle());
+    // Notices logged from worker threads now wake an idle loop to show them
+    // (anything logged before this is already queued for the first frame).
+    notify::attach(app.wake_handle());
+    #[cfg(feature = "automation")]
+    if let Some(c) = debug_cfg.as_ref() {
+        c.spawn_notices();
+    }
     // Connect to the dx devserver for runtime hot-patching (no-op unless the
     // `hotreload` feature is on). The patch handler latches a flag + wakes the
     // loop; the per-frame tick drains it into a scene rebuild.
@@ -247,23 +265,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // folder picker) can nudge the frame loop when their result is ready.
     let wake = app.wake_handle();
     app.state_mut().settings.set_wake(wake);
-    // Keep the home greeting current across the day: sleep until the next
-    // time-of-day boundary (05:00/12:00/17:00 local), wake the loop, repeat.
-    // A precise sleep to a known time — not a poll — so the app still parks
-    // at 0% CPU in between; the frame tick re-evaluates the bucket on wake.
-    {
-        let wake = app.wake_handle();
-        std::thread::spawn(move || {
-            loop {
-                let secs = views::home::main_pane::secs_to_next_greeting_boundary();
-                std::thread::sleep(std::time::Duration::from_secs(secs));
-                wake.wake();
-            }
-        });
-    }
     let home_view = views::home::HomeView::new(dispatch.clone(), icons.clone());
     let login_view = views::login::LoginView::new(dispatch.clone(), icons.clone());
     let swipe_dispatch = dispatch.clone();
+    let toast_actions = {
+        use app::msg::Msg;
+        let (d1, d2, d3) = (dispatch.clone(), dispatch.clone(), dispatch.clone());
+        views::toasts::ToastActions {
+            dismiss: Rc::new(move |id| d1.send(Msg::ToastDismiss(id))),
+            open_history: Rc::new(move || d2.send(Msg::NotificationsOpen)),
+            clear_history: Rc::new(move || d3.send(Msg::NotificationsClear)),
+        }
+    };
     let setup_view = views::setup::SetupView::new(dispatch, icons.clone());
 
     let app = {
@@ -272,10 +285,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // patch re-runs the patched `view` bodies on the next rebuild.
         app.scene(move |s, state: &AppState| {
             let view = state.router.view;
-            hotreload::call(|| match view {
-                View::Setup => setup_view.build(s, state),
-                View::Splash | View::Login => login_view.build(s, state),
-                View::Home => home_view.build(s, state),
+            hotreload::call(|| {
+                match view {
+                    View::Setup => setup_view.build(s, state),
+                    View::Splash | View::Login => login_view.build(s, state),
+                    View::Home => home_view.build(s, state),
+                }
+                // A later root than the view: toasts float above every view
+                // and modal.
+                use widgets::component::Component;
+                views::toasts::Toasts {
+                    model: &state.toasts,
+                    icons: &icons,
+                    actions: &toast_actions,
+                }
+                .view(s);
             })
         })
     };

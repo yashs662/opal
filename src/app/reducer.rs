@@ -94,7 +94,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::TokensRefreshFailed { permanent } => {
             if permanent {
-                log::warn!("refresh token rejected (invalid_grant) — signing out");
+                log::warn!(toast = "Signed out — please log in again"; "refresh token rejected (invalid_grant) — signing out");
                 auth_dead(state, cx);
             } else {
                 state.auth.refresh_failed();
@@ -452,7 +452,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             cx.rebuild();
         }
         WorkerResponse::SpotifySessionFailed { error } => {
-            log::warn!("librespot session failed: {error}. Falling back to Web API polling.");
+            log::warn!(toast = "Spotify Connect unavailable"; "librespot session failed: {error}. Falling back to Web API polling.");
             // No Connect device, but the user can still drive a remote device
             // over the Web API — enable transport rather than leave it loading.
             state.player_ui.session_ready.set(true);
@@ -474,7 +474,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             cx.rebuild();
         }
         WorkerResponse::LosslessEngineFailed { error } => {
-            log::warn!("lossless engine failed: {error}");
+            log::warn!(toast = "Lossless playback unavailable"; "lossless engine failed: {error}");
             state.engine.deactivate();
             // Release the startup hold — playback falls back to Opal's own
             // device rather than staying locked behind a dead handover.
@@ -986,7 +986,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::PlaylistFailed { id, error } => {
             state.library.clear_inflight(&id);
-            log::warn!("playlist {id} load failed: {error}");
+            log::warn!(toast = "Couldn't load this page"; "playlist {id} load failed: {error}");
         }
         WorkerResponse::ArtistOpened {
             id,
@@ -1032,7 +1032,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
         }
         WorkerResponse::ArtistFailed { id, error } => {
             state.library.clear_inflight(&id);
-            log::warn!("artist {id} load failed: {error}");
+            log::warn!(toast = "Couldn't load this artist"; "artist {id} load failed: {error}");
         }
         WorkerResponse::TrackDetails { details } => {
             let track_id = details.track_id.clone();

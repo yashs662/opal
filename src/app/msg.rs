@@ -184,4 +184,12 @@ pub enum Msg {
     ResetPrefs,
     /// Persist a validated client id and advance to Login (setup save).
     SaveClientId(String),
+    /// Close a toast early (its ✕).
+    ToastDismiss(u64),
+    /// Open the notification history (top-bar bell / a toast click).
+    NotificationsOpen,
+    /// Empty the notification history.
+    NotificationsClear,
+    /// Choose which notices pop up as toasts.
+    SetToastLevel(crate::notify::ToastLevel),
 }

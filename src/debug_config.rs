@@ -34,6 +34,53 @@ pub struct DebugConfig {
     /// Timed scripted actions. Empty = launch + sit (no automation).
     #[serde(default)]
     pub script: Vec<RawStep>,
+    /// Synthetic WARN/ERROR records logged from a background thread at
+    /// set times — drives the toast / notification-history path through
+    /// the real log tap.
+    #[serde(default)]
+    pub notices: Vec<RawNotice>,
+}
+
+/// One synthetic log record (see [`DebugConfig::notices`]).
+#[derive(Debug, Deserialize, Clone)]
+pub struct RawNotice {
+    /// Delay from launch.
+    pub after_ms: u64,
+    /// `"error"`, anything else = warn.
+    #[serde(default)]
+    pub level: String,
+    /// The record's `toast` title (opts a warning into a toast).
+    #[serde(default)]
+    pub toast: Option<String>,
+    pub msg: String,
+}
+
+impl DebugConfig {
+    /// Log the configured [`RawNotice`]s on their schedule, off-thread (as
+    /// a worker would), so they arrive through the tap + loop wake.
+    pub fn spawn_notices(&self) {
+        let mut notices = self.notices.clone();
+        if notices.is_empty() {
+            return;
+        }
+        notices.sort_by_key(|n| n.after_ms);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            for n in notices {
+                let at = start + Duration::from_millis(n.after_ms);
+                std::thread::sleep(at.saturating_duration_since(std::time::Instant::now()));
+                let level = if n.level == "error" {
+                    log::Level::Error
+                } else {
+                    log::Level::Warn
+                };
+                match &n.toast {
+                    Some(t) => log::log!(level, toast = t.as_str(); "{}", n.msg),
+                    None => log::log!(level, "{}", n.msg),
+                }
+            }
+        });
+    }
 }
 
 /// One JSON step. Exactly one action field should be set; the first

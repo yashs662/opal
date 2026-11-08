@@ -9,9 +9,10 @@
 //!
 //! [`text_action`] is the borderless sibling — the small dim label that
 //! trails a section header ("Clear all" / "Show all"), with a hit target
-//! and hover fill instead of bare text.
+//! and hover fill instead of bare text. [`icon_button`] is the glyph-only
+//! one (a close ✕, a clear-field ✕).
 
-use opal_gfx::{Align, EventCtx, Len, Scene};
+use opal_gfx::{Align, EventCtx, Len, NodeBuilderRef, Scene};
 
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
@@ -31,9 +32,9 @@ impl ButtonTone {
         match self {
             ButtonTone::Neutral => (t::TEXT, t::BORDER, t::BTN_HOVER),
             ButtonTone::Danger => (
-                [0.93, 0.46, 0.46, 1.0],
-                [0.93, 0.46, 0.46, 0.45],
-                [0.85, 0.20, 0.20, 0.18],
+                t::DANGER,
+                t::with_alpha(t::DANGER, 0.45),
+                t::with_alpha(t::CLOSE_HOVER, 0.18),
             ),
         }
     }
@@ -92,4 +93,27 @@ pub fn text_action(s: &mut Scene, label: &str, on_click: impl Fn(&mut EventCtx) 
                 .color(t::TEXT_DIM)
                 .hover_color(t::TEXT);
         });
+}
+
+/// Round glyph-only button: a dim `icon` centred in a `box_px` circle that
+/// fills on hover. Returns the builder so the caller can place it (e.g.
+/// `.push_end()`).
+pub fn icon_button<'s>(
+    s: &'s mut Scene,
+    icons: &IconSet,
+    icon: Icon,
+    box_px: f32,
+    icon_px: f32,
+    on_click: impl Fn(&mut EventCtx) + 'static,
+) -> NodeBuilderRef<'s> {
+    let mut b = s.row(());
+    b.w_px(box_px)
+        .h_px(box_px)
+        .center()
+        .radius(t::R_FULL)
+        .hover_color(t::BTN_HOVER)
+        .cursor(opal_gfx::CursorIcon::Pointer)
+        .on_click(on_click)
+        .child(|c| icons.render(c, icon, icon_px, t::TEXT_DIM));
+    b
 }

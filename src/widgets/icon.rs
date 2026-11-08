@@ -34,6 +34,7 @@ pub enum Icon {
     PanelRight,
     Trash,
     Pen,
+    Bell,
 }
 
 impl Icon {
@@ -67,6 +68,7 @@ impl Icon {
             Icon::PanelRight => include_bytes!("../../assets/icons/panel-right.svg"),
             Icon::Trash => include_bytes!("../../assets/icons/trash.svg"),
             Icon::Pen => include_bytes!("../../assets/icons/pen.svg"),
+            Icon::Bell => include_bytes!("../../assets/icons/bell.svg"),
         }
     }
 }
@@ -100,6 +102,7 @@ const ALL: &[Icon] = &[
     Icon::PanelRight,
     Icon::Trash,
     Icon::Pen,
+    Icon::Bell,
 ];
 
 /// Raster size for the brand logo (gradient dragonfly). Larger than the

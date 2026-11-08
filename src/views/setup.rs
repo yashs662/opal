@@ -317,7 +317,7 @@ fn card(
             // Inline validation error (empty unless a bad id was submitted).
             // Reactive text — appears/clears without a rebuild.
             card.text_bound((), error, tokens::TEXT_SM)
-                .color([0.93, 0.46, 0.46, 1.0]);
+                .color(tokens::DANGER);
 
             card.row(())
                 .w(Len::Fill)

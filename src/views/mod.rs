@@ -8,6 +8,7 @@
 pub mod home;
 pub mod login;
 pub mod setup;
+pub mod toasts;
 
 /// Which top-level view is mounted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -14,7 +14,7 @@ use crate::model::ArtModel;
 use crate::model::MembershipModel;
 use crate::model::search::{SearchHistoryEntry, SearchModel};
 use crate::views::home::CtxMenuFn;
-use crate::widgets::button::{TEXT_ACTION_PAD_X, text_action};
+use crate::widgets::button::{TEXT_ACTION_PAD_X, icon_button, text_action};
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::thumb::thumb;
 use crate::widgets::tokens as t;
@@ -191,17 +191,14 @@ impl SearchModal<'_> {
                                 .on_change(move |s| on_change(s.to_string()));
                             if !m.query.is_empty() {
                                 let clear_text = on_input.clone();
-                                f.row(())
-                                    .w_px(ICON_BTN)
-                                    .h_px(ICON_BTN)
-                                    .center()
-                                    .radius(t::R_FULL)
-                                    .hover_color(t::BTN_HOVER)
-                                    .cursor(opal_gfx::CursorIcon::Pointer)
-                                    .on_click(move |_| clear_text(String::new()))
-                                    .child(|c| {
-                                        icons.render(c, Icon::Close, t::ICON_SM, t::TEXT_DIM);
-                                    });
+                                icon_button(
+                                    f,
+                                    icons,
+                                    Icon::Close,
+                                    ICON_BTN,
+                                    t::ICON_SM,
+                                    move |_| clear_text(String::new()),
+                                );
                             }
                         });
                     panel.rect(()).w(Len::Fill).h_px(t::SP_PX).rgba(
@@ -350,18 +347,10 @@ fn entry_row(
                     .max_width_px(ENTRY_TEXT_MAX);
             });
         if let Some((idx, clear)) = remove {
-            r.row(())
-                .push_end()
-                .w_px(ICON_BTN)
-                .h_px(ICON_BTN)
-                .center()
-                .radius(t::R_FULL)
-                .hover_color(t::BTN_HOVER)
-                .cursor(opal_gfx::CursorIcon::Pointer)
-                .on_click(move |_| clear(Some(idx)))
-                .child(|c| {
-                    icons.render(c, Icon::Close, t::ICON_SM, t::TEXT_DIM);
-                });
+            icon_button(r, icons, Icon::Close, ICON_BTN, t::ICON_SM, move |_| {
+                clear(Some(idx))
+            })
+            .push_end();
         }
     });
 }

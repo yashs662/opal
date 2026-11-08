@@ -1,0 +1,27 @@
+{
+  "force_home": true,
+  "window": [1280, 780],
+  "log_filter": "info,wgpu_hal=warn,wgpu_core=warn,opal=info,opal_gfx=warn",
+  "notices": [
+    { "after_ms": 2500, "toast": "Couldn't hand playback to the Spotify app", "msg": "transfer to lossless engine failed: HTTP 500: Server error." },
+    { "after_ms": 2700, "msg": "album art fetch failed (https://i.scdn.co/image/ab67) attempt 1: timeout" },
+    { "after_ms": 3300, "level": "error", "msg": "streaming authorisation failed: HTTP 401: The access token expired" },
+    { "after_ms": 3600, "toast": "Playback command failed", "msg": "playback cmd PlayContext(Uris(51 tracks from spotify:track:4hqNZOfdQBPcWsyQubtbjF @0)) failed: HTTP 404: Player command failed: No active device found (NO_ACTIVE_DEVICE)" },
+    { "after_ms": 3700, "toast": "Playback command failed", "msg": "playback cmd PlayContext(Uris(51 tracks from spotify:track:4hqNZOfdQBPcWsyQubtbjF @0)) failed: HTTP 404: Player command failed: No active device found (NO_ACTIVE_DEVICE)" }
+  ],
+  "script": [
+    { "wait_ms": 2200 },
+    { "screenshot": "debug_captures/toasts/00_before.png" },
+    { "wait_ms": 450 },
+    { "screenshot": "debug_captures/toasts/01_entering.png" },
+    { "wait_ms": 1400 },
+    { "screenshot": "debug_captures/toasts/02_stack.png" },
+    { "hover": [2200, 270], "dwell_ms": 300 },
+    { "screenshot": "debug_captures/toasts/03_hover.png" },
+    { "wait_ms": 7000 },
+    { "screenshot": "debug_captures/toasts/04_after_expiry.png" },
+    { "move_mouse": [1200, 900] },
+    { "wait_ms": 6000 },
+    { "screenshot": "debug_captures/toasts/05_all_gone.png" }
+  ]
+}

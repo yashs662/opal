@@ -57,6 +57,8 @@ pub struct AppState {
     pub eq: EqModel,
     /// Search slice: the query mirror + latest results.
     pub search: crate::model::SearchModel,
+    /// Toasts + notification history, fed by the log tap.
+    pub toasts: crate::model::ToastModel,
     /// OS media integration (SMTC / MPRIS / NowPlaying). `None` until the
     /// window exists (SMTC registers against the HWND) or if the platform
     /// registration failed — everything media-key related is fail-soft.
@@ -146,6 +148,7 @@ impl AppState {
             membership: MembershipModel::new(),
             eq: EqModel::from_prefs(&prefs.audio.eq),
             search: crate::model::SearchModel::new(prefs.search_history.clone()),
+            toasts: crate::model::ToastModel::new(prefs.toast_level),
             media: None,
             prefs: PrefsModel::new(prefs),
         }

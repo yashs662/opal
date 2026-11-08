@@ -120,7 +120,7 @@ impl PrefsModel {
         if elapsed >= PREFS_DEBOUNCE {
             match self.flush(player, show_canvas) {
                 Ok(()) => log::debug!("prefs saved"),
-                Err(e) => log::warn!("prefs save failed: {e}"),
+                Err(e) => log::warn!(toast = "Couldn't save preferences"; "prefs save failed: {e}"),
             }
             self.dirty_since = None;
             tl.stop_for(&self.save_anchor);
@@ -150,7 +150,9 @@ impl PrefsModel {
         self.dirty_since = None;
         match self.data.save() {
             Ok(()) => log::info!("preferences reset to defaults"),
-            Err(e) => log::warn!("preferences reset save failed: {e}"),
+            Err(e) => {
+                log::warn!(toast = "Couldn't save preferences"; "preferences reset save failed: {e}")
+            }
         }
     }
 

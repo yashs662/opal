@@ -12,6 +12,11 @@ use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::tokens as t;
 
 pub struct TopBar<'a> {
+    /// Open the notification history (the bell).
+    pub on_notifications: Rc<dyn Fn()>,
+    /// The bell's badge: the worst unseen notice's colour, transparent
+    /// when everything has been seen.
+    pub notice_badge: Computed<[f32; 4]>,
     /// Open the settings modal (the gear button emits this; the handler
     /// owns opening the overlay + the morph spring).
     pub on_settings_open: Rc<dyn Fn()>,
@@ -91,6 +96,30 @@ impl Component for TopBar<'_> {
                             });
                     });
 
+                let on_notifications = self.on_notifications.clone();
+                let badge = self.notice_badge.clone();
+                let hover = Signal::new(false);
+                let tint = hover_tint(&hover, self.accent, t::TEXT);
+                topbar_btn(
+                    t_row,
+                    icons,
+                    Icon::Bell,
+                    hover,
+                    tint,
+                    move |_| on_notifications(),
+                    move |c| {
+                        // Unseen-severity dot on the bell's shoulder. A
+                        // transparent fill emits nothing, so a quiet bell
+                        // costs no instance.
+                        c.rect(())
+                            .abs(t::TOPBAR_BTN - BADGE - t::SP_2, t::SP_2)
+                            .w_px(BADGE)
+                            .h_px(BADGE)
+                            .radius(t::R_FULL)
+                            .color(badge);
+                    },
+                );
+
                 let on_settings_open = self.on_settings_open.clone();
                 // The handler (`Msg::SettingsOpen`) opens the overlay + starts
                 // the morph spring together, so the panel never flashes at
@@ -130,6 +159,9 @@ impl Component for TopBar<'_> {
     }
 }
 
+/// Diameter of the bell's unseen-notice badge.
+const BADGE: f32 = t::SP_2;
+
 /// Top-bar pill button with a click handler (e.g. the settings gear). The
 /// handler receives the full `EventCtx` so it can start a timeline tween
 /// (the settings fade) at click time.
@@ -142,6 +174,21 @@ fn topbar_icon_btn_click(
 ) {
     let hover = Signal::new(false);
     let tint = hover_tint(&hover, accent, t::TEXT);
+    topbar_btn(s, icons, icon, hover, tint, on_click, |_| {});
+}
+
+/// The round top-bar button shell every top-bar control shares: `icon`
+/// tinted by `tint`, a hover fill driven by `hover`, plus any `extra`
+/// overlay children (a badge).
+fn topbar_btn(
+    s: &mut Scene,
+    icons: &IconSet,
+    icon: Icon,
+    hover: Signal<bool>,
+    tint: impl Into<opal_gfx::Bind<[f32; 4]>>,
+    on_click: impl Fn(&mut opal_gfx::EventCtx) + 'static,
+    extra: impl FnOnce(&mut Scene),
+) {
     s.row(())
         .w_px(t::TOPBAR_BTN)
         .h_px(t::TOPBAR_BTN)
@@ -156,6 +203,7 @@ fn topbar_icon_btn_click(
         .on_click(on_click)
         .child(|c| {
             icons.render(c, icon, t::ICON_MD, tint);
+            extra(c);
         });
 }
 
@@ -184,17 +232,5 @@ fn nav_arrow(
             }
         },
     );
-    s.row(())
-        .w_px(t::TOPBAR_BTN)
-        .h_px(t::TOPBAR_BTN)
-        .rgba(t::PANEL[0], t::PANEL[1], t::PANEL[2], 1.0)
-        // Must precede `hover_color` — see `topbar_icon_btn_click`.
-        .on_hover(hover)
-        .hover_color(t::PANEL_HI)
-        .radius(t::R_FULL)
-        .center()
-        .on_click(move |_| go())
-        .child(|c| {
-            icons.render(c, icon, t::ICON_MD, tint.clone());
-        });
+    topbar_btn(s, icons, icon, hover, tint, move |_| go(), |_| {});
 }

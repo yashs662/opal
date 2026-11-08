@@ -14,7 +14,7 @@ use crate::api::{HomeData, LIKED_SONGS_ID};
 use crate::model::ArtModel;
 use crate::views::MainNav;
 use crate::views::home::NavFn;
-use crate::widgets::chip::chip;
+use crate::widgets::chip::{ChipState, chip};
 use crate::widgets::component::Component;
 use crate::widgets::icon::{Icon, IconSet};
 use crate::widgets::thumb::thumb;
@@ -81,9 +81,9 @@ impl Component for Sidebar<'_> {
                     .align(Align::Center)
                     .overflow_y(Overflow::Hidden)
                     .child(|chips| {
-                        chip(chips, "Playlists", true, self.accent);
-                        chip(chips, "Artists", false, self.accent);
-                        chip(chips, "Albums", false, self.accent);
+                        chip(chips, "Playlists", ChipState::Selected, self.accent);
+                        chip(chips, "Artists", ChipState::Idle, self.accent);
+                        chip(chips, "Albums", ChipState::Idle, self.accent);
                     });
                 c.col(())
                     .w(Len::Fill)

@@ -273,11 +273,13 @@ pub struct HomeView {
     request_cover: playlist::CoverFn,
     mark_dirty: Rc<dyn Fn()>,
     on_devices_open: Rc<dyn Fn()>,
+    on_notifications: Rc<dyn Fn()>,
     on_like_open: Rc<dyn Fn()>,
     on_like_toggle_playlist: Rc<dyn Fn(String, bool)>,
     on_like_toggle_liked: Rc<dyn Fn(bool)>,
     on_transfer: Rc<dyn Fn(String)>,
     on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)>,
+    on_toast_level: Rc<dyn Fn(crate::notify::ToastLevel)>,
     on_normalize: Rc<dyn Fn()>,
     on_lossless_engine: Rc<dyn Fn()>,
     on_lossless_window: Rc<dyn Fn()>,
@@ -354,6 +356,10 @@ impl HomeView {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::SettingsOpen))
         };
+        let on_notifications: Rc<dyn Fn()> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move || dispatch.send(Msg::NotificationsOpen))
+        };
         let on_devices_open: Rc<dyn Fn()> = {
             let dispatch = dispatch.clone();
             Rc::new(move || dispatch.send(Msg::DevicesOpen))
@@ -375,6 +381,10 @@ impl HomeView {
         let on_transfer: Rc<dyn Fn(String)> = {
             let dispatch = dispatch.clone();
             Rc::new(move |device_id| dispatch.send(Msg::Transfer(device_id)))
+        };
+        let on_toast_level: Rc<dyn Fn(crate::notify::ToastLevel)> = {
+            let dispatch = dispatch.clone();
+            Rc::new(move |l| dispatch.send(Msg::SetToastLevel(l)))
         };
         let on_quality: Rc<dyn Fn(crate::prefs::AudioQuality)> = {
             let dispatch = dispatch.clone();
@@ -566,11 +576,13 @@ impl HomeView {
             request_cover,
             mark_dirty,
             on_devices_open,
+            on_notifications,
             on_like_open,
             on_like_toggle_playlist,
             on_like_toggle_liked,
             on_transfer,
             on_quality,
+            on_toast_level,
             on_normalize,
             on_lossless_engine,
             on_lossless_window,
@@ -801,6 +813,8 @@ impl HomeView {
             icons,
         };
         let top_bar = top_bar::TopBar {
+            on_notifications: self.on_notifications.clone(),
+            notice_badge: crate::views::toasts::badge_color(&state.toasts),
             accent: &state.backdrop.accent,
             on_settings_open: self.on_settings_open.clone(),
             can_back: &state.router.can_back,
@@ -868,6 +882,8 @@ impl HomeView {
             on_change_cache_dir: self.on_change_cache_dir.clone(),
             quality: state.prefs.data.audio.quality,
             on_quality: self.on_quality.clone(),
+            toast_level: state.prefs.data.toast_level,
+            on_toast_level: self.on_toast_level.clone(),
             on_normalize: self.on_normalize.clone(),
             on_lossless_engine: self.on_lossless_engine.clone(),
             on_lossless_window: self.on_lossless_window.clone(),

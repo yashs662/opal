@@ -72,6 +72,9 @@ pub struct UserPreferences {
     /// "Recent searches" list, persisted so it survives restarts.
     #[serde(default)]
     pub search_history: Vec<crate::model::search::SearchHistoryEntry>,
+    /// Which notices pop up as toasts (history keeps them all regardless).
+    #[serde(default)]
+    pub toast_level: crate::notify::ToastLevel,
 }
 
 fn default_version() -> u32 {
@@ -104,6 +107,7 @@ impl Default for UserPreferences {
             cache_dir: None,
             spotify_client_id: None,
             search_history: Vec::new(),
+            toast_level: crate::notify::ToastLevel::default(),
         }
     }
 }

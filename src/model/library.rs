@@ -131,8 +131,13 @@ pub struct LibraryModel {
     /// Last time-of-day bucket the home greeting was built for (0/1/2 =
     /// morning/afternoon/evening; 255 = unset). The frame tick rebuilds when
     /// it changes so the greeting stays current even if the app idles on the
-    /// feed across a boundary. A background timer wakes the loop at each one.
+    /// feed across a boundary.
     pub greeting_bucket: Cell<u8>,
+    /// When the next time-of-day boundary falls — the frame tick asks the
+    /// loop for a timed wake then (`SceneCtx::wake_at`), so the greeting
+    /// flips on time with no timer thread and no polling. `None` = not yet
+    /// computed.
+    pub greeting_due: Option<std::time::Instant>,
     /// Resolved Recents session contexts (uri → name/owner/cover). The
     /// Recents page shows a generic "Playlist"/count label until these land.
     pub recent_contexts: std::collections::HashMap<String, crate::api::RecentContextInfo>,
@@ -157,6 +162,7 @@ impl LibraryModel {
             skeleton_pulse: Signal::new(1.0),
             pulse_on: false,
             greeting_bucket: Cell::new(u8::MAX),
+            greeting_due: None,
             recent_contexts: std::collections::HashMap::new(),
             recent_contexts_requested: HashSet::new(),
             expanded_recents: HashSet::new(),

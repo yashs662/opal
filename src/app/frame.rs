@@ -34,12 +34,27 @@ pub fn tick(
     if crate::hotreload::take_patched() {
         cx.rebuild();
     }
-    // Keep the home greeting current: rebuild when the time-of-day bucket
-    // flips (a background timer wakes the loop at each boundary, so this
-    // fires even if the app has idled on the feed for hours).
-    let bucket = crate::views::home::main_pane::greeting_bucket();
-    if state.library.greeting_bucket.replace(bucket) != bucket {
-        cx.rebuild();
+    // Keep the home greeting current: re-check the time-of-day bucket only
+    // when a boundary comes due, and ask the loop for a timed wake at the
+    // next one — so it flips on time even after hours idling on the feed,
+    // without reading the wall clock every frame.
+    {
+        use crate::views::home::main_pane as mp;
+        let lib = &mut state.library;
+        let due = match lib.greeting_due {
+            Some(due) if now < due => due,
+            _ => {
+                let bucket = mp::greeting_bucket();
+                if lib.greeting_bucket.replace(bucket) != bucket {
+                    cx.rebuild();
+                }
+                let due =
+                    now + std::time::Duration::from_secs(mp::secs_to_next_greeting_boundary());
+                lib.greeting_due = Some(due);
+                due
+            }
+        };
+        ctx.wake_at(due);
     }
     // Debounced search: dispatch the fetch once the query has been stable for
     // the debounce window (the search field's caret blink keeps the loop
@@ -271,6 +286,19 @@ pub fn tick(
     }
     if let Some(action) = cx.take_window_action() {
         ctx.tree.request_window_action(action);
+    }
+    // Notices: drain what the log tap captured — after the worker drain, so
+    // a failure the reducer just logged pops this same frame — then run the
+    // toast timers and book a timed wake for the next one. Idle cost: one
+    // atomic load and an empty `min`.
+    let notices = crate::notify::drain();
+    let toasts_changed = (!notices.is_empty() && state.toasts.ingest(notices, cx.tl, cx.now))
+        | state.toasts.tick(cx.tl, cx.now);
+    if toasts_changed {
+        cx.rebuild();
+    }
+    if let Some(due) = state.toasts.next_due() {
+        ctx.wake_at(due);
     }
     // Mirror the (possibly just-updated) player state out to the OS media
     // panel — no-op unless the track or playing flag actually changed.

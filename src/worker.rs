@@ -803,7 +803,7 @@ impl Worker {
                         WorkerCommand::AddToQueue { access_token, uri } => {
                             tokio::spawn(async move {
                                 if let Err(e) = api::add_to_queue(&access_token, &uri).await {
-                                    warn!("add_to_queue({uri}) failed: {e}");
+                                    warn!(toast = "Couldn't add to queue"; "add_to_queue({uri}) failed: {e}");
                                 }
                             });
                         }
@@ -1940,6 +1940,9 @@ struct ConnectRoute {
     spirc: Arc<AsyncMutex<Option<Spirc>>>,
     /// The device the cluster last reported active.
     active: Option<String>,
+    /// The lossless engine's device id while the hidden client is Opal's
+    /// chosen output.
+    engine: Option<String>,
 }
 
 /// Where a load starts inside its context: the track, and the position
@@ -1971,6 +1974,7 @@ impl ConnectRoute {
     /// Opal itself, else a connect-state `play` command to it.
     async fn play(
         &self,
+        token: &str,
         device: Option<&str>,
         context_uri: &str,
         target: &api::PlayTarget,
@@ -1979,9 +1983,28 @@ impl ConnectRoute {
             .session
             .as_ref()
             .ok_or_else(|| librespot_core::Error::unavailable("no session"))?;
-        let to = device
-            .or(self.active.as_deref())
-            .ok_or_else(|| librespot_core::Error::unavailable("no active device"))?;
+        let to = self
+            .target(token, device, session)
+            .await
+            .ok_or_else(|| librespot_core::Error::unavailable("no device to play on"))?;
+        let to = to.as_str();
+        self.load_on(session, to, context_uri, target)
+            .await
+            .inspect_err(|e| {
+                // History only — the album re-anchor may still play; that
+                // path toasts what the user ends up with.
+                warn!("connect-state play of {context_uri} on device {to} failed: {e}")
+            })
+    }
+
+    /// Load `context_uri` onto the resolved device `to`.
+    async fn load_on(
+        &self,
+        session: &Session,
+        to: &str,
+        context_uri: &str,
+        target: &api::PlayTarget,
+    ) -> Result<(), librespot_core::Error> {
         let start = LoadStart::of(target);
         if to == session.device_id()
             && let Some(spirc) = self.spirc.lock().await.as_ref()
@@ -1998,6 +2021,41 @@ impl ConnectRoute {
         }
         play_on_device(session, to, context_uri, &start).await
     }
+
+    /// The device a load goes to when the caller named none — the same
+    /// order the no-active-device recovery follows, so a refused load never
+    /// quits just because the cluster missed something:
+    /// 1. the cluster's active device;
+    /// 2. the one the Web API reports active — the cluster can miss it (the
+    ///    startup hand-off failed, or it was woken by a Web API call that
+    ///    never echoed a push);
+    /// 3. the lossless engine (re-found by name if it re-registered);
+    /// 4. Opal itself, a real Connect player.
+    async fn target(&self, token: &str, device: Option<&str>, session: &Session) -> Option<String> {
+        if let Some(id) = device.or(self.active.as_deref()) {
+            return Some(id.to_string());
+        }
+        let devices = api::get_devices(token).await.unwrap_or_default();
+        if let Some(d) = devices.iter().find(|d| d.is_active) {
+            return Some(d.id.clone());
+        }
+        let engine = self
+            .engine
+            .as_deref()
+            .and_then(|id| engine_in(&devices, id));
+        Some(engine.map_or_else(|| session.device_id().to_string(), |d| d.id))
+    }
+}
+
+/// The lossless engine in a live device list: by its known id, or — when the
+/// client re-registered under a new one (an update, a restart, a network
+/// blip) — re-found by this machine's name.
+fn engine_in(devices: &[api::Device], engine_id: &str) -> Option<api::Device> {
+    devices
+        .iter()
+        .find(|d| d.id == engine_id)
+        .cloned()
+        .or_else(|| pick_engine_device(devices, &[]))
 }
 
 /// Load a context onto `device` (`None` = the active one). The Web API
@@ -2017,14 +2075,11 @@ async fn load_context(
         Err(e) if api::is_refused_load(e) => {}
         _ => return first,
     }
-    if let Some(ctx) = target.context_uri() {
-        match connect.play(device, ctx, target).await {
-            Ok(()) => {
-                info!("loaded {ctx} over connect-state (the Web API refused it)");
-                return Ok(());
-            }
-            Err(e) => warn!("connect-state play of {ctx} failed: {e}"),
-        }
+    if let Some(ctx) = target.context_uri()
+        && connect.play(token, device, ctx, target).await.is_ok()
+    {
+        info!("loaded {ctx} over connect-state (the Web API refused it)");
+        return Ok(());
     }
     api::play_context_degraded(token, target, device)
         .await
@@ -2042,15 +2097,11 @@ async fn load_context(
 /// rather than only retrying the id it was given.
 async fn reclaim_engine(token: &str, engine_id: &str, play: bool) -> Option<api::Device> {
     let devices = api::get_devices(token).await.unwrap_or_default();
-    let device = devices
-        .iter()
-        .find(|d| d.id == engine_id)
-        .cloned()
-        .or_else(|| pick_engine_device(&devices, &[]))?;
+    let device = engine_in(&devices, engine_id)?;
     match api::transfer_playback(token, &device.id, play).await {
         Ok(()) => Some(device),
         Err(e) => {
-            warn!("reclaiming the lossless engine failed: {e}");
+            warn!(toast = "Couldn't reach the Spotify app"; "reclaiming the lossless engine failed: {e}");
             None
         }
     }
@@ -2167,18 +2218,28 @@ fn spawn_playback(
                 })
             }
             // A one-track ad-hoc list (search result, recents/artist tile with
-            // no known album) is a *contextless* load: Spotify plays the track
-            // and stops dead — no continuation, and the queue page fills with
-            // the same track looped between `spotify:delimiter` markers. The
-            // official client doesn't fall back to the album either; it seeds
-            // an autoplay station off the track. Do the same: play the track
-            // followed by its station, so what comes next is recommendations.
+            // no known album) is a *contextless* load. Load it the way an
+            // album page does — the track inside its album — because a bare
+            // URI list is what the official client (the lossless engine)
+            // accepts and then doesn't play, while an album context is the
+            // load every device takes. Playback continues through the album,
+            // then Spotify's autoplay. Only when the album can't be resolved
+            // does it go out as the track + its autoplay station.
             PlaybackCmd::PlayContext(api::PlayTarget::Uris { uris, offset }) if uris.len() == 1 => {
-                let mut uris = uris;
-                if let Some(session) = session.as_ref() {
-                    uris.extend(autoplay_station(session, &uris[0]).await);
+                let track_uri = uris[0].clone();
+                match album_context(&access_token, &track_uri).await {
+                    Some(context_uri) => PlaybackCmd::PlayContext(api::PlayTarget::ContextAt {
+                        context_uri,
+                        track_uri,
+                    }),
+                    None => {
+                        let mut uris = uris;
+                        if let Some(session) = session.as_ref() {
+                            uris.extend(autoplay_station(session, &track_uri).await);
+                        }
+                        PlaybackCmd::PlayContext(api::PlayTarget::Uris { uris, offset })
+                    }
                 }
-                PlaybackCmd::PlayContext(api::PlayTarget::Uris { uris, offset })
             }
             other => other,
         };
@@ -2228,7 +2289,7 @@ fn spawn_playback(
                 match r {
                     Ok(()) => debug!("spirc cmd {cmd:?} ok"),
                     Err(e) => {
-                        warn!("spirc cmd {cmd:?} failed: {e}");
+                        warn!(toast = "Playback command failed"; "spirc cmd {cmd:?} failed: {e}");
                         resp.send(WorkerResponse::PlaybackFailed { cmd });
                     }
                 }
@@ -2241,6 +2302,7 @@ fn spawn_playback(
             session,
             spirc: spirc_slot,
             active,
+            engine: engine.clone(),
         };
         let result = run_playback_cmd(&access_token, cmd.clone(), None, &connect).await;
         // Nothing is the active device. Two ways back, in this order:
@@ -2278,7 +2340,7 @@ fn spawn_playback(
                                 r
                             }
                             None => {
-                                warn!("lossless engine unreachable — no device to reclaim");
+                                warn!(toast = "Spotify app unreachable"; "lossless engine unreachable — no device to reclaim");
                                 result
                             }
                         }
@@ -2306,7 +2368,7 @@ fn spawn_playback(
         match result {
             Ok(()) => debug!("playback cmd {cmd:?} ok"),
             Err(e) => {
-                warn!("playback cmd {cmd:?} failed: {e}");
+                warn!(toast = "Playback command failed"; "playback cmd {cmd:?} failed: {e}");
                 // Tell the UI so it can roll back its optimistic flip —
                 // otherwise the play button shows "pause" while nothing
                 // is actually playing.
@@ -2529,7 +2591,7 @@ fn spawn_search(resp: Responder, access_token: String, query: String) {
     tokio::spawn(async move {
         let results = api::search(&access_token, &query)
             .await
-            .inspect_err(|e| warn!("search ({query}) failed: {e}"))
+            .inspect_err(|e| warn!(toast = "Search failed"; "search ({query}) failed: {e}"))
             .unwrap_or_default();
         resp.send(WorkerResponse::SearchResults { query, results });
     });
@@ -3983,7 +4045,7 @@ fn spawn_start_engine(
         } else {
             info!("transferring playback to the engine (resume={resume})");
             if let Err(e) = api::transfer_playback(&access_token, &device.id, resume).await {
-                warn!("transfer to lossless engine failed: {e}");
+                warn!(toast = "Couldn't hand playback to the Spotify app"; "transfer to lossless engine failed: {e}");
             }
         }
 
@@ -4060,7 +4122,7 @@ fn spawn_transfer(access_token: String, device_id: String, position_ms: Option<u
             // paused, so there's no audible restart-then-jump.
             Some(pos) => {
                 if let Err(e) = api::transfer_playback(&access_token, &device_id, false).await {
-                    warn!("transfer to {device_id} failed: {e}");
+                    warn!(toast = "Couldn't switch device"; "transfer to {device_id} failed: {e}");
                     return;
                 }
                 if let Err(e) = api::seek(&access_token, pos, Some(&device_id)).await {
@@ -4075,7 +4137,7 @@ fn spawn_transfer(access_token: String, device_id: String, position_ms: Option<u
             // preserves it.
             None => {
                 if let Err(e) = api::transfer_playback(&access_token, &device_id, true).await {
-                    warn!("transfer to {device_id} failed: {e}");
+                    warn!(toast = "Couldn't switch device"; "transfer to {device_id} failed: {e}");
                 }
             }
         }
@@ -4129,7 +4191,7 @@ fn spawn_set_saved(
                 resp.send(WorkerResponse::SavedState { track_id, saved });
             }
             Err(e) => {
-                warn!("set_track_saved({track_id}, {saved}) failed: {e}");
+                warn!(toast = "Couldn't update Liked Songs"; "set_track_saved({track_id}, {saved}) failed: {e}");
                 // Roll the optimistic heart back.
                 resp.send(WorkerResponse::SavedState {
                     track_id,
@@ -4347,7 +4409,7 @@ fn spawn_edit_membership(
             api::remove_from_playlist(&access_token, &playlist_id, &track_uri).await
         };
         if let Err(e) = res {
-            warn!("membership edit ({playlist_id}, add={add}) failed: {e}");
+            warn!(toast = "Couldn't update the playlist"; "membership edit ({playlist_id}, add={add}) failed: {e}");
             resp.send(WorkerResponse::MembershipEditFailed {
                 track_uri,
                 playlist_id,

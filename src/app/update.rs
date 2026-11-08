@@ -450,7 +450,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                 let on = state.settings.lossless_engine.get();
                 state.settings.lossless_engine.set(!on);
                 if !state.engine.installed {
-                    log::warn!("lossless engine: Spotify desktop client not installed");
+                    log::warn!(toast = "Spotify desktop app not found"; "lossless engine: Spotify desktop client not installed");
                 }
                 return;
             }
@@ -475,7 +475,7 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
                 (true, None) => {
                     // No token to find/transfer to its device with — undo
                     // rather than leave the switch lying about the state.
-                    log::warn!("lossless engine needs a signed-in session");
+                    log::warn!(toast = "Sign in to use lossless playback"; "lossless engine needs a signed-in session");
                     state.settings.lossless_engine.set(false);
                     state.prefs.data.audio.lossless_engine = false;
                 }
@@ -769,11 +769,35 @@ pub fn update(state: &mut AppState, worker: &Worker, cx: &mut Cx, msg: Msg) {
         Msg::SaveClientId(id) => {
             state.prefs.data.spotify_client_id = Some(id);
             if let Err(e) = state.prefs.data.save() {
-                log::warn!("saving client id failed: {e}");
+                log::warn!(toast = "Couldn't save your client id"; "saving client id failed: {e}");
             }
             // Reached Login *from* Setup → offer a Back affordance there.
             state.router.came_from_setup = true;
             state.router.go_view(View::Login, cx.tl, cx.now);
+            cx.rebuild();
+        }
+
+        Msg::ToastDismiss(id) => {
+            // Composite-only exit; the tick removes the card once it's gone.
+            state.toasts.dismiss(id, cx.tl, cx.now);
+        }
+
+        Msg::NotificationsOpen => {
+            state.toasts.open_history(cx.tl, cx.now);
+            // The list only builds while the panel is shown.
+            cx.rebuild();
+        }
+
+        Msg::SetToastLevel(level) => {
+            state.prefs.data.toast_level = level;
+            state.prefs.mark_dirty(cx.now);
+            state.toasts.set_level(level, cx.tl, cx.now);
+            // The settings chips show the selection.
+            cx.rebuild();
+        }
+
+        Msg::NotificationsClear => {
+            state.toasts.clear_history(cx.tl, cx.now);
             cx.rebuild();
         }
     }

@@ -661,8 +661,8 @@ fn greeting_prefix(bucket: u8) -> &'static str {
 }
 
 /// Seconds until the next greeting boundary (05:00 / 12:00 / 17:00 local) —
-/// the background timer sleeps this long, then wakes the loop so the tick
-/// re-evaluates the bucket.
+/// the frame tick schedules a timed wake this far out, then re-evaluates
+/// the bucket.
 pub(crate) fn secs_to_next_greeting_boundary() -> u64 {
     use chrono::Timelike;
     let now = chrono::Local::now();

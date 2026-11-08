@@ -227,6 +227,17 @@ pub const ACCENT: [f32; 4] = [0.655, 0.545, 1.0, 1.0];
 pub const ACCENT_HOVER: [f32; 4] = [0.737, 0.651, 1.0, 1.0];
 
 pub const CLOSE_HOVER: [f32; 4] = [0.85, 0.20, 0.20, 1.0];
+
+/// Error / destructive foreground — a soft red that stays readable on the
+/// dark panels (error notices, danger buttons, validation text).
+pub const DANGER: [f32; 4] = [0.93, 0.46, 0.46, 1.0];
+/// Warning foreground — amber, the same weight as [`DANGER`].
+pub const WARNING: [f32; 4] = [0.98, 0.74, 0.32, 1.0];
+
+/// `c` at alpha `a` — a token's colour as a tint/border.
+pub const fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], a]
+}
 pub const BTN_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
 
 /// Generic dim placeholder behind images while they load.
