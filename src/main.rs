@@ -251,11 +251,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             d.show_canvas,
         )
     };
-    if show_canvas
-        && let Some(uri) = last_uri
-        && let Some(id) = api::track_id_from_uri(&uri)
-    {
-        worker.fetch_canvas(uri.clone(), id.to_string());
+    if show_canvas && let Some(uri) = last_uri {
+        app.state_mut().canvas.request(&worker, &uri);
     }
 
     // The two views own their components + callbacks; the router state

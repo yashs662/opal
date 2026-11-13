@@ -19,7 +19,9 @@
 //! `tokio::task::spawn_blocking`, never directly on an async task.
 
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
@@ -138,16 +140,10 @@ pub fn remove(key: &str) {
 /// entry stays LRU-hot. `None` on miss / expiry / unsafe key.
 pub fn path(key: &str) -> Option<PathBuf> {
     let path = entry_path(key)?;
-    let meta = fs::metadata(&path).ok()?;
-    let age = meta
-        .modified()
-        .ok()
-        .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .unwrap_or(Duration::ZERO);
-    if age > TTL {
-        let _ = fs::remove_file(&path);
+    if !is_fresh(&path, TTL) {
         return None;
     }
+    // Touch mtime = "used now" for LRU. Best-effort; ignore failure.
     if let Ok(f) = fs::OpenOptions::new().write(true).open(&path) {
         let _ = f.set_modified(SystemTime::now());
     }
@@ -158,64 +154,99 @@ pub fn path(key: &str) -> Option<PathBuf> {
 /// On a hit the entry's mtime is refreshed so the LRU eviction in
 /// [`write`] treats recently-used covers as hot.
 pub fn read(key: &str) -> Option<Vec<u8>> {
-    let path = entry_path(key)?;
-    let meta = fs::metadata(&path).ok()?;
-    let age = meta
-        .modified()
-        .ok()
-        .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .unwrap_or(Duration::ZERO);
-    if age > TTL {
-        let _ = fs::remove_file(&path);
-        return None;
-    }
-    let bytes = fs::read(&path).ok()?;
-    // Touch mtime = "used now" for LRU. Best-effort; ignore failure.
-    if let Ok(f) = fs::OpenOptions::new().write(true).open(&path) {
-        let _ = f.set_modified(SystemTime::now());
-    }
-    Some(bytes)
+    fs::read(path(key)?).ok()
 }
 
 /// Persist `bytes` for `key`, then enforce the size cap. Best-effort:
 /// any IO failure is swallowed.
 pub fn write(key: &str, bytes: &[u8]) {
     let Some(path) = entry_path(key) else { return };
-    if fs::write(&path, bytes).is_err() {
-        return;
-    }
-    enforce_cap();
+    store(&path, bytes, MAX_BYTES, EVICT_TARGET);
 }
 
-/// If the cache directory exceeds [`MAX_BYTES`], delete oldest-by-mtime
-/// entries until under [`EVICT_TARGET`].
-fn enforce_cap() {
-    let Some(dir) = cache_dir() else { return };
-    let Ok(rd) = fs::read_dir(&dir) else { return };
-    let mut entries: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
-    let mut total: u64 = 0;
-    for e in rd.flatten() {
-        let Ok(meta) = e.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
-        }
-        let len = meta.len();
-        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        total += len;
-        entries.push((e.path(), mtime, len));
+/// Whether `path` holds an entry younger than `ttl` (by mtime). An
+/// expired entry is deleted on the way out, so a miss is always clean.
+fn is_fresh(path: &Path, ttl: Duration) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if age(&meta) > ttl {
+        let _ = fs::remove_file(path);
+        return false;
     }
-    if total <= MAX_BYTES {
-        return;
+    true
+}
+
+/// Time since the file was last modified (zero when the mtime is
+/// unreadable or in the future — treat it as just written).
+fn age(meta: &fs::Metadata) -> Duration {
+    meta.modified()
+        .ok()
+        .and_then(|m| SystemTime::now().duration_since(m).ok())
+        .unwrap_or(Duration::ZERO)
+}
+
+/// Every regular file directly under `dir`, with its metadata. Empty when
+/// the directory can't be read.
+fn files(dir: &Path) -> impl Iterator<Item = (PathBuf, fs::Metadata)> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            meta.is_file().then(|| (e.path(), meta))
+        })
+}
+
+/// The one write path for both cache tiers: land `bytes` at `path`
+/// atomically, then hold the entry's directory under its size cap.
+fn store(path: &Path, bytes: &[u8], max_bytes: u64, evict_target: u64) {
+    if write_atomic(path, bytes).is_ok()
+        && let Some(dir) = path.parent()
+    {
+        evict_dir(dir, max_bytes, evict_target);
     }
-    entries.sort_by_key(|(_, mtime, _)| *mtime); // oldest first
-    for (path, _, len) in entries {
-        if total <= EVICT_TARGET {
-            break;
-        }
-        if fs::remove_file(&path).is_ok() {
-            total = total.saturating_sub(len);
-        }
-    }
+}
+
+/// Distinguishes this process's concurrent temp files from one another.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Suffix of [`write_atomic`]'s in-progress files. No cache key ends in it.
+const TMP_SUFFIX: &str = ".tmp";
+
+/// A temp file this old was orphaned by a crash mid-write (a live write
+/// holds one for milliseconds); eviction sweeps it.
+const TMP_ORPHAN_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Replace the file at `path` with `bytes` in one step: write a sibling
+/// temp file, then rename it over the target. A reader holding the path
+/// sees the old contents or the new, never a truncated middle — a plain
+/// `fs::write` truncates first, so a concurrent reader (the Canvas decode
+/// thread opening a clip a second fetch is re-saving) got a partial file.
+/// It also makes a crash mid-write leave the previous file intact.
+///
+/// The temp name is unique per process + call, so two writers of the same
+/// key can't share one; the loser's rename simply lands second. It is
+/// short and independent of the target's name, so a long key can't be
+/// pushed past a path limit (Windows `MAX_PATH`, 255-byte names on macOS)
+/// by the suffix. Same directory = same volume, which the rename needs on
+/// every platform.
+///
+/// Windows refuses the replace while another handle has the target open
+/// without delete-sharing (std's own readers share it; a scanner might
+/// not). That surfaces as an `Err` with the old file untouched.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_file_name(format!(
+        ".{}.{}{TMP_SUFFIX}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&tmp, bytes)
+        .and_then(|()| fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
 }
 
 // ============================================================================
@@ -254,14 +285,7 @@ fn json_path(key: &str) -> Option<PathBuf> {
 /// responses through; [`read_json`] is the typed wrapper over it.
 pub fn read_raw_json(key: &str, ttl: Duration) -> Option<Vec<u8>> {
     let path = json_path(key)?;
-    let meta = fs::metadata(&path).ok()?;
-    let age = meta
-        .modified()
-        .ok()
-        .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .unwrap_or(Duration::ZERO);
-    if age > ttl {
-        let _ = fs::remove_file(&path);
+    if !is_fresh(&path, ttl) {
         return None;
     }
     fs::read(&path).ok()
@@ -271,10 +295,7 @@ pub fn read_raw_json(key: &str, ttl: Duration) -> Option<Vec<u8>> {
 /// any IO failure is swallowed.
 pub fn write_raw_json(key: &str, bytes: &[u8]) {
     let Some(path) = json_path(key) else { return };
-    if fs::write(&path, bytes).is_err() {
-        return;
-    }
-    enforce_json_cap();
+    store(&path, bytes, JSON_MAX_BYTES, JSON_EVICT_TARGET);
 }
 
 /// Read + deserialize a cached JSON value for `key`, or `None` on miss /
@@ -292,25 +313,31 @@ pub fn write_json<T: Serialize>(key: &str, value: &T) {
     write_raw_json(key, &bytes);
 }
 
-fn enforce_json_cap() {
-    let Some(dir) = json_dir() else { return };
-    evict_dir(&dir, JSON_MAX_BYTES, JSON_EVICT_TARGET);
+/// Whether `path` is one of [`write_atomic`]'s in-progress files.
+fn is_tmp(path: &Path) -> bool {
+    file_name_matches(path, |n| n.ends_with(TMP_SUFFIX))
 }
 
-/// Shared oldest-by-mtime eviction for a cache directory.
-fn evict_dir(dir: &PathBuf, max_bytes: u64, target: u64) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
+/// Test `path`'s final component as UTF-8 (`false` when it isn't).
+fn file_name_matches(path: &Path, pred: impl FnOnce(&str) -> bool) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(pred)
+}
+
+/// Shared oldest-by-mtime eviction for a cache directory: past
+/// `max_bytes`, delete oldest entries until under `target`. Also sweeps
+/// temp files a crashed write left behind.
+fn evict_dir(dir: &Path, max_bytes: u64, target: u64) {
     let mut entries: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     let mut total: u64 = 0;
-    for e in rd.flatten() {
-        let Ok(meta) = e.metadata() else { continue };
-        if !meta.is_file() {
+    for (path, meta) in files(dir) {
+        if is_tmp(&path) && age(&meta) > TMP_ORPHAN_AGE {
+            let _ = fs::remove_file(&path);
             continue;
         }
         let len = meta.len();
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         total += len;
-        entries.push((e.path(), mtime, len));
+        entries.push((path, mtime, len));
     }
     if total <= max_bytes {
         return;
@@ -355,13 +382,7 @@ impl CacheUsage {
 
 /// Sum the byte size of every file directly under `dir`.
 fn dir_bytes(dir: Option<PathBuf>) -> u64 {
-    let Some(dir) = dir else { return 0 };
-    let Ok(rd) = fs::read_dir(&dir) else { return 0 };
-    rd.flatten()
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum()
+    dir.map_or(0, |dir| files(&dir).map(|(_, meta)| meta.len()).sum())
 }
 
 /// Sum file bytes under `dir` recursively — the audio cache fans files
@@ -382,21 +403,9 @@ fn dir_bytes_recursive(dir: Option<PathBuf>) -> u64 {
 /// `canvas_` filename prefix.
 fn art_canvas_bytes(dir: Option<PathBuf>) -> (u64, u64) {
     let Some(dir) = dir else { return (0, 0) };
-    let Ok(rd) = fs::read_dir(&dir) else {
-        return (0, 0);
-    };
     let (mut art, mut canvas) = (0u64, 0u64);
-    for e in rd.flatten() {
-        let Ok(meta) = e.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
-        }
-        let is_canvas = e
-            .file_name()
-            .to_str()
-            .map(|n| n.starts_with(CANVAS_PREFIX))
-            .unwrap_or(false);
-        if is_canvas {
+    for (path, meta) in files(&dir) {
+        if file_name_matches(&path, |n| n.starts_with(CANVAS_PREFIX)) {
             canvas += meta.len();
         } else {
             art += meta.len();
@@ -430,12 +439,8 @@ pub fn root_dir() -> Option<PathBuf> {
 pub fn clear() -> u64 {
     let before = usage().total();
     for dir in [cache_dir(), json_dir()].into_iter().flatten() {
-        if let Ok(rd) = fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                if e.metadata().map(|m| m.is_file()).unwrap_or(false) {
-                    let _ = fs::remove_file(e.path());
-                }
-            }
+        for (path, _) in files(&dir) {
+            let _ = fs::remove_file(path);
         }
     }
     // Audio fans out into subdirectories — clear those recursively.
@@ -481,6 +486,104 @@ mod tests {
             "invalidated entry must not survive — a restart would read it"
         );
         set_root(None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A fresh, empty scratch dir that never touches the global root (so
+    /// these run in parallel with the root-swapping test above).
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("opal-cache-test-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_temp_file() {
+        let dir = scratch_dir("atomic-replace");
+        let path = dir.join("entry");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, ["entry"], "temp file must not outlive the write");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_atomic_replaces_a_file_a_reader_holds_open() {
+        // The Canvas case exactly: the decode thread has the clip open
+        // while a second fetch re-saves it. The replace must land (POSIX
+        // unlink semantics on macOS, delete-sharing handles on Windows)
+        // and the open handle must keep reading the bytes it opened.
+        use std::io::Read;
+        let dir = scratch_dir("atomic-held-open");
+        let path = dir.join("clip");
+        write_atomic(&path, b"old clip").unwrap();
+        let mut held = fs::File::open(&path).unwrap();
+        write_atomic(&path, b"new clip").expect("replace under an open reader");
+        let mut seen = Vec::new();
+        held.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"old clip");
+        assert_eq!(fs::read(&path).unwrap(), b"new clip");
+        drop(held);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn eviction_sweeps_orphaned_temp_files_only() {
+        let dir = scratch_dir("orphan-sweep");
+        let (orphan, live, entry) = (
+            dir.join(format!(".1.0{TMP_SUFFIX}")),
+            dir.join(format!(".1.1{TMP_SUFFIX}")),
+            dir.join("entry"),
+        );
+        for p in [&orphan, &live, &entry] {
+            fs::write(p, b"x").unwrap();
+        }
+        let old = SystemTime::now() - TMP_ORPHAN_AGE * 2;
+        for p in [&orphan, &entry] {
+            let f = fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_modified(old).unwrap();
+        }
+        evict_dir(&dir, u64::MAX, u64::MAX);
+        assert!(!orphan.exists(), "stale temp file must be swept");
+        assert!(live.exists(), "an in-progress write must survive");
+        assert!(entry.exists(), "age alone never evicts a real entry");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_atomic_never_exposes_a_partial_file() {
+        // A reader racing a re-save must get a whole payload every time —
+        // the truncate-then-fill window is what broke Canvas decode.
+        const LEN: usize = 4 * 1024 * 1024;
+        let dir = scratch_dir("atomic-race");
+        let path = dir.join("clip");
+        write_atomic(&path, &vec![0u8; LEN]).unwrap();
+        let writer = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                for fill in 1..=40u8 {
+                    // A replace the OS refuses mid-read is dropped whole,
+                    // which is still not a partial file.
+                    let _ = write_atomic(&path, &vec![fill; LEN]);
+                }
+            }
+        });
+        while !writer.is_finished() {
+            let bytes = fs::read(&path).expect("target must always exist");
+            assert_eq!(bytes.len(), LEN, "reader saw a truncated file");
+            assert!(
+                bytes.iter().all(|b| *b == bytes[0]),
+                "reader saw two writes interleaved"
+            );
+        }
+        writer.join().unwrap();
         let _ = fs::remove_dir_all(dir);
     }
 

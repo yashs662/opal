@@ -7,12 +7,14 @@
 //! the now-playing `.external()` node, following scene rebuilds via the
 //! shared [`node`](Self::node) slot.
 //!
-//! Cross-slice inputs (the live player, the worker `fetch_canvas`
-//! dispatch) stay in the caller; this slice just exposes the decode
-//! lifecycle + the per-frame ticks.
+//! The live player stays in the caller; this slice exposes the fetch
+//! gate ([`CanvasModel::request`] — the one place a Canvas fetch is
+//! dispatched), the decode lifecycle + the per-frame ticks.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use opal_gfx::node::NodeId;
@@ -30,11 +32,22 @@ pub const CANVAS_DIM_ALPHA: f32 = 0.5;
 /// hide arrow, both riding [`CanvasModel::hover_t`]).
 const HOVER_REVEAL_DURATION: Duration = Duration::from_millis(280);
 
-/// A running Canvas-video decode: the track it's decoding and the flag
-/// the decode thread polls so a track change (or canvas-off) can stop it.
+/// A Canvas-video decode session: the track it's decoding, the flag the
+/// decode thread polls so a track change (or canvas-off) can stop it, and
+/// the thread itself.
 struct CanvasSession {
     track_id: String,
     stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+impl CanvasSession {
+    /// Whether this session is still decoding `track_id`. A thread that
+    /// bailed (unreadable / undecodable clip) has finished, so the session
+    /// stops claiming the track and a later ready clip can start afresh.
+    fn is_decoding(&self, track_id: &str) -> bool {
+        self.track_id == track_id && !self.thread.is_finished()
+    }
 }
 
 pub struct CanvasModel {
@@ -56,6 +69,10 @@ pub struct CanvasModel {
     /// Resolved + cached clip for the current track: `(track_id, mp4_path)`.
     /// Set by `CanvasReady`, cleared on track change / `CanvasNone`.
     path: Option<(String, std::path::PathBuf)>,
+    /// Track ids with a Canvas fetch in flight — gate so the cold-start
+    /// rehydrate and the first live player push for the same track don't
+    /// both resolve + download it.
+    inflight: HashSet<String>,
     /// Engine handle for pushing decoded frames onto the now-playing
     /// `.external()` node. `None` until installed after the `App` is built.
     frame_sink: Option<Arc<FrameSink>>,
@@ -86,6 +103,7 @@ impl CanvasModel {
             hover: Signal::new(false),
             hover_t: Signal::new(0.0),
             path: None,
+            inflight: HashSet::new(),
             frame_sink: None,
             node: Arc::new(Mutex::new(None)),
             has_video: Arc::new(AtomicBool::new(false)),
@@ -121,6 +139,25 @@ impl CanvasModel {
 
     pub fn clear_path(&mut self) {
         self.path = None;
+    }
+
+    // --- fetch gate ----------------------------------------------------
+
+    /// Ask the worker to resolve `track_uri`'s Canvas, unless a fetch for
+    /// that track is already in flight. Every fetch ends in `CanvasReady`
+    /// or `CanvasNone`, both of which [`settle`](Self::settle) it.
+    pub fn request(&mut self, worker: &Worker, track_uri: &str) {
+        if let Some(id) = track_id_from_uri(track_uri)
+            && self.inflight.insert(id.to_string())
+        {
+            worker.fetch_canvas(track_uri.to_string(), id.to_string());
+        }
+    }
+
+    /// The fetch for `track_id` resolved (either way) — a later request
+    /// may dispatch again.
+    pub fn settle(&mut self, track_id: &str) {
+        self.inflight.remove(track_id);
     }
 
     // --- per-frame ticks ----------------------------------------------
@@ -191,8 +228,7 @@ impl CanvasModel {
         if self
             .decode
             .as_ref()
-            .map(|s| s.track_id == track_id)
-            .unwrap_or(false)
+            .is_some_and(|s| s.is_decoding(&track_id))
         {
             return;
         }
@@ -338,8 +374,12 @@ impl CanvasModel {
                 }
             });
         match spawned {
-            Ok(_) => {
-                self.decode = Some(CanvasSession { track_id, stop });
+            Ok(thread) => {
+                self.decode = Some(CanvasSession {
+                    track_id,
+                    stop,
+                    thread,
+                });
             }
             Err(e) => log::warn!("canvas decode: failed to spawn thread: {e}"),
         }
@@ -361,10 +401,8 @@ impl CanvasModel {
                 }
                 _ => {
                     self.clear_path();
-                    if let Some(p) = snapshot
-                        && let Some(id) = track_id_from_uri(&p.track_id)
-                    {
-                        worker.fetch_canvas(p.track_id.clone(), id.to_string());
+                    if let Some(p) = snapshot {
+                        self.request(worker, &p.track_id);
                     }
                 }
             }

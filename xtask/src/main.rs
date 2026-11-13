@@ -10,19 +10,55 @@
 //!   build with the `automation` feature, and run against the given
 //!   config (default `debug/home.json`). `--release` runs the optimized
 //!   build — debug-vs-release perf comparisons.
+//! - `bundle [--debug] [--open]` — macOS: build (release unless
+//!   `--debug`) and package `target/<profile>/Opal.app`, icon and all;
+//!   `--open` launches it. See [`bundle`].
+
+mod bundle;
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("debug") => debug_harness(args),
+        Some("bundle") => bundle::run(args),
         _ => {
-            eprintln!("usage: cargo xtask debug [--release] [config.json]");
+            eprintln!(
+                "usage: cargo xtask debug [--release] [config.json]\n       \
+                 cargo xtask bundle [--debug] [--open]"
+            );
             ExitCode::FAILURE
         }
     }
+}
+
+/// Build the app (`cargo build <extra> [--release]`) and return the path
+/// of the executable it produced. `Err` carries the exit code to end with.
+fn build_app(root: &Path, release: bool, extra: &[&str]) -> Result<PathBuf, ExitCode> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build").args(extra).current_dir(root);
+    if release {
+        cmd.arg("--release");
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => return Err(exit_code(s)),
+        Err(e) => {
+            eprintln!("failed to invoke cargo: {e}");
+            return Err(ExitCode::FAILURE);
+        }
+    }
+    Ok(root
+        .join("target")
+        .join(if release { "release" } else { "debug" })
+        .join(format!("opal{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// A child's exit status as ours (a signal death reads as plain failure).
+fn exit_code(status: ExitStatus) -> ExitCode {
+    ExitCode::from(status.code().unwrap_or(1) as u8)
 }
 
 /// Repo root = parent of this crate's manifest dir (`<root>/xtask`).
@@ -53,37 +89,17 @@ fn debug_harness(args: impl Iterator<Item = String>) -> ExitCode {
 
     kill_stale_opal();
 
-    let mut build_args = vec!["build", "--features", "automation"];
-    if release {
-        build_args.push("--release");
-    }
-    let build = Command::new("cargo")
-        .args(&build_args)
-        .current_dir(&root)
-        .status();
-    match build {
-        Ok(s) if s.success() => {}
-        Ok(s) => return ExitCode::from(s.code().unwrap_or(1) as u8),
-        Err(e) => {
-            eprintln!("failed to invoke cargo: {e}");
-            return ExitCode::FAILURE;
-        }
-    }
-
-    let exe = root
-        .join(if release {
-            "target/release"
-        } else {
-            "target/debug"
-        })
-        .join(format!("opal{}", std::env::consts::EXE_SUFFIX));
+    let exe = match build_app(&root, release, &["--features", "automation"]) {
+        Ok(exe) => exe,
+        Err(code) => return code,
+    };
     match Command::new(exe)
         .args(["--config", &config])
         .current_dir(&root)
         .status()
     {
         Ok(s) if s.success() => ExitCode::SUCCESS,
-        Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
+        Ok(s) => exit_code(s),
         Err(e) => {
             eprintln!("failed to launch opal: {e}");
             ExitCode::FAILURE

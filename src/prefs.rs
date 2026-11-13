@@ -350,8 +350,9 @@ impl UserPreferences {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::other(format!("serialize: {e}")))?;
-        fs::write(&path, json)?;
-        Ok(())
+        // Atomic: a crash mid-save must leave the previous prefs readable,
+        // not a truncated file that loads back as defaults.
+        crate::disk_cache::write_atomic(&path, json.as_bytes())
     }
 }
 

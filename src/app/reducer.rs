@@ -656,7 +656,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
                         // Canvas (if any) resolves.
                         state.canvas.stop_decode();
                         if state.canvas.show.get() {
-                            worker.fetch_canvas(p.track_id.clone(), id.to_string());
+                            state.canvas.request(worker, &p.track_id);
                         }
                     }
                 }
@@ -868,6 +868,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             cx.rebuild();
         }
         WorkerResponse::CanvasReady { track_id, path } => {
+            state.canvas.settle(&track_id);
             // Ignore a canvas that no longer matches the current track —
             // e.g. a cold-start canvas (for the last-played track) arriving
             // after a *different* live track has already started. With no
@@ -892,6 +893,7 @@ pub fn handle(state: &mut AppState, cx: &mut Cx, worker: &Rc<Worker>, resp: Work
             }
         }
         WorkerResponse::CanvasNone { track_id } => {
+            state.canvas.settle(&track_id);
             log::debug!("no canvas for {track_id} — album art fallback");
             if state.canvas.path_matches(&track_id) {
                 state.canvas.clear_path();
