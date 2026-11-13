@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::NSString;
 
@@ -39,11 +39,18 @@ pub fn locate() -> Option<PathBuf> {
 /// The live client, if any. A fresh object each call — `NSRunningApplication`
 /// snapshots its time-varying properties, so re-fetching is how a poll sees
 /// a state change.
+///
+/// Runs in its own autorelease pool: the callers are pooled worker threads
+/// with no run loop, so anything AppKit autoreleases here would otherwise
+/// sit in the thread's pool until the thread exits — and the window
+/// watchdog asks every few seconds for as long as the engine is up.
 fn client() -> Option<Retained<NSRunningApplication>> {
-    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
-        BUNDLE_ID,
-    ));
-    apps.to_vec().into_iter().find(|a| !a.isTerminated())
+    autoreleasepool(|_| {
+        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &NSString::from_str(BUNDLE_ID),
+        );
+        apps.to_vec().into_iter().find(|a| !a.isTerminated())
+    })
 }
 
 /// Bring the engine up, whatever state it's in, and put it in the state
